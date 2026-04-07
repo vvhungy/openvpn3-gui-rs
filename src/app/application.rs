@@ -41,7 +41,12 @@ impl Application {
 
         if args.clear_secret_storage {
             info!("Clearing secret storage");
-            // TODO: Implement credential clearing
+            let rt = tokio::runtime::Handle::current();
+            match rt.block_on(credentials.clear_all_async()) {
+                Ok(0) => info!("No saved credentials found"),
+                Ok(n) => info!("Cleared {} saved credential(s)", n),
+                Err(e) => error!("Failed to clear credentials: {}", e),
+            }
         }
 
         // Create D-Bus system connection (for OpenVPN3)

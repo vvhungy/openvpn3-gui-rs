@@ -100,6 +100,29 @@ impl CredentialStore {
         Ok(())
     }
 
+    /// Delete all credentials stored by this application
+    pub async fn clear_all_async(&self) -> Result<usize> {
+        use oo7::Keyring;
+        use std::collections::HashMap;
+
+        let keyring = Keyring::new().await.context("Failed to open keyring")?;
+
+        let mut attributes = HashMap::new();
+        attributes.insert("application", APP_ID);
+
+        let items = keyring
+            .search_items(&attributes)
+            .await
+            .context("Failed to search for credentials")?;
+
+        let count = items.len();
+        for item in items {
+            item.delete().await.context("Failed to delete credential")?;
+        }
+
+        Ok(count)
+    }
+
     /// Delete a credential asynchronously
     pub async fn delete_async(&self, config_id: &str, key: &str) -> Result<()> {
         use oo7::Keyring;
