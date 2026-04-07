@@ -51,17 +51,18 @@ impl SessionInfo {
     fn tooltip_line(&self) -> String {
         let desc = get_status_description(self.status.major, self.status.minor);
         if self.status.is_connected()
-            && let Some(at) = self.connected_at {
-                let secs = at.elapsed().as_secs();
-                let duration = if secs < 60 {
-                    format!("{}s", secs)
-                } else if secs < 3600 {
-                    format!("{}m {}s", secs / 60, secs % 60)
-                } else {
-                    format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-                };
-                return format!("{} — {} ({})", self.config_name, desc, duration);
-            }
+            && let Some(at) = self.connected_at
+        {
+            let secs = at.elapsed().as_secs();
+            let duration = if secs < 60 {
+                format!("{}s", secs)
+            } else if secs < 3600 {
+                format!("{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+            };
+            return format!("{} — {} ({})", self.config_name, desc, duration);
+        }
         format!("{} — {}", self.config_name, desc)
     }
 }

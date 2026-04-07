@@ -408,9 +408,9 @@ pub(crate) async fn setup_signal_handlers(
                     if status.is_connected()
                         && let Ok(mut attempts) =
                             super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
-                        {
-                            attempts.remove(&path);
-                        }
+                    {
+                        attempts.remove(&path);
+                    }
 
                     // Get previous status and config name before updating
                     let message_owned = message.to_string();

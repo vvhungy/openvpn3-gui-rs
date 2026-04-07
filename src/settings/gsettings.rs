@@ -57,9 +57,10 @@ impl Settings {
     /// Set the startup action
     pub fn set_startup_action(&self, action: &str) {
         if let Some(settings) = &self.settings
-            && let Err(e) = settings.set_string("startup-action", action) {
-                error!("Failed to set startup-action: {}", e);
-            }
+            && let Err(e) = settings.set_string("startup-action", action)
+        {
+            error!("Failed to set startup-action: {}", e);
+        }
     }
 
     /// Get the most recent configuration ID
@@ -73,9 +74,10 @@ impl Settings {
     /// Set the most recent configuration ID
     pub fn set_most_recent_config_id(&self, id: &str) {
         if let Some(settings) = &self.settings
-            && let Err(e) = settings.set_string("most-recent-config-id", id) {
-                error!("Failed to set most-recent-config-id: {}", e);
-            }
+            && let Err(e) = settings.set_string("most-recent-config-id", id)
+        {
+            error!("Failed to set most-recent-config-id: {}", e);
+        }
     }
 
     /// Get the most recent configuration name
@@ -89,9 +91,10 @@ impl Settings {
     /// Set the most recent configuration name
     pub fn set_most_recent_config_name(&self, name: &str) {
         if let Some(settings) = &self.settings
-            && let Err(e) = settings.set_string("most-recent-config-name", name) {
-                error!("Failed to set most-recent-config-name: {}", e);
-            }
+            && let Err(e) = settings.set_string("most-recent-config-name", name)
+        {
+            error!("Failed to set most-recent-config-name: {}", e);
+        }
     }
 
     /// Get the most recent configuration ID and name as a tuple
@@ -121,9 +124,10 @@ impl Settings {
     /// Set specific config path
     pub fn set_specific_config_path(&self, path: &str) {
         if let Some(settings) = &self.settings
-            && let Err(e) = settings.set_string("specific-config-path", path) {
-                error!("Failed to set specific-config-path: {}", e);
-            }
+            && let Err(e) = settings.set_string("specific-config-path", path)
+        {
+            error!("Failed to set specific-config-path: {}", e);
+        }
     }
 
     /// Check if notifications are enabled
@@ -137,9 +141,10 @@ impl Settings {
     /// Set whether notifications are enabled
     pub fn set_show_notifications(&self, enabled: bool) {
         if let Some(settings) = &self.settings
-            && let Err(e) = settings.set_boolean("show-notifications", enabled) {
-                error!("Failed to set show-notifications: {}", e);
-            }
+            && let Err(e) = settings.set_boolean("show-notifications", enabled)
+        {
+            error!("Failed to set show-notifications: {}", e);
+        }
     }
 
     /// Check if should restore on startup

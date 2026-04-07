@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Pre-commit hook: enforce fmt, clippy, and tests before every commit.
+
+set -euo pipefail
+
+echo "==> cargo fmt --check"
+cargo fmt --check || { echo "FAIL: run 'cargo fmt' to fix formatting"; exit 1; }
+
+echo "==> cargo clippy"
+cargo clippy --all-targets -- -D warnings || { echo "FAIL: fix clippy errors before committing"; exit 1; }
+
+echo "==> cargo test"
+cargo test || { echo "FAIL: fix failing tests before committing"; exit 1; }
+
+echo "==> All checks passed."

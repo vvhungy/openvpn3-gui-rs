@@ -8,7 +8,7 @@ ICON_DIR = $(PREFIX)/share/icons/hicolor
 DESKTOP_DIR = $(PREFIX)/share/applications
 METAINFO_DIR = $(PREFIX)/share/metainfo
 
-.PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug
+.PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug setup-hooks check
 
 all:
 	cargo build --release
@@ -89,6 +89,20 @@ lint:
 
 debug:
 	RUST_LOG=debug cargo run
+
+# Install git hooks (run once after cloning)
+setup-hooks:
+	cp .git/hooks/pre-commit .git/hooks/pre-commit.bak 2>/dev/null || true
+	install -m 755 scripts/pre-commit .git/hooks/pre-commit
+	@echo "Git hooks installed."
+
+# Run full local check suite (same as CI)
+check:
+	cargo fmt --check
+	cargo clippy --all-targets -- -D warnings
+	cargo test
+	bash tests/smoke_test.sh
+	@echo "All checks passed."
 
 # Install for testing (user-local, no sudo)
 install-local: all

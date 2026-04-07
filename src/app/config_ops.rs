@@ -29,12 +29,13 @@ pub(crate) async fn refresh_configs(
                         }
                     };
                     if let Ok(config) = builder.build().await
-                        && let Ok(name) = config.name().await {
-                            configs.push(ConfigInfo {
-                                path: path.as_str().to_string(),
-                                name,
-                            });
-                        }
+                        && let Ok(name) = config.name().await
+                    {
+                        configs.push(ConfigInfo {
+                            path: path.as_str().to_string(),
+                            name,
+                        });
+                    }
                 }
                 tray.update(move |t| {
                     t.configs = configs;

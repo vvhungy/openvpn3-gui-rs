@@ -36,10 +36,11 @@ where
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept
             && let Some(file) = dialog.file()
-                && let Some(path) = file.path() {
-                    info!("Selected file: {:?}", path);
-                    on_select(path);
-                }
+            && let Some(path) = file.path()
+        {
+            info!("Selected file: {:?}", path);
+            on_select(path);
+        }
         dialog.close();
     });
 
