@@ -1,0 +1,53 @@
+# Maintainer: HungVV <vvhung@yahoo.com>
+pkgname=openvpn3-gui-rs
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="System tray indicator for OpenVPN3 VPN tunnels, written in Rust with GTK4"
+arch=('x86_64' 'aarch64')
+url="https://github.com/vvhungy/openvpn3-gui-rs"
+license=('GPL-3.0-or-later')
+depends=('gtk4' 'glib2' 'libsecret' 'dbus')
+makedepends=('rust' 'cargo')
+optdepends=('openvpn3: VPN backend')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    cargo build --release --locked
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    # Binary
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+
+    # Desktop entry
+    install -Dm644 "data/net.openvpn.openvpn3_gui_rs.desktop" \
+        "$pkgdir/usr/share/applications/net.openvpn.openvpn3_gui_rs.desktop"
+
+    # GSettings schema
+    install -Dm644 "data/net.openvpn.openvpn3_gui_rs.gschema.xml" \
+        "$pkgdir/usr/share/glib-2.0/schemas/net.openvpn.openvpn3_gui_rs.gschema.xml"
+
+    # AppStream metainfo
+    install -Dm644 "data/net.openvpn.openvpn3_gui_rs.metainfo.xml" \
+        "$pkgdir/usr/share/metainfo/net.openvpn.openvpn3_gui_rs.metainfo.xml"
+
+    # App icon
+    install -Dm644 "data/icons/hicolor/scalable/apps/$pkgname.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/$pkgname.svg"
+
+    # Status icons
+    for icon in data/icons/hicolor/scalable/status/*.svg; do
+        install -Dm644 "$icon" \
+            "$pkgdir/usr/share/icons/hicolor/scalable/status/$(basename $icon)"
+    done
+
+    # Mimetype icons
+    install -Dm644 "data/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg"
+    install -Dm644 "data/icons/Yaru/scalable/mimetypes/application-x-openvpn-profile.svg" \
+        "$pkgdir/usr/share/icons/Yaru/scalable/mimetypes/application-x-openvpn-profile.svg"
+}
