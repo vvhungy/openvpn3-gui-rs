@@ -2,7 +2,7 @@
 
 1. ~~**Implement credential clearing**~~ ✅ (clear_all_async() added to CredentialStore; ClearCredentials tray action wired; --clear-secret-storage flag TODO resolved)
 2. ~~**Connection error handling**~~ ✅ (is_error() moved to production; catch-all for CfgError/ProcStopped/ProcKilled added; startup auto-connect failure now notifies)
-3. **Reconnect on connection drop** — When a session is destroyed unexpectedly (not user-initiated), show a tray notification with a "Reconnect" action button.
+3. ~~**Reconnect on connection drop**~~ ✅ (USER_DISCONNECTED set tracks user-initiated drops; unexpected SessDestroyed shows Notify with Reconnect action; ActionInvoked dispatches TrayAction::Connect)
 
 ---
 
