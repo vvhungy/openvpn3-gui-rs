@@ -201,6 +201,10 @@ async fn handle_startup_connect(
             if let Err(e) = super::session_ops::connect_to_config(dbus, &path, tray, settings).await
             {
                 error!("Startup auto-connect failed: {}", e);
+                crate::dialogs::show_error_notification(
+                    "Connection Failed",
+                    &format!("Could not connect to '{}': {}", name, e),
+                );
             }
         }
         _ => {} // "none" or unknown — do nothing
@@ -398,6 +402,37 @@ pub(crate) async fn setup_signal_handlers(
                                     "Connection failed for '{}'. Please try again.",
                                     config_name
                                 ),
+                            )
+                            .await;
+                        });
+                        continue;
+                    }
+
+                    // Handle other error states (config errors, process errors)
+                    if status.is_error() {
+                        warn!(
+                            "Session error for {}: major={}, minor={}",
+                            path, major, minor
+                        );
+                        let session_path = path.clone();
+                        let dbus_conn = conn.clone();
+                        let config_name = tray_for_status
+                            .update(|t| {
+                                t.sessions.get(&session_path).map(|s| s.config_name.clone())
+                            })
+                            .flatten()
+                            .unwrap_or_else(|| "VPN Connection".to_string());
+                        let body = if message.is_empty() {
+                            format!("VPN error for '{}'.", config_name)
+                        } else {
+                            format!("VPN error for '{}': {}", config_name, message)
+                        };
+                        glib::spawn_future_local(async move {
+                            super::session_ops::disconnect_with_message(
+                                &dbus_conn,
+                                &session_path,
+                                "VPN Error",
+                                &body,
                             )
                             .await;
                         });

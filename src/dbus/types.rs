@@ -228,21 +228,6 @@ impl SessionStatus {
     pub fn needs_challenge(&self) -> bool {
         self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthChallenge
     }
-}
-
-#[cfg(test)]
-impl SessionStatus {
-    pub fn is_connecting(&self) -> bool {
-        self.major == StatusMajor::Connection
-            && matches!(
-                self.minor,
-                StatusMinor::ConnInit | StatusMinor::ConnConnecting | StatusMinor::ConnReconnecting
-            )
-    }
-
-    pub fn is_paused(&self) -> bool {
-        self.major == StatusMajor::Connection && self.minor == StatusMinor::ConnPaused
-    }
 
     pub fn is_error(&self) -> bool {
         self.major == StatusMajor::CfgError
@@ -259,6 +244,21 @@ impl SessionStatus {
                     self.minor,
                     StatusMinor::ProcStopped | StatusMinor::ProcKilled
                 ))
+    }
+}
+
+#[cfg(test)]
+impl SessionStatus {
+    pub fn is_connecting(&self) -> bool {
+        self.major == StatusMajor::Connection
+            && matches!(
+                self.minor,
+                StatusMinor::ConnInit | StatusMinor::ConnConnecting | StatusMinor::ConnReconnecting
+            )
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.major == StatusMajor::Connection && self.minor == StatusMinor::ConnPaused
     }
 
     pub fn needs_url_auth(&self) -> bool {
