@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=OpenVPN3 GUI
+Comment=A Rust OpenVPN3 GUI for Linux
+Exec=openvpn3-gui-rs
+Icon=openvpn3-gui-rs-idle
+Terminal=false
+Type=Application
+Categories=Network;VPN;Security;
+Keywords=vpn;openvpn;network;security;tray;indicator;rust;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-UsesNotifications=true
+X-KDE-autostart-phase=2
+MimeType=application/x-openvpn-profile;

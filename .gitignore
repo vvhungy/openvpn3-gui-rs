@@ -1,0 +1,25 @@
+# Build output
+/target/
+
+# Compiled GSettings schemas
+data/gschemas.compiled
+
+# Environment / editor
+.env
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Internal planning and session files
+CLAUDE.md
+tasks.md
+plan.md
+plan-2.md
+plan-3.md
+features.md
+tray-menu.png

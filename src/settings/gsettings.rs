@@ -1,0 +1,235 @@
+//! GSettings integration
+//!
+//! Provides type-safe access to application settings stored in GSettings.
+
+use gio::Settings as GioSettings;
+use gio::prelude::*;
+use tracing::{error, warn};
+
+/// Schema ID for the application settings
+const SCHEMA_ID: &str = "net.openvpn.openvpn3-gui-rs";
+
+/// Application settings wrapper
+#[derive(Clone)]
+pub struct Settings {
+    settings: Option<GioSettings>,
+}
+
+#[allow(dead_code)] // Several methods are the API surface for the upcoming preferences dialog
+impl Settings {
+    /// Create a new Settings instance
+    pub fn new() -> Self {
+        // Check if schema is available before creating settings
+        let settings = Self::try_new_settings();
+        if settings.is_none() {
+            warn!(
+                "GSettings schema '{}' not found — settings will not be persisted.",
+                SCHEMA_ID
+            );
+        }
+        Self { settings }
+    }
+
+    /// Try to create a Settings instance, returns None if schema not found
+    fn try_new_settings() -> Option<GioSettings> {
+        // Check if the schema is available
+        let schema_source = gio::SettingsSchemaSource::default()?;
+        let _schema = schema_source.lookup(SCHEMA_ID, true)?;
+        Some(GioSettings::new(SCHEMA_ID))
+    }
+
+    /// Create Settings with a specific GioSettings instance (for testing)
+    #[cfg(test)]
+    pub fn new_with_settings(settings: GioSettings) -> Self {
+        Self {
+            settings: Some(settings),
+        }
+    }
+
+    /// Get the startup action
+    pub fn startup_action(&self) -> String {
+        self.settings
+            .as_ref()
+            .map(|s| s.string("startup-action").to_string())
+            .unwrap_or_default()
+    }
+
+    /// Set the startup action
+    pub fn set_startup_action(&self, action: &str) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_string("startup-action", action) {
+                error!("Failed to set startup-action: {}", e);
+            }
+    }
+
+    /// Get the most recent configuration ID
+    pub fn most_recent_config_id(&self) -> String {
+        self.settings
+            .as_ref()
+            .map(|s| s.string("most-recent-config-id").to_string())
+            .unwrap_or_default()
+    }
+
+    /// Set the most recent configuration ID
+    pub fn set_most_recent_config_id(&self, id: &str) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_string("most-recent-config-id", id) {
+                error!("Failed to set most-recent-config-id: {}", e);
+            }
+    }
+
+    /// Get the most recent configuration name
+    pub fn most_recent_config_name(&self) -> String {
+        self.settings
+            .as_ref()
+            .map(|s| s.string("most-recent-config-name").to_string())
+            .unwrap_or_default()
+    }
+
+    /// Set the most recent configuration name
+    pub fn set_most_recent_config_name(&self, name: &str) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_string("most-recent-config-name", name) {
+                error!("Failed to set most-recent-config-name: {}", e);
+            }
+    }
+
+    /// Get the most recent configuration ID and name as a tuple
+    pub fn get_most_recent_config(&self) -> (String, String) {
+        (self.most_recent_config_id(), self.most_recent_config_name())
+    }
+
+    /// Set the most recent configuration
+    pub fn set_most_recent_config(&self, id: &str, name: &str) {
+        self.set_most_recent_config_id(id);
+        self.set_most_recent_config_name(name);
+    }
+
+    /// Set the most recent config (alias for compatibility)
+    pub fn set_most_recent_config_path(&self, path: &str, name: &str) {
+        self.set_most_recent_config(path, name);
+    }
+
+    /// Get specific config path
+    pub fn specific_config_path(&self) -> String {
+        self.settings
+            .as_ref()
+            .map(|s| s.string("specific-config-path").to_string())
+            .unwrap_or_default()
+    }
+
+    /// Set specific config path
+    pub fn set_specific_config_path(&self, path: &str) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_string("specific-config-path", path) {
+                error!("Failed to set specific-config-path: {}", e);
+            }
+    }
+
+    /// Check if notifications are enabled
+    pub fn show_notifications(&self) -> bool {
+        self.settings
+            .as_ref()
+            .map(|s| s.boolean("show-notifications"))
+            .unwrap_or(true)
+    }
+
+    /// Set whether notifications are enabled
+    pub fn set_show_notifications(&self, enabled: bool) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_boolean("show-notifications", enabled) {
+                error!("Failed to set show-notifications: {}", e);
+            }
+    }
+
+    /// Check if should restore on startup
+    pub fn should_restore_on_startup(&self) -> bool {
+        self.startup_action() == "restore"
+    }
+
+    /// Check if should connect to most recent on startup
+    pub fn should_connect_recent_on_startup(&self) -> bool {
+        self.startup_action() == "connect-recent"
+    }
+
+    /// Check if should connect to specific config on startup
+    pub fn should_connect_specific_on_startup(&self) -> bool {
+        self.startup_action() == "connect-specific"
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+impl Settings {
+    /// Construct a Settings with no backing schema (for unit tests).
+    fn new_empty() -> Self {
+        Self { settings: None }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Fallback behaviour when GSettings schema is absent ---
+
+    #[test]
+    fn test_startup_action_default() {
+        assert_eq!(Settings::new_empty().startup_action(), "");
+    }
+
+    #[test]
+    fn test_show_notifications_default() {
+        assert!(Settings::new_empty().show_notifications());
+    }
+
+    #[test]
+    fn test_most_recent_config_default() {
+        let s = Settings::new_empty();
+        assert_eq!(s.get_most_recent_config(), ("".into(), "".into()));
+    }
+
+    #[test]
+    fn test_specific_config_path_default() {
+        assert_eq!(Settings::new_empty().specific_config_path(), "");
+    }
+
+    // --- Predicate logic ---
+
+    #[test]
+    fn test_should_restore_on_startup_false_when_no_schema() {
+        assert!(!Settings::new_empty().should_restore_on_startup());
+    }
+
+    #[test]
+    fn test_should_connect_recent_on_startup_false_when_no_schema() {
+        assert!(!Settings::new_empty().should_connect_recent_on_startup());
+    }
+
+    #[test]
+    fn test_should_connect_specific_on_startup_false_when_no_schema() {
+        assert!(!Settings::new_empty().should_connect_specific_on_startup());
+    }
+
+    // --- Setters do not panic when schema is absent ---
+
+    #[test]
+    fn test_set_startup_action_no_panic() {
+        Settings::new_empty().set_startup_action("restore");
+    }
+
+    #[test]
+    fn test_set_most_recent_config_no_panic() {
+        Settings::new_empty().set_most_recent_config("/some/path", "My VPN");
+    }
+
+    #[test]
+    fn test_set_show_notifications_no_panic() {
+        Settings::new_empty().set_show_notifications(false);
+    }
+}

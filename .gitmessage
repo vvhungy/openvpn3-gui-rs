@@ -1,0 +1,12 @@
+# <type>: <short summary> (max 72 chars)
+#
+# Types: feat | fix | refactor | test | chore | docs
+#
+# Body (optional): what changed and why, not how
+#
+# Examples:
+#   feat: add challenge/OTP dialog for SessAuthChallenge
+#   fix: wire CacheProperties::No on manager proxies
+#   refactor: split application.rs into focused modules
+#   test: add unit tests for settings fallback behavior
+#   chore: add GitHub CI/CD workflows

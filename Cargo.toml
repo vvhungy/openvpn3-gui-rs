@@ -1,0 +1,132 @@
+[package]
+name = "openvpn3-gui-rs"
+version = "0.2.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["HungVV <vvhung@yahoo.com>"]
+description = "A Rust OpenVPN3 GUI for Linux"
+repository = "https://github.com/vvhungy/openvpn3-gui-rs"
+keywords = ["openvpn", "vpn", "indicator", "tray", "gtk"]
+categories = ["gui", "network-programming"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# GTK4
+gtk4 = "0.9"
+glib = "0.20"
+gio = "0.20"
+
+# D-Bus
+zbus = { version = "5", features = ["tokio"] }
+
+# System tray (SNI + dbusmenu)
+ksni = { version = "0.3", features = ["blocking"] }
+
+# Secret storage (oo7 is the modern Rust secret-service crate)
+oo7 = "0.4"
+
+# GSettings
+gsettings-macro = "0.2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Command-line parsing
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+
+# Async utilities
+futures = "0.3"
+
+[build-dependencies]
+glib-build-tools = "0.20"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"
+
+# ─── DEB packaging (cargo-deb) ───────────────────────────────────────────────
+[package.metadata.deb]
+maintainer = "HungVV <vvhung@yahoo.com>"
+copyright = "2026, HungVV"
+license-file = ["LICENSE", "0"]
+depends = "$auto, libgtk-4-1, libglib2.0-0, libsecret-1-0"
+recommends = "openvpn3"
+section = "net"
+priority = "optional"
+maintainer-scripts = "pkg/deb/"
+assets = [
+  ["target/release/openvpn3-gui-rs", "usr/bin/", "755"],
+  ["data/net.openvpn.openvpn3_gui_rs.desktop", "usr/share/applications/", "644"],
+  ["data/net.openvpn.openvpn3_gui_rs.gschema.xml", "usr/share/glib-2.0/schemas/", "644"],
+  ["data/net.openvpn.openvpn3_gui_rs.metainfo.xml", "usr/share/metainfo/", "644"],
+  ["data/icons/hicolor/scalable/apps/openvpn3-gui-rs.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+  ["data/icons/hicolor/scalable/status/openvpn3-gui-rs-active.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["data/icons/hicolor/scalable/status/openvpn3-gui-rs-active-error.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["data/icons/hicolor/scalable/status/openvpn3-gui-rs-configuring.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle-error.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["data/icons/hicolor/scalable/status/openvpn3-gui-rs-loading.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["data/icons/hicolor/scalable/status/openvpn3-gui-rs-paused.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["data/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg", "usr/share/icons/hicolor/scalable/mimetypes/", "644"],
+  ["data/icons/Yaru/scalable/mimetypes/application-x-openvpn-profile.svg", "usr/share/icons/Yaru/scalable/mimetypes/", "644"],
+]
+
+# ─── RPM packaging (cargo-generate-rpm) ──────────────────────────────────────
+[package.metadata.generate-rpm]
+summary = "System tray indicator for OpenVPN3 VPN tunnels"
+license = "GPL-3.0-or-later"
+requires = { gtk4 = "*", glib2 = "*", libsecret = "*" }
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/openvpn3-gui-rs"
+dest = "/usr/bin/openvpn3-gui-rs"
+mode = "755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "data/net.openvpn.openvpn3_gui_rs.desktop"
+dest = "/usr/share/applications/net.openvpn.openvpn3_gui_rs.desktop"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "data/net.openvpn.openvpn3_gui_rs.gschema.xml"
+dest = "/usr/share/glib-2.0/schemas/net.openvpn.openvpn3_gui_rs.gschema.xml"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "data/net.openvpn.openvpn3_gui_rs.metainfo.xml"
+dest = "/usr/share/metainfo/net.openvpn.openvpn3_gui_rs.metainfo.xml"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "data/icons/hicolor/scalable/apps/openvpn3-gui-rs.svg"
+dest = "/usr/share/icons/hicolor/scalable/apps/openvpn3-gui-rs.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "data/icons/hicolor/scalable/status/"
+dest = "/usr/share/icons/hicolor/scalable/status/"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "data/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg"
+dest = "/usr/share/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "data/icons/Yaru/scalable/mimetypes/application-x-openvpn-profile.svg"
+dest = "/usr/share/icons/Yaru/scalable/mimetypes/application-x-openvpn-profile.svg"
+mode = "644"

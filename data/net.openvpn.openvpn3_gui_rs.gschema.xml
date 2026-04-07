@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="net.openvpn.openvpn3-gui-rs" path="/net/openvpn/openvpn3-gui-rs/">
+    <key name="startup-action" type="s">
+      <default>'nothing'</default>
+      <summary>Startup action</summary>
+      <description>
+        What to do when the application starts.
+        Possible values: 'nothing', 'restore', 'connect-recent', 'connect-specific'.
+      </description>
+    </key>
+
+    <key name="most-recent-config-id" type="s">
+      <default>''</default>
+      <summary>Most recent configuration ID</summary>
+      <description>
+        The D-Bus object path of the most recently used VPN configuration.
+      </description>
+    </key>
+
+    <key name="most-recent-config-name" type="s">
+      <default>''</default>
+      <summary>Most recent configuration name</summary>
+      <description>
+        The display name of the most recently used VPN configuration.
+      </description>
+    </key>
+
+    <key name="specific-config-path" type="s">
+      <default>''</default>
+      <summary>Specific configuration path</summary>
+      <description>
+        The D-Bus object path of the configuration to connect to on startup
+        when startup-action is 'connect-specific'.
+      </description>
+    </key>
+
+    <key name="show-notifications" type="b">
+      <default>true</default>
+      <summary>Show desktop notifications</summary>
+      <description>
+        Whether to show desktop notifications for VPN status changes.
+      </description>
+    </key>
+  </schema>
+</schemalist>
