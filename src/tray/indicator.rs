@@ -23,6 +23,7 @@ pub enum TrayAction {
     About,
     Quit,
     SetStartupAction(String), // "none", "connect-recent", "connect-specific"
+    ClearCredentials,
 }
 
 /// A known VPN configuration
@@ -383,6 +384,18 @@ impl ksni::Tray for VpnTray {
                     }
                     .into(),
                 ],
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // --- Clear Credentials ---
+        items.push(
+            StandardItem {
+                label: "Clear Saved Credentials".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    tray.send_action(TrayAction::ClearCredentials);
+                }),
                 ..Default::default()
             }
             .into(),
