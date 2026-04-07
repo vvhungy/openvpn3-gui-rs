@@ -56,6 +56,9 @@ impl Application {
         // Create the action channel (tray callbacks → GTK main loop)
         let (action_tx, action_rx) = futures::channel::mpsc::unbounded::<TrayAction>();
 
+        // Keep a sender clone for signal handlers (reconnect notifications etc.)
+        let action_tx_for_signals = action_tx.clone();
+
         // Spawn the ksni tray using the blocking API (spawns its own thread)
         let tray_handle = {
             use ksni::blocking::TrayMethods;
@@ -96,6 +99,7 @@ impl Application {
             let dbus = dbus_conn.clone();
             let settings = settings_clone.clone();
             let tray = tray_handle_clone.clone();
+            let action_tx = action_tx_for_signals.clone();
             glib::spawn_future_local(async move {
                 // Retry init up to 10 times (max ~30s) to handle slow service activation
                 let mut initialized = false;
@@ -119,7 +123,7 @@ impl Application {
                     error!("Failed to connect to OpenVPN3 D-Bus service after 10 attempts");
                 }
 
-                match setup_signal_handlers(&dbus, tray.clone()).await {
+                match setup_signal_handlers(&dbus, tray.clone(), action_tx).await {
                     Ok(_) => info!("Signal handlers setup complete"),
                     Err(e) => error!("Failed to setup signal handlers: {}", e),
                 }

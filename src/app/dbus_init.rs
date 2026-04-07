@@ -215,6 +215,7 @@ async fn handle_startup_connect(
 pub(crate) async fn setup_signal_handlers(
     dbus: &zbus::Connection,
     tray: ksni::blocking::Handle<VpnTray>,
+    action_tx: crate::tray::ActionSender,
 ) -> anyhow::Result<()> {
     let session_manager = SessionManagerProxy::builder(dbus)
         .cache_properties(CacheProperties::No)
@@ -224,6 +225,7 @@ pub(crate) async fn setup_signal_handlers(
     // --- SessionManagerEvent (session created / destroyed) ---
     let mut session_events = session_manager.receive_SessionManagerEvent().await?;
     let tray_for_session = tray.clone();
+    let action_tx_for_session = action_tx.clone();
     glib::spawn_future_local(async move {
         while let Some(signal) = session_events.next().await {
             match signal.args() {
@@ -236,11 +238,43 @@ pub(crate) async fn setup_signal_handlers(
                     );
 
                     if event_type == SessionManagerEventType::SessDestroyed as u16 {
-                        // Session destroyed
+                        // Capture config info before removing from tray
+                        let session_info = tray_for_session
+                            .update(|t| {
+                                t.sessions
+                                    .get(&session_path)
+                                    .map(|s| (s.config_path.clone(), s.config_name.clone()))
+                            })
+                            .flatten();
+
+                        let sp = session_path.clone();
                         tray_for_session.update(move |t| {
-                            t.sessions.remove(&session_path);
+                            t.sessions.remove(&sp);
                         });
                         info!("Session removed from tray");
+
+                        // Check whether the user initiated this disconnect
+                        let user_initiated =
+                            if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
+                                set.remove(&session_path)
+                            } else {
+                                false
+                            };
+
+                        if !user_initiated
+                            && let Some((config_path, config_name)) = session_info
+                            && !config_path.is_empty()
+                        {
+                            info!(
+                                "Unexpected session drop for '{}', showing reconnect notification",
+                                config_name
+                            );
+                            crate::dialogs::show_reconnect_notification(
+                                config_path,
+                                config_name,
+                                action_tx_for_session.clone(),
+                            );
+                        }
                     }
                 }
                 Err(e) => warn!("Failed to parse SessionManagerEvent: {}", e),

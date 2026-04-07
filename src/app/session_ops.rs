@@ -1,6 +1,12 @@
 //! Session D-Bus operations
 
+use std::collections::HashSet;
+
 use tracing::{debug, error, info, warn};
+
+/// Session paths the user explicitly disconnected (not unexpected drops)
+pub(crate) static USER_DISCONNECTED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::OwnedObjectPath;
 

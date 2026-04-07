@@ -39,6 +39,10 @@ pub(crate) fn handle_tray_action(
         }
         TrayAction::Disconnect(session_path) => {
             info!("Tray action: Disconnect {}", session_path);
+            // Mark as user-initiated so the SessDestroyed handler skips the reconnect prompt
+            if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
+                set.insert(session_path.clone());
+            }
             let dbus = dbus.clone();
             let session_path = session_path.clone();
             glib::spawn_future_local(async move {
