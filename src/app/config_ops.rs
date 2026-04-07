@@ -1,6 +1,6 @@
 //! Configuration D-Bus operations
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::OwnedObjectPath;
 
@@ -21,12 +21,14 @@ pub(crate) async fn refresh_configs(
             if let Ok(paths) = config_manager.FetchAvailableConfigs().await {
                 let mut configs = Vec::new();
                 for path in &paths {
-                    if let Ok(config) = ConfigurationProxy::builder(dbus)
-                        .path(path.clone())
-                        .unwrap()
-                        .build()
-                        .await
-                    {
+                    let builder = match ConfigurationProxy::builder(dbus).path(path.clone()) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("Invalid config path {}: {}", path, e);
+                            continue;
+                        }
+                    };
+                    if let Ok(config) = builder.build().await {
                         if let Ok(name) = config.name().await {
                             configs.push(ConfigInfo {
                                 path: path.as_str().to_string(),

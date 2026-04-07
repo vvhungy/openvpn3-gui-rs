@@ -4,6 +4,7 @@
 
 use gio::Settings as GioSettings;
 use gio::prelude::*;
+use tracing::{error, warn};
 
 /// Schema ID for the application settings
 const SCHEMA_ID: &str = "net.openvpn.openvpn3-gui-rs";
@@ -14,13 +15,14 @@ pub struct Settings {
     settings: Option<GioSettings>,
 }
 
+#[allow(dead_code)] // Several methods are the API surface for the upcoming preferences dialog
 impl Settings {
     /// Create a new Settings instance
     pub fn new() -> Self {
         // Check if schema is available before creating settings
         let settings = Self::try_new_settings();
         if settings.is_none() {
-            eprintln!("Warning: GSettings schema '{}' not found. Settings will not be persisted.", SCHEMA_ID);
+            warn!("GSettings schema '{}' not found — settings will not be persisted.", SCHEMA_ID);
         }
         Self { settings }
     }
@@ -34,6 +36,7 @@ impl Settings {
     }
 
     /// Create Settings with a specific GioSettings instance (for testing)
+    #[cfg(test)]
     pub fn new_with_settings(settings: GioSettings) -> Self {
         Self { settings: Some(settings) }
     }
@@ -50,7 +53,7 @@ impl Settings {
     pub fn set_startup_action(&self, action: &str) {
         if let Some(settings) = &self.settings {
             if let Err(e) = settings.set_string("startup-action", action) {
-                eprintln!("Failed to set startup-action: {}", e);
+                error!("Failed to set startup-action: {}", e);
             }
         }
     }
@@ -67,7 +70,7 @@ impl Settings {
     pub fn set_most_recent_config_id(&self, id: &str) {
         if let Some(settings) = &self.settings {
             if let Err(e) = settings.set_string("most-recent-config-id", id) {
-                eprintln!("Failed to set most-recent-config-id: {}", e);
+                error!("Failed to set most-recent-config-id: {}", e);
             }
         }
     }
@@ -84,7 +87,7 @@ impl Settings {
     pub fn set_most_recent_config_name(&self, name: &str) {
         if let Some(settings) = &self.settings {
             if let Err(e) = settings.set_string("most-recent-config-name", name) {
-                eprintln!("Failed to set most-recent-config-name: {}", e);
+                error!("Failed to set most-recent-config-name: {}", e);
             }
         }
     }
@@ -117,7 +120,7 @@ impl Settings {
     pub fn set_specific_config_path(&self, path: &str) {
         if let Some(settings) = &self.settings {
             if let Err(e) = settings.set_string("specific-config-path", path) {
-                eprintln!("Failed to set specific-config-path: {}", e);
+                error!("Failed to set specific-config-path: {}", e);
             }
         }
     }
@@ -134,7 +137,7 @@ impl Settings {
     pub fn set_show_notifications(&self, enabled: bool) {
         if let Some(settings) = &self.settings {
             if let Err(e) = settings.set_boolean("show-notifications", enabled) {
-                eprintln!("Failed to set show-notifications: {}", e);
+                error!("Failed to set show-notifications: {}", e);
             }
         }
     }
@@ -158,5 +161,75 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+impl Settings {
+    /// Construct a Settings with no backing schema (for unit tests).
+    fn new_empty() -> Self {
+        Self { settings: None }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Fallback behaviour when GSettings schema is absent ---
+
+    #[test]
+    fn test_startup_action_default() {
+        assert_eq!(Settings::new_empty().startup_action(), "");
+    }
+
+    #[test]
+    fn test_show_notifications_default() {
+        assert!(Settings::new_empty().show_notifications());
+    }
+
+    #[test]
+    fn test_most_recent_config_default() {
+        let s = Settings::new_empty();
+        assert_eq!(s.get_most_recent_config(), ("".into(), "".into()));
+    }
+
+    #[test]
+    fn test_specific_config_path_default() {
+        assert_eq!(Settings::new_empty().specific_config_path(), "");
+    }
+
+    // --- Predicate logic ---
+
+    #[test]
+    fn test_should_restore_on_startup_false_when_no_schema() {
+        assert!(!Settings::new_empty().should_restore_on_startup());
+    }
+
+    #[test]
+    fn test_should_connect_recent_on_startup_false_when_no_schema() {
+        assert!(!Settings::new_empty().should_connect_recent_on_startup());
+    }
+
+    #[test]
+    fn test_should_connect_specific_on_startup_false_when_no_schema() {
+        assert!(!Settings::new_empty().should_connect_specific_on_startup());
+    }
+
+    // --- Setters do not panic when schema is absent ---
+
+    #[test]
+    fn test_set_startup_action_no_panic() {
+        Settings::new_empty().set_startup_action("restore");
+    }
+
+    #[test]
+    fn test_set_most_recent_config_no_panic() {
+        Settings::new_empty().set_most_recent_config("/some/path", "My VPN");
+    }
+
+    #[test]
+    fn test_set_show_notifications_no_panic() {
+        Settings::new_empty().set_show_notifications(false);
     }
 }

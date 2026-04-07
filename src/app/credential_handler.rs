@@ -190,9 +190,13 @@ pub(crate) async fn request_credentials(
                                 continue;
                             }
                             if remember {
-                                let _ = store.set_async(&ck, label, value).await;
+                                if let Err(e) = store.set_async(&ck, label, value).await {
+                                    warn!("Failed to save credential '{}' to keyring: {}", label, e);
+                                }
                             } else {
-                                let _ = store.delete_async(&ck, label).await;
+                                if let Err(e) = store.delete_async(&ck, label).await {
+                                    warn!("Failed to delete credential '{}' from keyring: {}", label, e);
+                                }
                             }
                         }
                     }

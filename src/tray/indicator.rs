@@ -6,6 +6,7 @@ use futures::channel::mpsc::UnboundedSender;
 use ksni::menu::{RadioGroup, RadioItem, StandardItem, SubMenu};
 use ksni::{self, MenuItem, ToolTip};
 
+use tracing::error;
 use crate::dbus::types::{SessionStatus, StatusMinor};
 use crate::status::{get_status_description, get_status_icon};
 
@@ -47,7 +48,7 @@ impl SessionInfo {
         format!("{}: {}", self.config_name, desc)
     }
 
-    pub fn tooltip_line(&self) -> String {
+    fn tooltip_line(&self) -> String {
         let desc = get_status_description(self.status.major, self.status.minor);
         if self.status.is_connected() {
             if let Some(at) = self.connected_at {
@@ -147,7 +148,9 @@ impl VpnTray {
 
     /// Send an action to the GTK main loop
     fn send_action(&self, action: TrayAction) {
-        let _ = self.action_tx.unbounded_send(action);
+        if let Err(e) = self.action_tx.unbounded_send(action) {
+            error!("Failed to send tray action: {}", e);
+        }
     }
 
     /// Build session submenu actions based on session state
@@ -271,17 +274,17 @@ impl ksni::Tray for VpnTray {
 
     fn tool_tip(&self) -> ToolTip {
         let description = if self.sessions.is_empty() {
-            "No VPN Connection".to_string()
+            "No active connections".to_string()
         } else {
             self.sessions
                 .values()
-                .map(|s| s.status_label())
+                .map(|s| s.tooltip_line())
                 .collect::<Vec<_>>()
                 .join("\n")
         };
 
         ToolTip {
-            title: "OpenVPN3 Indicator".into(),
+            title: "OpenVPN3 GUI".into(),
             description,
             ..Default::default()
         }
@@ -408,5 +411,64 @@ impl ksni::Tray for VpnTray {
         );
 
         items
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dbus::types::{SessionStatus, StatusMajor, StatusMinor};
+
+    fn make_session(major: StatusMajor, minor: StatusMinor, name: &str) -> SessionInfo {
+        SessionInfo {
+            session_path: "/test/path".into(),
+            config_path: "/test/config".into(),
+            config_name: name.into(),
+            status: SessionStatus {
+                major,
+                minor,
+            },
+            connected_at: None,
+        }
+    }
+
+    #[test]
+    fn test_status_label_format() {
+        let s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
+        assert_eq!(s.status_label(), "MyVPN: Connected");
+    }
+
+    #[test]
+    fn test_status_label_disconnected() {
+        let s = make_session(StatusMajor::Connection, StatusMinor::ConnDisconnected, "Work VPN");
+        assert_eq!(s.status_label(), "Work VPN: Disconnected");
+    }
+
+    #[test]
+    fn test_tooltip_line_not_connected() {
+        let s = make_session(StatusMajor::Connection, StatusMinor::ConnConnecting, "MyVPN");
+        assert_eq!(s.tooltip_line(), "MyVPN — Connecting");
+    }
+
+    #[test]
+    fn test_tooltip_line_connected_no_timer() {
+        // Connected but no connected_at set — no duration shown
+        let s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
+        assert_eq!(s.tooltip_line(), "MyVPN — Connected");
+    }
+
+    #[test]
+    fn test_tooltip_line_connected_with_timer() {
+        let mut s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
+        s.connected_at = Some(std::time::Instant::now());
+        let line = s.tooltip_line();
+        // Should contain duration suffix in parentheses
+        assert!(line.starts_with("MyVPN — Connected ("), "got: {}", line);
+    }
+
+    #[test]
+    fn test_tooltip_line_unset() {
+        let s = make_session(StatusMajor::Unset, StatusMinor::Unset, "MyVPN");
+        assert_eq!(s.tooltip_line(), "MyVPN — Unknown");
     }
 }

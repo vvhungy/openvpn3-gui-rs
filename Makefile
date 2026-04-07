@@ -8,7 +8,7 @@ ICON_DIR = $(PREFIX)/share/icons/hicolor
 DESKTOP_DIR = $(PREFIX)/share/applications
 METAINFO_DIR = $(PREFIX)/share/metainfo
 
-.PHONY: all install uninstall clean deb rpm
+.PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug
 
 all:
 	cargo build --release
@@ -77,6 +77,9 @@ run:
 
 test:
 	cargo test
+
+smoke-test:
+	bash tests/smoke_test.sh
 
 fmt:
 	cargo fmt

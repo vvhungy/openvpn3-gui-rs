@@ -146,7 +146,7 @@ impl StatusMinor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[zvariant(signature = "q")]
 #[repr(u16)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Documents D-Bus API; not all variants are actively dispatched
 pub enum SessionManagerEventType {
     /// Session created
     SessCreated = 1,
@@ -154,7 +154,7 @@ pub enum SessionManagerEventType {
     SessDestroyed = 2,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 impl SessionManagerEventType {
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
@@ -169,7 +169,7 @@ impl SessionManagerEventType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[zvariant(signature = "u")]
 #[repr(u32)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Documents D-Bus API; not all variants are actively dispatched
 pub enum ClientAttentionType {
     /// Unset
     Unset = 0,
@@ -181,7 +181,7 @@ pub enum ClientAttentionType {
     AccessPerm = 3,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 impl ClientAttentionType {
     pub fn from_u32(value: u32) -> Self {
         match value {
@@ -197,24 +197,16 @@ impl ClientAttentionType {
 
 /// Session status structure
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct SessionStatus {
     pub major: StatusMajor,
     pub minor: StatusMinor,
-    pub message: String,
-    pub session_path: Option<String>,
-    pub session_name: Option<String>,
 }
 
-#[allow(dead_code)]
 impl SessionStatus {
-    pub fn new(major: u32, minor: u32, message: String) -> Self {
+    pub fn new(major: u32, minor: u32, _message: String) -> Self {
         Self {
             major: StatusMajor::from_u32(major),
             minor: StatusMinor::from_u32(minor),
-            message,
-            session_path: None,
-            session_name: None,
         }
     }
 
@@ -222,6 +214,23 @@ impl SessionStatus {
         self.major == StatusMajor::Connection && self.minor == StatusMinor::ConnConnected
     }
 
+    pub fn is_disconnected(&self) -> bool {
+        self.major == StatusMajor::Connection && matches!(self.minor,
+            StatusMinor::ConnDisconnected | StatusMinor::ConnDone
+        )
+    }
+
+    pub fn needs_credentials(&self) -> bool {
+        self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthUserpass
+    }
+
+    pub fn needs_challenge(&self) -> bool {
+        self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthChallenge
+    }
+}
+
+#[cfg(test)]
+impl SessionStatus {
     pub fn is_connecting(&self) -> bool {
         self.major == StatusMajor::Connection && matches!(self.minor,
             StatusMinor::ConnInit | StatusMinor::ConnConnecting | StatusMinor::ConnReconnecting
@@ -230,12 +239,6 @@ impl SessionStatus {
 
     pub fn is_paused(&self) -> bool {
         self.major == StatusMajor::Connection && self.minor == StatusMinor::ConnPaused
-    }
-
-    pub fn is_disconnected(&self) -> bool {
-        self.major == StatusMajor::Connection && matches!(self.minor,
-            StatusMinor::ConnDisconnected | StatusMinor::ConnDone
-        )
     }
 
     pub fn is_error(&self) -> bool {
@@ -249,14 +252,6 @@ impl SessionStatus {
             ))
     }
 
-    pub fn needs_credentials(&self) -> bool {
-        self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthUserpass
-    }
-
-    pub fn needs_challenge(&self) -> bool {
-        self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthChallenge
-    }
-
     pub fn needs_url_auth(&self) -> bool {
         self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthUrl
     }
@@ -267,9 +262,6 @@ impl Default for SessionStatus {
         Self {
             major: StatusMajor::Unset,
             minor: StatusMinor::Unset,
-            message: String::new(),
-            session_path: None,
-            session_name: None,
         }
     }
 }
@@ -355,9 +347,6 @@ mod tests {
         let s = SessionStatus::new(2, 7, "Connected".to_string());
         assert_eq!(s.major, StatusMajor::Connection);
         assert_eq!(s.minor, StatusMinor::ConnConnected);
-        assert_eq!(s.message, "Connected");
-        assert!(s.session_path.is_none());
-        assert!(s.session_name.is_none());
     }
 
     #[test]
@@ -365,7 +354,6 @@ mod tests {
         let s = SessionStatus::default();
         assert_eq!(s.major, StatusMajor::Unset);
         assert_eq!(s.minor, StatusMinor::Unset);
-        assert!(s.message.is_empty());
     }
 
     // --- SessionStatus predicates ---
