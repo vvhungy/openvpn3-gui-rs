@@ -2,6 +2,7 @@
 
 mod actions;
 mod application;
+mod challenge_handler;
 mod config_ops;
 mod credential_handler;
 mod dbus_init;

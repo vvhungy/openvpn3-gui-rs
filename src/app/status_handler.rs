@@ -128,7 +128,7 @@ pub(super) async fn setup_status_handler(
                             .flatten()
                             .unwrap_or_else(|| "VPN Connection".to_string());
                         glib::spawn_future_local(async move {
-                            super::credential_handler::request_challenge(
+                            super::challenge_handler::request_challenge(
                                 &dbus_conn,
                                 &session_path,
                                 &config_name,
