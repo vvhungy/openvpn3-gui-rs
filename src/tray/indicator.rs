@@ -3,10 +3,9 @@
 use std::collections::HashMap;
 
 use futures::channel::mpsc::UnboundedSender;
-use ksni::menu::{RadioGroup, RadioItem, StandardItem, SubMenu};
 use ksni::{self, MenuItem, ToolTip};
 
-use crate::dbus::types::{SessionStatus, StatusMinor};
+use crate::dbus::types::SessionStatus;
 use crate::status::{get_status_description, get_status_icon};
 use tracing::error;
 
@@ -148,107 +147,10 @@ impl VpnTray {
     }
 
     /// Send an action to the GTK main loop
-    fn send_action(&self, action: TrayAction) {
+    pub(super) fn send_action(&self, action: TrayAction) {
         if let Err(e) = self.action_tx.unbounded_send(action) {
             error!("Failed to send tray action: {}", e);
         }
-    }
-
-    /// Build session submenu actions based on session state
-    fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<Self>> {
-        let session_path = session.session_path.clone();
-        let mut items = Vec::new();
-
-        match session.status.minor {
-            StatusMinor::ConnConnected => {
-                let p = session_path.clone();
-                items.push(
-                    StandardItem {
-                        label: "Pause".into(),
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.send_action(TrayAction::Pause(p.clone()));
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                let p = session_path.clone();
-                items.push(
-                    StandardItem {
-                        label: "Restart".into(),
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.send_action(TrayAction::Restart(p.clone()));
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-            }
-            StatusMinor::ConnPaused => {
-                let p = session_path.clone();
-                items.push(
-                    StandardItem {
-                        label: "Resume".into(),
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.send_action(TrayAction::Resume(p.clone()));
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-                let p = session_path.clone();
-                items.push(
-                    StandardItem {
-                        label: "Restart".into(),
-                        activate: Box::new(move |tray: &mut Self| {
-                            tray.send_action(TrayAction::Restart(p.clone()));
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-            }
-            _ => {}
-        }
-
-        // Disconnect is always available
-        let p = session_path.clone();
-        items.push(
-            StandardItem {
-                label: "Disconnect".into(),
-                activate: Box::new(move |tray: &mut Self| {
-                    tray.send_action(TrayAction::Disconnect(p.clone()));
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        items
-    }
-
-    /// Build config submenu (Connect / Remove)
-    fn config_submenu(config: &ConfigInfo) -> Vec<MenuItem<Self>> {
-        let path = config.path.clone();
-        let p2 = config.path.clone();
-        vec![
-            StandardItem {
-                label: "Connect".into(),
-                activate: Box::new(move |tray: &mut Self| {
-                    tray.send_action(TrayAction::Connect(path.clone()));
-                }),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "Remove".into(),
-                activate: Box::new(move |tray: &mut Self| {
-                    tray.send_action(TrayAction::RemoveConfig(p2.clone()));
-                }),
-                ..Default::default()
-            }
-            .into(),
-        ]
     }
 }
 
@@ -292,140 +194,7 @@ impl ksni::Tray for VpnTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let mut items: Vec<MenuItem<Self>> = Vec::new();
-
-        // --- Active sessions ---
-        for session in self.sessions.values() {
-            items.push(
-                SubMenu {
-                    label: session.status_label(),
-                    submenu: Self::session_submenu(session),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-
-        // --- Configs without an active session ---
-        let active_config_paths: Vec<&str> = self
-            .sessions
-            .values()
-            .map(|s| s.config_path.as_str())
-            .collect();
-
-        for config in &self.configs {
-            if active_config_paths.contains(&config.path.as_str()) {
-                continue; // Already shown as a session
-            }
-            items.push(
-                SubMenu {
-                    label: config.name.clone(),
-                    submenu: Self::config_submenu(config),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-
-        // --- Separator if we had any configs/sessions ---
-        if !items.is_empty() {
-            items.push(MenuItem::Separator);
-        }
-
-        // --- Import Config ---
-        items.push(
-            StandardItem {
-                label: "Import Config...".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    tray.send_action(TrayAction::ImportConfig);
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        items.push(MenuItem::Separator);
-
-        // --- Startup Settings ---
-        let startup_idx = match self.startup_action.as_str() {
-            "connect-recent" => 1,
-            "connect-specific" => 2,
-            _ => 0,
-        };
-        items.push(
-            SubMenu {
-                label: "Startup Settings".into(),
-                submenu: vec![
-                    RadioGroup {
-                        selected: startup_idx,
-                        select: Box::new(|tray: &mut Self, idx: usize| {
-                            let action = match idx {
-                                1 => "connect-recent",
-                                2 => "connect-specific",
-                                _ => "none",
-                            };
-                            tray.startup_action = action.to_string();
-                            tray.send_action(TrayAction::SetStartupAction(action.to_string()));
-                        }),
-                        options: vec![
-                            RadioItem {
-                                label: "Do nothing".into(),
-                                ..Default::default()
-                            },
-                            RadioItem {
-                                label: "Connect recent".into(),
-                                ..Default::default()
-                            },
-                            RadioItem {
-                                label: "Connect specific".into(),
-                                ..Default::default()
-                            },
-                        ],
-                    }
-                    .into(),
-                ],
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        // --- Clear Credentials ---
-        items.push(
-            StandardItem {
-                label: "Clear Saved Credentials".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    tray.send_action(TrayAction::ClearCredentials);
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        // --- About ---
-        items.push(
-            StandardItem {
-                label: "About".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    tray.send_action(TrayAction::About);
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        // --- Quit ---
-        items.push(
-            StandardItem {
-                label: "Quit".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    tray.send_action(TrayAction::Quit);
-                }),
-                ..Default::default()
-            }
-            .into(),
-        );
-
-        items
+        super::menu::build_menu(self)
     }
 }
 
