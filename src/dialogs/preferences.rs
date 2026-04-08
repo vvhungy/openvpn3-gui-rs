@@ -1,0 +1,141 @@
+//! Preferences dialog
+
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gtk4::prelude::*;
+use gtk4::{
+    Box as GtkBox, CheckButton, ComboBoxText, Dialog, Label, Orientation, ResponseType, Separator,
+};
+
+use crate::settings::Settings;
+use crate::tray::ConfigInfo;
+
+/// Show the preferences dialog.
+///
+/// Reads current settings and writes them back on Save.
+pub fn show_preferences_dialog(
+    parent: Option<&gtk4::Window>,
+    settings: &Settings,
+    configs: Vec<ConfigInfo>,
+) {
+    let dialog = Dialog::builder()
+        .title("Preferences")
+        .modal(true)
+        .resizable(false)
+        .build();
+
+    if let Some(p) = parent {
+        dialog.set_transient_for(Some(p));
+    }
+
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Save", ResponseType::Accept);
+
+    let content = dialog.content_area();
+    let vbox = GtkBox::new(Orientation::Vertical, 8);
+    vbox.set_margin_top(16);
+    vbox.set_margin_bottom(16);
+    vbox.set_margin_start(16);
+    vbox.set_margin_end(16);
+    content.append(&vbox);
+
+    // --- Startup behavior ---
+    let startup_label = Label::builder()
+        .label("<b>Startup Behavior</b>")
+        .use_markup(true)
+        .halign(gtk4::Align::Start)
+        .build();
+    vbox.append(&startup_label);
+
+    let current_action = settings.startup_action();
+    let current_specific = settings.specific_config_path();
+
+    let radio_none = CheckButton::builder().label("Do nothing").build();
+    let radio_recent = CheckButton::builder()
+        .label("Connect most recent")
+        .group(&radio_none)
+        .build();
+    let radio_specific = CheckButton::builder()
+        .label("Connect specific config:")
+        .group(&radio_none)
+        .build();
+
+    match current_action.as_str() {
+        "connect-recent" => radio_recent.set_active(true),
+        "connect-specific" => radio_specific.set_active(true),
+        _ => radio_none.set_active(true),
+    }
+
+    vbox.append(&radio_none);
+    vbox.append(&radio_recent);
+    vbox.append(&radio_specific);
+
+    // Combo box for specific config (indented under the radio)
+    let config_combo = ComboBoxText::new();
+    for config in &configs {
+        config_combo.append(Some(&config.path), &config.name);
+    }
+    if !current_specific.is_empty() {
+        config_combo.set_active_id(Some(&current_specific));
+    } else if !configs.is_empty() {
+        config_combo.set_active(Some(0));
+    }
+    config_combo.set_sensitive(current_action == "connect-specific");
+    config_combo.set_margin_start(24);
+    vbox.append(&config_combo);
+
+    // Wire radio toggle → combo sensitivity
+    {
+        let combo = config_combo.clone();
+        radio_specific.connect_toggled(move |btn| {
+            combo.set_sensitive(btn.is_active());
+        });
+    }
+
+    // --- Separator ---
+    vbox.append(&Separator::new(Orientation::Horizontal));
+
+    // --- Notifications ---
+    let notif_check = CheckButton::builder()
+        .label("Show desktop notifications")
+        .active(settings.show_notifications())
+        .build();
+    vbox.append(&notif_check);
+
+    // --- Response handler ---
+    let settings_clone = settings.clone();
+    let handled = Rc::new(Cell::new(false));
+
+    dialog.connect_response(move |dlg, response| {
+        if handled.get() {
+            dlg.close();
+            return;
+        }
+        handled.set(true);
+
+        if response == ResponseType::Accept {
+            let action = if radio_specific.is_active() {
+                if let Some(id) = config_combo.active_id() {
+                    settings_clone.set_specific_config_path(&id);
+                    // Mirror to most_recent_config so startup connect logic finds it
+                    let name = config_combo
+                        .active_text()
+                        .map(|t| t.to_string())
+                        .unwrap_or_default();
+                    settings_clone.set_most_recent_config(&id, &name);
+                }
+                "connect-specific"
+            } else if radio_recent.is_active() {
+                "connect-recent"
+            } else {
+                "none"
+            };
+            settings_clone.set_startup_action(action);
+            settings_clone.set_show_notifications(notif_check.is_active());
+        }
+        dlg.close();
+    });
+
+    dialog.present();
+}

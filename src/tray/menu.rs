@@ -4,7 +4,7 @@
 //! that the menu logic can grow independently of the tray state definitions.
 
 use ksni::MenuItem;
-use ksni::menu::{RadioGroup, RadioItem, StandardItem, SubMenu};
+use ksni::menu::{StandardItem, SubMenu};
 
 use crate::dbus::types::StatusMinor;
 
@@ -66,55 +66,24 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
 
     items.push(MenuItem::Separator);
 
-    // --- Startup Settings ---
-    let startup_idx = match tray.startup_action.as_str() {
-        "connect-recent" => 1,
-        "connect-specific" => 2,
-        _ => 0,
-    };
-    items.push(
-        SubMenu {
-            label: "Startup Settings".into(),
-            submenu: vec![
-                RadioGroup {
-                    selected: startup_idx,
-                    select: Box::new(|tray: &mut VpnTray, idx: usize| {
-                        let action = match idx {
-                            1 => "connect-recent",
-                            2 => "connect-specific",
-                            _ => "none",
-                        };
-                        tray.startup_action = action.to_string();
-                        tray.send_action(TrayAction::SetStartupAction(action.to_string()));
-                    }),
-                    options: vec![
-                        RadioItem {
-                            label: "Do nothing".into(),
-                            ..Default::default()
-                        },
-                        RadioItem {
-                            label: "Connect recent".into(),
-                            ..Default::default()
-                        },
-                        RadioItem {
-                            label: "Connect specific".into(),
-                            ..Default::default()
-                        },
-                    ],
-                }
-                .into(),
-            ],
-            ..Default::default()
-        }
-        .into(),
-    );
-
     // --- Clear Credentials ---
     items.push(
         StandardItem {
             label: "Clear Saved Credentials".into(),
             activate: Box::new(|tray: &mut VpnTray| {
                 tray.send_action(TrayAction::ClearCredentials);
+            }),
+            ..Default::default()
+        }
+        .into(),
+    );
+
+    // --- Preferences ---
+    items.push(
+        StandardItem {
+            label: "Preferences...".into(),
+            activate: Box::new(|tray: &mut VpnTray| {
+                tray.send_action(TrayAction::Preferences);
             }),
             ..Default::default()
         }

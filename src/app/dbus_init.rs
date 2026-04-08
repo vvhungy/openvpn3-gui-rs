@@ -153,11 +153,9 @@ pub(crate) async fn init_dbus(
     }
 
     // Update tray with initial state
-    let startup_action = settings.startup_action();
     tray.update(move |t| {
         t.configs = configs;
         t.sessions = sessions;
-        t.startup_action = startup_action;
     });
 
     info!(

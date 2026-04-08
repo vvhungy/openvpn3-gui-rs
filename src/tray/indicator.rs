@@ -21,8 +21,8 @@ pub enum TrayAction {
     ImportConfig,
     About,
     Quit,
-    SetStartupAction(String), // "none", "connect-recent", "connect-specific"
     ClearCredentials,
+    Preferences,
 }
 
 /// A known VPN configuration
@@ -76,8 +76,6 @@ pub struct VpnTray {
     pub configs: Vec<ConfigInfo>,
     /// Active sessions (keyed by session D-Bus path)
     pub sessions: HashMap<String, SessionInfo>,
-    /// Current startup action setting
-    pub startup_action: String,
     /// Channel to send actions to the GTK main loop
     pub action_tx: ActionSender,
 }
@@ -87,7 +85,6 @@ impl VpnTray {
         Self {
             configs: Vec::new(),
             sessions: HashMap::new(),
-            startup_action: "none".to_string(),
             action_tx,
         }
     }
