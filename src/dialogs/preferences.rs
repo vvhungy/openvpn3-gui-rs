@@ -6,6 +6,7 @@ use std::rc::Rc;
 use gtk4::prelude::*;
 use gtk4::{
     Box as GtkBox, CheckButton, ComboBoxText, Dialog, Label, Orientation, ResponseType, Separator,
+    SpinButton,
 };
 
 use crate::settings::Settings;
@@ -103,6 +104,19 @@ pub fn show_preferences_dialog(
         .build();
     vbox.append(&notif_check);
 
+    // --- Tooltip refresh interval ---
+    let interval_row = GtkBox::new(Orientation::Horizontal, 8);
+    let interval_label = Label::builder()
+        .label("Tooltip refresh interval (seconds):")
+        .halign(gtk4::Align::Start)
+        .hexpand(true)
+        .build();
+    let interval_spin = SpinButton::with_range(10.0, 300.0, 10.0);
+    interval_spin.set_value(settings.tooltip_refresh_interval() as f64);
+    interval_row.append(&interval_label);
+    interval_row.append(&interval_spin);
+    vbox.append(&interval_row);
+
     // --- Response handler ---
     let settings_clone = settings.clone();
     let handled = Rc::new(Cell::new(false));
@@ -133,6 +147,7 @@ pub fn show_preferences_dialog(
             };
             settings_clone.set_startup_action(action);
             settings_clone.set_show_notifications(notif_check.is_active());
+            settings_clone.set_tooltip_refresh_interval(interval_spin.value() as u32);
         }
         dlg.close();
     });

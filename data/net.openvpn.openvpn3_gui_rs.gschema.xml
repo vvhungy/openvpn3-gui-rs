@@ -42,5 +42,14 @@
         Whether to show desktop notifications for VPN status changes.
       </description>
     </key>
+
+    <key name="tooltip-refresh-interval" type="u">
+      <default>30</default>
+      <summary>Tooltip refresh interval (seconds)</summary>
+      <description>
+        How often (in seconds) the tray tooltip is refreshed to update
+        the connected-duration display. Range: 10–300.
+      </description>
+    </key>
   </schema>
 </schemalist>

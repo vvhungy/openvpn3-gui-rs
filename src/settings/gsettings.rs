@@ -125,6 +125,24 @@ impl Settings {
         }
     }
 
+    /// Get the tooltip refresh interval in seconds (default 30)
+    pub fn tooltip_refresh_interval(&self) -> u32 {
+        self.settings
+            .as_ref()
+            .map(|s| s.uint("tooltip-refresh-interval"))
+            .unwrap_or(30)
+            .clamp(10, 300)
+    }
+
+    /// Set the tooltip refresh interval in seconds
+    pub fn set_tooltip_refresh_interval(&self, secs: u32) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_uint("tooltip-refresh-interval", secs.clamp(10, 300))
+        {
+            error!("Failed to set tooltip-refresh-interval: {}", e);
+        }
+    }
+
     /// Check if notifications are enabled
     pub fn show_notifications(&self) -> bool {
         self.settings
@@ -231,5 +249,15 @@ mod tests {
     #[test]
     fn test_set_show_notifications_no_panic() {
         Settings::new_empty().set_show_notifications(false);
+    }
+
+    #[test]
+    fn test_tooltip_refresh_interval_default() {
+        assert_eq!(Settings::new_empty().tooltip_refresh_interval(), 30);
+    }
+
+    #[test]
+    fn test_set_tooltip_refresh_interval_no_panic() {
+        Settings::new_empty().set_tooltip_refresh_interval(60);
     }
 }
