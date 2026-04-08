@@ -15,7 +15,7 @@ pub struct Settings {
     settings: Option<GioSettings>,
 }
 
-#[allow(dead_code)] // Several methods are the API surface for the upcoming preferences dialog
+#[allow(dead_code)] // Predicate helpers (should_*) are tested but not yet called in production paths
 impl Settings {
     /// Create a new Settings instance
     pub fn new() -> Self {
@@ -106,11 +106,6 @@ impl Settings {
     pub fn set_most_recent_config(&self, id: &str, name: &str) {
         self.set_most_recent_config_id(id);
         self.set_most_recent_config_name(name);
-    }
-
-    /// Set the most recent config (alias for compatibility)
-    pub fn set_most_recent_config_path(&self, path: &str, name: &str) {
-        self.set_most_recent_config(path, name);
     }
 
     /// Get specific config path
