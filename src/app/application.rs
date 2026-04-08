@@ -14,7 +14,8 @@ use crate::tray::{TrayAction, VpnTray};
 
 use super::actions::handle_tray_action;
 use super::config_ops::{import_config, refresh_configs};
-use super::dbus_init::{init_dbus, setup_signal_handlers};
+use super::dbus_init::init_dbus;
+use super::signal_handlers::setup_signal_handlers;
 
 /// Command-line arguments
 #[derive(Debug, Clone, Default)]
