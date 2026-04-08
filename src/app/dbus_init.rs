@@ -177,7 +177,7 @@ async fn handle_startup_connect(
 ) {
     let action = settings.startup_action();
     match action.as_str() {
-        "connect-recent" | "restore" => {
+        "connect-recent" => {
             let (path, name) = settings.get_most_recent_config();
             if path.is_empty() {
                 info!("Startup auto-connect: no recent config saved");

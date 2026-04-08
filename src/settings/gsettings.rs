@@ -160,11 +160,6 @@ impl Settings {
         }
     }
 
-    /// Check if should restore on startup
-    pub fn should_restore_on_startup(&self) -> bool {
-        self.startup_action() == "restore"
-    }
-
     /// Check if should connect to most recent on startup
     pub fn should_connect_recent_on_startup(&self) -> bool {
         self.startup_action() == "connect-recent"
@@ -220,11 +215,6 @@ mod tests {
     // --- Predicate logic ---
 
     #[test]
-    fn test_should_restore_on_startup_false_when_no_schema() {
-        assert!(!Settings::new_empty().should_restore_on_startup());
-    }
-
-    #[test]
     fn test_should_connect_recent_on_startup_false_when_no_schema() {
         assert!(!Settings::new_empty().should_connect_recent_on_startup());
     }
@@ -238,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_set_startup_action_no_panic() {
-        Settings::new_empty().set_startup_action("restore");
+        Settings::new_empty().set_startup_action("connect-recent");
     }
 
     #[test]
