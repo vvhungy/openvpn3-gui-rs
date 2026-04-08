@@ -4,60 +4,100 @@
 //! which works without a .desktop file installed.
 
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use futures::StreamExt;
 use tracing::warn;
 use zbus::message::Type as MessageType;
 
-/// Send a notification via org.freedesktop.Notifications D-Bus interface
+use crate::settings::Settings;
+
+/// Tracks the last notification ID per config name so status updates replace
+/// the previous toast instead of stacking new ones.
+static NOTIFICATION_IDS: LazyLock<Mutex<HashMap<String, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Send a notification, optionally replacing an existing one.
+/// Returns the notification ID assigned by the daemon.
+async fn send_dbus_notification(
+    summary: &str,
+    body: &str,
+    urgency: u8,
+    replaces_id: u32,
+) -> anyhow::Result<u32> {
+    let conn = zbus::Connection::session().await?;
+    let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
+        HashMap::from([("urgency", zbus::zvariant::Value::U8(urgency))]);
+    let reply = conn
+        .call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "Notify",
+            &(
+                "openvpn3-gui-rs", // app_name
+                replaces_id,       // replaces_id (0 = new notification)
+                "network-vpn",     // app_icon
+                summary,           // summary
+                body,              // body
+                &[] as &[&str],    // actions
+                hints,             // hints
+                -1i32,             // expire_timeout (-1 = default)
+            ),
+        )
+        .await?;
+    let id: u32 = reply.body().deserialize()?;
+    Ok(id)
+}
+
+/// Fire-and-forget notification with replaces_id=0 (always a fresh toast).
 fn send_notification(summary: &str, body: &str, urgency: u8) {
     let summary = summary.to_string();
     let body = body.to_string();
     glib::spawn_future_local(async move {
-        if let Err(e) = send_dbus_notification(&summary, &body, urgency).await {
+        if let Err(e) = send_dbus_notification(&summary, &body, urgency, 0).await {
             warn!("Failed to send notification: {}", e);
         }
     });
 }
 
-async fn send_dbus_notification(summary: &str, body: &str, urgency: u8) -> anyhow::Result<()> {
-    let conn = zbus::Connection::session().await?;
-    let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
-        HashMap::from([("urgency", zbus::zvariant::Value::U8(urgency))]);
-    conn.call_method(
-        Some("org.freedesktop.Notifications"),
-        "/org/freedesktop/Notifications",
-        Some("org.freedesktop.Notifications"),
-        "Notify",
-        &(
-            "openvpn3-gui-rs", // app_name
-            0u32,              // replaces_id
-            "network-vpn",     // app_icon
-            summary,           // summary
-            body,              // body
-            &[] as &[&str],    // actions
-            hints,             // hints
-            -1i32,             // expire_timeout (-1 = default)
-        ),
-    )
-    .await?;
-    Ok(())
-}
-
-/// Show an info notification
+/// Show an info notification (suppressed when show_notifications is off)
 pub fn show_info_notification(title: &str, message: &str) {
+    if !Settings::new().show_notifications() {
+        return;
+    }
     send_notification(title, message, 1);
 }
 
-/// Show an error notification
+/// Show an error notification (always shown regardless of show_notifications)
 pub fn show_error_notification(title: &str, message: &str) {
     send_notification(title, message, 2);
 }
 
-/// Show a connection status notification
+/// Show a connection status notification, replacing any previous toast for this
+/// config so rapid status transitions don't stack separate notifications.
+/// Suppressed when show_notifications is off.
 pub fn show_connection_notification(config_name: &str, status: &str) {
+    if !Settings::new().show_notifications() {
+        return;
+    }
     let title = format!("VPN: {}", config_name);
-    send_notification(&title, status, 1);
+    let status = status.to_string();
+    let key = config_name.to_string();
+    let replaces_id = NOTIFICATION_IDS
+        .lock()
+        .map(|m| *m.get(&key).unwrap_or(&0))
+        .unwrap_or(0);
+    glib::spawn_future_local(async move {
+        match send_dbus_notification(&title, &status, 1, replaces_id).await {
+            Ok(new_id) => {
+                if let Ok(mut map) = NOTIFICATION_IDS.lock() {
+                    map.insert(key, new_id);
+                }
+            }
+            Err(e) => warn!("Failed to send notification: {}", e),
+        }
+    });
 }
 
 /// Show a notification with a "Reconnect" action button for unexpected disconnects.

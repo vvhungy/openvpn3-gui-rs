@@ -177,33 +177,59 @@ async fn handle_startup_connect(
 ) {
     let action = settings.startup_action();
     match action.as_str() {
-        "connect-recent" | "connect-specific" | "restore" => {
+        "connect-recent" | "restore" => {
             let (path, name) = settings.get_most_recent_config();
             if path.is_empty() {
                 info!("Startup auto-connect: no recent config saved");
                 return;
             }
-            // Verify the config still exists in the loaded list
-            let exists = tray
-                .update(|t| t.configs.iter().any(|c| c.path == path))
-                .unwrap_or(false);
-            if !exists {
-                warn!(
-                    "Startup auto-connect: saved config path not found: {}",
-                    path
-                );
+            startup_connect(dbus, tray, settings, &path, &name).await;
+        }
+        "connect-specific" => {
+            let path = settings.specific_config_path();
+            if path.is_empty() {
+                info!("Startup auto-connect: no specific config configured");
                 return;
             }
-            info!("Startup auto-connect: connecting to '{}'", name);
-            if let Err(e) = super::session_ops::connect_to_config(dbus, &path, tray, settings).await
-            {
-                error!("Startup auto-connect failed: {}", e);
-                crate::dialogs::show_error_notification(
-                    "Connection Failed",
-                    &format!("Could not connect to '{}': {}", name, e),
-                );
-            }
+            // Resolve a display name from the loaded config list
+            let name = tray
+                .update(|t| {
+                    t.configs
+                        .iter()
+                        .find(|c| c.path == path)
+                        .map(|c| c.name.clone())
+                })
+                .flatten()
+                .unwrap_or_else(|| path.clone());
+            startup_connect(dbus, tray, settings, &path, &name).await;
         }
         _ => {} // "none" or unknown — do nothing
+    }
+}
+
+async fn startup_connect(
+    dbus: &zbus::Connection,
+    tray: &ksni::blocking::Handle<VpnTray>,
+    settings: &Settings,
+    path: &str,
+    name: &str,
+) {
+    let exists = tray
+        .update(|t| t.configs.iter().any(|c| c.path == path))
+        .unwrap_or(false);
+    if !exists {
+        warn!(
+            "Startup auto-connect: saved config path not found: {}",
+            path
+        );
+        return;
+    }
+    info!("Startup auto-connect: connecting to '{}'", name);
+    if let Err(e) = super::session_ops::connect_to_config(dbus, path, tray, settings).await {
+        error!("Startup auto-connect failed: {}", e);
+        crate::dialogs::show_error_notification(
+            "Connection Failed",
+            &format!("Could not connect to '{}': {}", name, e),
+        );
     }
 }

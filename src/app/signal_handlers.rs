@@ -9,10 +9,53 @@ use tracing::{info, warn};
 use zbus::proxy::CacheProperties;
 
 use crate::dbus::{
-    session::SessionManagerProxy,
+    session::{SessionManagerProxy, SessionProxy},
     types::{SessionManagerEventType, SessionStatus, StatusMajor, StatusMinor},
 };
 use crate::tray::{SessionInfo, VpnTray};
+
+/// Handles a newly created session: enables log forwarding and adds it to the tray.
+async fn handle_session_created(
+    dbus: &zbus::Connection,
+    tray: &ksni::blocking::Handle<VpnTray>,
+    session_path: &str,
+) -> anyhow::Result<()> {
+    let session = SessionProxy::builder(dbus)
+        .path(session_path)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+
+    if let Err(e) = session.LogForward(true).await {
+        warn!("LogForward for {}: {}", session_path, e);
+    }
+
+    let config_name = session
+        .config_name()
+        .await
+        .unwrap_or_else(|_| "VPN".to_string());
+    let config_path = session
+        .config_path()
+        .await
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_default();
+    let (major, minor, message) = session.status().await.unwrap_or((0, 0, String::new()));
+
+    info!("SessCreated: '{}' at {}", config_name, session_path);
+
+    let sp = session_path.to_string();
+    tray.update(move |t| {
+        t.sessions.entry(sp.clone()).or_insert_with(|| SessionInfo {
+            session_path: sp.clone(),
+            config_path,
+            config_name,
+            status: SessionStatus::new(major, minor, message),
+            connected_at: None,
+        });
+    });
+
+    Ok(())
+}
 
 /// Attach D-Bus signal handlers for session lifecycle and status changes.
 pub(crate) async fn setup_signal_handlers(
@@ -29,6 +72,7 @@ pub(crate) async fn setup_signal_handlers(
     let mut session_events = session_manager.receive_SessionManagerEvent().await?;
     let tray_for_session = tray.clone();
     let action_tx_for_session = action_tx.clone();
+    let dbus_for_session = dbus.clone();
     glib::spawn_future_local(async move {
         while let Some(signal) = session_events.next().await {
             match signal.args() {
@@ -40,7 +84,17 @@ pub(crate) async fn setup_signal_handlers(
                         event_type, session_path
                     );
 
-                    if event_type == SessionManagerEventType::SessDestroyed as u16 {
+                    if event_type == SessionManagerEventType::SessCreated as u16 {
+                        let dbus = dbus_for_session.clone();
+                        let tray = tray_for_session.clone();
+                        glib::spawn_future_local(async move {
+                            if let Err(e) =
+                                handle_session_created(&dbus, &tray, &session_path).await
+                            {
+                                warn!("SessCreated handler error for {}: {}", session_path, e);
+                            }
+                        });
+                    } else if event_type == SessionManagerEventType::SessDestroyed as u16 {
                         // Capture config info before removing from tray
                         let session_info = tray_for_session
                             .update(|t| {
@@ -160,6 +214,36 @@ pub(crate) async fn setup_signal_handlers(
                             )
                             .await;
                         });
+                        continue;
+                    }
+
+                    // Check if URL/browser authentication is needed
+                    if status.needs_url_auth() {
+                        info!("Session requires browser authentication");
+                        let url = message.to_string();
+                        let config_name = tray_for_status
+                            .update(|t| t.sessions.get(&path).map(|s| s.config_name.clone()))
+                            .flatten()
+                            .unwrap_or_else(|| "VPN Connection".to_string());
+
+                        let notif_body = if url.is_empty() {
+                            "Please complete authentication in your browser.".to_string()
+                        } else {
+                            format!("Opening browser for authentication:\n{}", url)
+                        };
+                        crate::dialogs::show_error_notification(
+                            &format!("{}: Browser Authentication Required", config_name),
+                            &notif_body,
+                        );
+
+                        if !url.is_empty()
+                            && let Err(e) = gio::AppInfo::launch_default_for_uri(
+                                &url,
+                                None::<&gio::AppLaunchContext>,
+                            )
+                        {
+                            warn!("Failed to open auth URL in browser: {}", e);
+                        }
                         continue;
                     }
 

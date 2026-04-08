@@ -96,6 +96,18 @@ impl Application {
                 }
             });
 
+            // Periodic timer — refreshes tooltip duration for connected sessions.
+            // Re-reads the interval each tick so preference changes take effect.
+            let tray_for_timer = tray_handle_clone.clone();
+            let settings_for_timer = settings_clone.clone();
+            glib::spawn_future_local(async move {
+                loop {
+                    let secs = settings_for_timer.tooltip_refresh_interval();
+                    glib::timeout_future_seconds(secs).await;
+                    tray_for_timer.update(|_| {});
+                }
+            });
+
             // Initialize D-Bus and populate tray, with retry until the service is up
             let dbus = dbus_conn.clone();
             let settings = settings_clone.clone();

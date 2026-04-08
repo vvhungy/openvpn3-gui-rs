@@ -53,6 +53,10 @@ impl SessionStatus {
                     StatusMinor::ProcStopped | StatusMinor::ProcKilled
                 ))
     }
+
+    pub fn needs_url_auth(&self) -> bool {
+        self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthUrl
+    }
 }
 
 #[cfg(test)]
@@ -67,10 +71,6 @@ impl SessionStatus {
 
     pub fn is_paused(&self) -> bool {
         self.major == StatusMajor::Connection && self.minor == StatusMinor::ConnPaused
-    }
-
-    pub fn needs_url_auth(&self) -> bool {
-        self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthUrl
     }
 }
 
