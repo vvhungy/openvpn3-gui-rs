@@ -217,6 +217,36 @@ pub(crate) async fn setup_signal_handlers(
                         continue;
                     }
 
+                    // Check if URL/browser authentication is needed
+                    if status.needs_url_auth() {
+                        info!("Session requires browser authentication");
+                        let url = message.to_string();
+                        let config_name = tray_for_status
+                            .update(|t| t.sessions.get(&path).map(|s| s.config_name.clone()))
+                            .flatten()
+                            .unwrap_or_else(|| "VPN Connection".to_string());
+
+                        let notif_body = if url.is_empty() {
+                            "Please complete authentication in your browser.".to_string()
+                        } else {
+                            format!("Opening browser for authentication:\n{}", url)
+                        };
+                        crate::dialogs::show_error_notification(
+                            &format!("{}: Browser Authentication Required", config_name),
+                            &notif_body,
+                        );
+
+                        if !url.is_empty()
+                            && let Err(e) = gio::AppInfo::launch_default_for_uri(
+                                &url,
+                                None::<&gio::AppLaunchContext>,
+                            )
+                        {
+                            warn!("Failed to open auth URL in browser: {}", e);
+                        }
+                        continue;
+                    }
+
                     // Check if a challenge/OTP response is needed
                     if status.needs_challenge() {
                         info!("Session requires challenge/OTP response");
