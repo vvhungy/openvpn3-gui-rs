@@ -150,6 +150,11 @@ pub(crate) fn handle_tray_action(
                 });
             });
         }
+        TrayAction::Preferences => {
+            info!("Tray action: Preferences");
+            let configs = tray.update(|t| t.configs.clone()).unwrap_or_default();
+            crate::dialogs::show_preferences_dialog(None, settings, configs);
+        }
         TrayAction::About => {
             info!("Tray action: About");
             crate::dialogs::show_about_dialog(None);
@@ -157,10 +162,6 @@ pub(crate) fn handle_tray_action(
         TrayAction::Quit => {
             info!("Tray action: Quit");
             gtk_app.quit();
-        }
-        TrayAction::SetStartupAction(action) => {
-            info!("Tray action: Set startup action to {}", action);
-            settings.set_startup_action(action);
         }
         TrayAction::ClearCredentials => {
             info!("Tray action: Clear saved credentials");

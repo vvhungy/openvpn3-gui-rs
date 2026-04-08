@@ -4,6 +4,7 @@ mod about;
 mod configuration;
 mod credentials;
 mod notification;
+mod preferences;
 
 pub use about::show_about_dialog;
 pub use configuration::{
@@ -14,3 +15,4 @@ pub use notification::{
     show_connection_notification, show_error_notification, show_info_notification,
     show_reconnect_notification,
 };
+pub use preferences::show_preferences_dialog;
