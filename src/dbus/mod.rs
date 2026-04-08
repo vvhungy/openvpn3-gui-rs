@@ -2,4 +2,5 @@
 
 pub mod configuration;
 pub mod session;
+pub mod session_status;
 pub mod types;
