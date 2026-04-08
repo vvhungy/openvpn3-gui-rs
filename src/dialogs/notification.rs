@@ -9,6 +9,8 @@ use futures::StreamExt;
 use tracing::warn;
 use zbus::message::Type as MessageType;
 
+use crate::settings::Settings;
+
 /// Send a notification via org.freedesktop.Notifications D-Bus interface
 fn send_notification(summary: &str, body: &str, urgency: u8) {
     let summary = summary.to_string();
@@ -44,18 +46,24 @@ async fn send_dbus_notification(summary: &str, body: &str, urgency: u8) -> anyho
     Ok(())
 }
 
-/// Show an info notification
+/// Show an info notification (suppressed when show_notifications is off)
 pub fn show_info_notification(title: &str, message: &str) {
+    if !Settings::new().show_notifications() {
+        return;
+    }
     send_notification(title, message, 1);
 }
 
-/// Show an error notification
+/// Show an error notification (always shown regardless of show_notifications)
 pub fn show_error_notification(title: &str, message: &str) {
     send_notification(title, message, 2);
 }
 
-/// Show a connection status notification
+/// Show a connection status notification (suppressed when show_notifications is off)
 pub fn show_connection_notification(config_name: &str, status: &str) {
+    if !Settings::new().show_notifications() {
+        return;
+    }
     let title = format!("VPN: {}", config_name);
     send_notification(&title, status, 1);
 }
