@@ -27,9 +27,6 @@ ksni = { version = "0.3", features = ["blocking"] }
 # Secret storage (oo7 is the modern Rust secret-service crate)
 oo7 = "0.4"
 
-# GSettings
-gsettings-macro = "0.2"
-
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -38,11 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 
 # Error handling
-thiserror = "2"
 anyhow = "1"
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
 
 # Async utilities
 futures = "0.3"
