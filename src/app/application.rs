@@ -3,8 +3,8 @@
 use futures::StreamExt;
 use gio::ApplicationFlags;
 use glib::ExitCode;
-use gtk4::Application as GtkApplication;
 use gtk4::prelude::*;
+use gtk4::{Application as GtkApplication, ApplicationWindow};
 use tracing::{error, info};
 
 use crate::config::APPLICATION_ID;
@@ -77,6 +77,10 @@ impl Application {
         gtk_app.connect_startup(move |gtk_app| {
             info!("Application startup");
 
+            // Hidden window — never shown, used as transient parent for all dialogs
+            // so GTK doesn't warn about dialogs without a transient parent.
+            let parent_window = ApplicationWindow::builder().application(gtk_app).build();
+
             // Wire up the action receiver on the glib main loop
             let dbus = dbus_conn.clone();
             let settings_for_actions = settings_clone.clone();
@@ -92,6 +96,7 @@ impl Application {
                         &settings_for_actions,
                         &tray,
                         &gtk_app_clone,
+                        &parent_window,
                     );
                 }
             });
@@ -159,14 +164,15 @@ impl Application {
         // --- Open signal (file associations) ---
         let dbus_conn = dbus_connection.clone();
         let tray_for_open = tray_handle.clone();
-        gtk_app.connect_open(move |_app, files, _hint| {
+        gtk_app.connect_open(move |app, files, _hint| {
+            let parent = app.windows().into_iter().next();
             for file in files {
                 if let Some(path) = file.path() {
                     info!("Open file: {:?}", path);
                     let dbus = dbus_conn.clone();
                     let tray = tray_for_open.clone();
                     crate::dialogs::show_config_import_dialog(
-                        None,
+                        parent.as_ref(),
                         path.clone(),
                         move |name, path| {
                             let dbus = dbus.clone();

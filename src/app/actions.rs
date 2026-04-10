@@ -2,8 +2,8 @@
 
 use tracing::{error, info};
 
-use gtk4::Application as GtkApplication;
 use gtk4::prelude::*;
+use gtk4::{Application as GtkApplication, ApplicationWindow};
 
 use crate::settings::Settings;
 use crate::tray::{TrayAction, VpnTray};
@@ -18,6 +18,7 @@ pub(crate) fn handle_tray_action(
     settings: &Settings,
     tray: &ksni::blocking::Handle<VpnTray>,
     gtk_app: &GtkApplication,
+    parent: &ApplicationWindow,
 ) {
     match action {
         TrayAction::Connect(config_path) => {
@@ -98,65 +99,77 @@ pub(crate) fn handle_tray_action(
                 .flatten()
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            crate::dialogs::show_config_remove_dialog(None, &name, move || {
-                let dbus = dbus.clone();
-                let config_path = config_path.clone();
-                let tray = tray.clone();
-                glib::spawn_future_local(async move {
-                    match remove_config(&dbus, &config_path).await {
-                        Ok(_) => {
-                            crate::dialogs::show_info_notification(
-                                "Configuration Removed",
-                                "Configuration has been removed",
-                            );
-                            refresh_configs(&dbus, &tray).await;
+            let parent = parent.clone();
+            crate::dialogs::show_config_remove_dialog(
+                Some(parent.upcast_ref()),
+                &name,
+                move || {
+                    let dbus = dbus.clone();
+                    let config_path = config_path.clone();
+                    let tray = tray.clone();
+                    glib::spawn_future_local(async move {
+                        match remove_config(&dbus, &config_path).await {
+                            Ok(_) => {
+                                crate::dialogs::show_info_notification(
+                                    "Configuration Removed",
+                                    "Configuration has been removed",
+                                );
+                                refresh_configs(&dbus, &tray).await;
+                            }
+                            Err(e) => {
+                                error!("Failed to remove config: {}", e);
+                                crate::dialogs::show_error_notification(
+                                    "Remove Failed",
+                                    &format!("Could not remove configuration: {}", e),
+                                );
+                            }
                         }
-                        Err(e) => {
-                            error!("Failed to remove config: {}", e);
-                            crate::dialogs::show_error_notification(
-                                "Remove Failed",
-                                &format!("Could not remove configuration: {}", e),
-                            );
-                        }
-                    }
-                });
-            });
+                    });
+                },
+            );
         }
         TrayAction::ImportConfig => {
             info!("Tray action: Import config");
             let dbus = dbus.clone();
             let tray = tray.clone();
-            crate::dialogs::show_config_select_dialog(None, move |path| {
+            let p_select = parent.clone();
+            let p_import = parent.clone();
+            crate::dialogs::show_config_select_dialog(Some(p_select.upcast_ref()), move |path| {
                 let dbus = dbus.clone();
                 let tray = tray.clone();
-                crate::dialogs::show_config_import_dialog(None, path, move |name, path| {
-                    let dbus = dbus.clone();
-                    let tray = tray.clone();
-                    glib::spawn_future_local(async move {
-                        match import_config(&dbus, &name, &path).await {
-                            Ok(_) => {
-                                refresh_configs(&dbus, &tray).await;
+                let p = p_import.clone();
+                crate::dialogs::show_config_import_dialog(
+                    Some(p.upcast_ref()),
+                    path,
+                    move |name, path| {
+                        let dbus = dbus.clone();
+                        let tray = tray.clone();
+                        glib::spawn_future_local(async move {
+                            match import_config(&dbus, &name, &path).await {
+                                Ok(_) => {
+                                    refresh_configs(&dbus, &tray).await;
+                                }
+                                Err(e) => {
+                                    error!("Failed to import config: {}", e);
+                                    crate::dialogs::show_error_notification(
+                                        "Import Failed",
+                                        &format!("Could not import configuration: {}", e),
+                                    );
+                                }
                             }
-                            Err(e) => {
-                                error!("Failed to import config: {}", e);
-                                crate::dialogs::show_error_notification(
-                                    "Import Failed",
-                                    &format!("Could not import configuration: {}", e),
-                                );
-                            }
-                        }
-                    });
-                });
+                        });
+                    },
+                );
             });
         }
         TrayAction::Preferences => {
             info!("Tray action: Preferences");
             let configs = tray.update(|t| t.configs.clone()).unwrap_or_default();
-            crate::dialogs::show_preferences_dialog(None, settings, configs);
+            crate::dialogs::show_preferences_dialog(Some(parent.upcast_ref()), settings, configs);
         }
         TrayAction::About => {
             info!("Tray action: About");
-            crate::dialogs::show_about_dialog(None);
+            crate::dialogs::show_about_dialog(Some(parent.upcast_ref()));
         }
         TrayAction::Quit => {
             info!("Tray action: Quit");
