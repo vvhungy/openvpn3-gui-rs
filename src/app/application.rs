@@ -14,7 +14,7 @@ use crate::tray::{TrayAction, VpnTray};
 
 use super::actions::handle_tray_action;
 use super::config_ops::{import_config, refresh_configs};
-use super::dbus_init::init_dbus;
+use super::dbus_init::{init_dbus, watch_service_restart};
 use super::signal_handlers::setup_signal_handlers;
 
 /// Command-line arguments
@@ -140,6 +140,14 @@ impl Application {
                     Ok(_) => info!("Signal handlers setup complete"),
                     Err(e) => error!("Failed to setup signal handlers: {}", e),
                 }
+            });
+
+            // Watch for OpenVPN3 service restart — re-initializes tray on recovery
+            let dbus = dbus_conn.clone();
+            let settings = settings_clone.clone();
+            let tray = tray_handle_clone.clone();
+            glib::spawn_future_local(async move {
+                watch_service_restart(&dbus, &settings, &tray).await;
             });
         });
 
