@@ -167,6 +167,19 @@ pub(crate) fn handle_tray_action(
             let configs = tray.update(|t| t.configs.clone()).unwrap_or_default();
             crate::dialogs::show_preferences_dialog(Some(parent.upcast_ref()), settings, configs);
         }
+        TrayAction::ViewLogs(session_path) => {
+            info!("Tray action: View Logs for {}", session_path);
+            let config_name = tray
+                .update(|t| t.sessions.get(session_path).map(|s| s.config_name.clone()))
+                .flatten()
+                .unwrap_or_else(|| "VPN".to_string());
+            crate::dialogs::show_session_log_dialog(
+                Some(parent.upcast_ref()),
+                &config_name,
+                session_path,
+                dbus,
+            );
+        }
         TrayAction::About => {
             info!("Tray action: About");
             crate::dialogs::show_about_dialog(Some(parent.upcast_ref()));

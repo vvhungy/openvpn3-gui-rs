@@ -175,6 +175,19 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
         .into(),
     );
 
+    // View Logs is always available for diagnostics
+    let p = session_path.clone();
+    items.push(
+        StandardItem {
+            label: "View Logs".into(),
+            activate: Box::new(move |tray: &mut VpnTray| {
+                tray.send_action(TrayAction::ViewLogs(p.clone()));
+            }),
+            ..Default::default()
+        }
+        .into(),
+    );
+
     items
 }
 
