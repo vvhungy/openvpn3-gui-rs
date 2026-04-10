@@ -80,6 +80,7 @@ impl Application {
             // Hidden window — never shown, used as transient parent for all dialogs
             // so GTK doesn't warn about dialogs without a transient parent.
             let parent_window = ApplicationWindow::builder().application(gtk_app).build();
+            super::set_dialog_parent(parent_window.clone());
 
             // Wire up the action receiver on the glib main loop
             let dbus = dbus_conn.clone();

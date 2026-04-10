@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use glib::object::Cast;
 use tracing::{error, info, warn};
 use zbus::zvariant::OwnedObjectPath;
 
@@ -165,8 +166,9 @@ pub(crate) async fn request_credentials(
         });
     };
 
+    let parent = super::dialog_parent();
     crate::dialogs::show_credentials_dialog(
-        None,
+        parent.as_ref().map(|w| w.upcast_ref()),
         &config_name,
         &fields,
         move |values, remember| {
