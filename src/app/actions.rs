@@ -168,15 +168,24 @@ pub(crate) fn handle_tray_action(
             crate::dialogs::show_preferences_dialog(Some(parent.upcast_ref()), settings, configs);
         }
         TrayAction::ViewLogs(session_path) => {
-            info!("Tray action: View Logs for {}", session_path);
-            let config_name = tray
-                .update(|t| t.sessions.get(session_path).map(|s| s.config_name.clone()))
-                .flatten()
-                .unwrap_or_else(|| "VPN".to_string());
+            let (config_name, sp) = match session_path {
+                Some(sp) => {
+                    info!("Tray action: View Logs for {}", sp);
+                    let name = tray
+                        .update(|t| t.sessions.get(sp).map(|s| s.config_name.clone()))
+                        .flatten()
+                        .unwrap_or_else(|| "VPN".to_string());
+                    (name, Some(sp.as_str()))
+                }
+                None => {
+                    info!("Tray action: View Logs (all sessions)");
+                    ("All Sessions".to_string(), None)
+                }
+            };
             crate::dialogs::show_session_log_dialog(
                 Some(parent.upcast_ref()),
                 &config_name,
-                session_path,
+                sp,
                 dbus,
             );
         }

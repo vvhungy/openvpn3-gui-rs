@@ -66,6 +66,18 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
 
     items.push(MenuItem::Separator);
 
+    // --- View Logs (always visible) ---
+    items.push(
+        StandardItem {
+            label: "View Logs".into(),
+            activate: Box::new(|tray: &mut VpnTray| {
+                tray.send_action(TrayAction::ViewLogs(None));
+            }),
+            ..Default::default()
+        }
+        .into(),
+    );
+
     // --- Preferences ---
     items.push(
         StandardItem {
@@ -181,7 +193,7 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
         StandardItem {
             label: "View Logs".into(),
             activate: Box::new(move |tray: &mut VpnTray| {
-                tray.send_action(TrayAction::ViewLogs(p.clone()));
+                tray.send_action(TrayAction::ViewLogs(Some(p.clone())));
             }),
             ..Default::default()
         }

@@ -29,19 +29,25 @@ fn log_category_label(category: u32) -> &'static str {
     }
 }
 
-/// Show a live-tail log viewer dialog for the given VPN session.
+/// Show a live-tail log viewer dialog.
 ///
-/// Subscribes to `net.openvpn.v3.backends::Log` signals for `session_path`
-/// and streams them into a scrollable monospace text view.  The D-Bus match
-/// rule is removed when the dialog is closed.
+/// Pass `session_path = Some(path)` to filter to a specific session, or
+/// `None` to show all `net.openvpn.v3.backends::Log` signals.  The D-Bus
+/// match rule is removed when the dialog is closed.
 pub fn show_session_log_dialog(
     parent: Option<&gtk4::Window>,
     config_name: &str,
-    session_path: &str,
+    session_path: Option<&str>,
     dbus: &zbus::Connection,
 ) {
+    let title = if session_path.is_some() {
+        format!("Session Logs — {}", config_name)
+    } else {
+        "VPN Logs".to_string()
+    };
+
     let dialog = Dialog::builder()
-        .title(format!("Session Logs — {}", config_name))
+        .title(title)
         .modal(false)
         .default_width(700)
         .default_height(450)
@@ -50,10 +56,12 @@ pub fn show_session_log_dialog(
     dialog.add_button("Close", ResponseType::Close);
 
     let buffer = gtk4::TextBuffer::new(None);
-    buffer.set_text(&format!(
-        "Listening for log messages from '{}'...\n",
-        config_name
-    ));
+    let header = if session_path.is_some() {
+        format!("Listening for log messages from '{}'...\n", config_name)
+    } else {
+        "Listening for all VPN log messages...\n".to_string()
+    };
+    buffer.set_text(&header);
 
     let text_view = TextView::builder()
         .buffer(&buffer)
@@ -97,13 +105,17 @@ pub fn show_session_log_dialog(
     let end_mark = buffer.create_mark(Some("log-end"), &buffer.end_iter(), false);
 
     let dbus = dbus.clone();
-    let session_path = session_path.to_string();
+    let session_path = session_path.map(|s| s.to_string());
 
     glib::spawn_future_local(async move {
-        let match_rule = format!(
-            "type='signal',interface='net.openvpn.v3.backends',member='Log',path='{}'",
-            session_path
-        );
+        let match_rule = if let Some(ref sp) = session_path {
+            format!(
+                "type='signal',interface='net.openvpn.v3.backends',member='Log',path='{}'",
+                sp
+            )
+        } else {
+            "type='signal',interface='net.openvpn.v3.backends',member='Log'".to_string()
+        };
 
         let subscribed = dbus
             .call_method(
@@ -150,12 +162,14 @@ pub fn show_session_log_dialog(
                     if header.member().map(|m| m.as_str()) != Some("Log") {
                         continue;
                     }
-                    let path = header
-                        .path()
-                        .map(|p| p.as_str().to_string())
-                        .unwrap_or_default();
-                    if path != session_path {
-                        continue;
+                    if let Some(ref sp) = session_path {
+                        let path = header
+                            .path()
+                            .map(|p| p.as_str())
+                            .unwrap_or_default();
+                        if path != sp.as_str() {
+                            continue;
+                        }
                     }
 
                     match msg.body().deserialize::<(u32, u32, &str)>() {
