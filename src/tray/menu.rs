@@ -66,18 +66,6 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
 
     items.push(MenuItem::Separator);
 
-    // --- Clear Credentials ---
-    items.push(
-        StandardItem {
-            label: "Clear Saved Credentials".into(),
-            activate: Box::new(|tray: &mut VpnTray| {
-                tray.send_action(TrayAction::ClearCredentials);
-            }),
-            ..Default::default()
-        }
-        .into(),
-    );
-
     // --- Preferences ---
     items.push(
         StandardItem {

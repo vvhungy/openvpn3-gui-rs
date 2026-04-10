@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, CheckButton, ComboBoxText, Dialog, Label, Orientation, ResponseType, Separator,
-    SpinButton,
+    Box as GtkBox, Button, ButtonsType, CheckButton, ComboBoxText, Dialog, Label, MessageDialog,
+    MessageType, Orientation, ResponseType, Separator, SpinButton,
 };
 
 use crate::settings::Settings;
@@ -116,6 +116,66 @@ pub fn show_preferences_dialog(
     interval_row.append(&interval_label);
     interval_row.append(&interval_spin);
     vbox.append(&interval_row);
+
+    // --- Security ---
+    vbox.append(&Separator::new(Orientation::Horizontal));
+
+    let security_label = Label::builder()
+        .label("<b>Security</b>")
+        .use_markup(true)
+        .halign(gtk4::Align::Start)
+        .build();
+    vbox.append(&security_label);
+
+    let clear_btn = Button::builder()
+        .label("Clear Saved Credentials...")
+        .halign(gtk4::Align::Start)
+        .build();
+    clear_btn.add_css_class("destructive-action");
+    vbox.append(&clear_btn);
+
+    let dialog_for_clear = dialog.clone();
+    clear_btn.connect_clicked(move |_| {
+        let confirm = MessageDialog::builder()
+            .transient_for(&dialog_for_clear)
+            .modal(true)
+            .message_type(MessageType::Warning)
+            .buttons(ButtonsType::None)
+            .text("Clear all saved credentials?")
+            .secondary_text(
+                "This will delete all saved usernames and passwords. This cannot be undone.",
+            )
+            .build();
+        confirm.add_button("Cancel", ResponseType::Cancel);
+        let clear_response = confirm.add_button("Clear", ResponseType::Accept);
+        clear_response.add_css_class("destructive-action");
+
+        confirm.connect_response(move |dlg, response| {
+            dlg.close();
+            if response == ResponseType::Accept {
+                glib::spawn_future_local(async move {
+                    match crate::credentials::CredentialStore::default()
+                        .clear_all_async()
+                        .await
+                    {
+                        Ok(0) => crate::dialogs::show_info_notification(
+                            "Credentials Cleared",
+                            "No saved credentials found.",
+                        ),
+                        Ok(n) => crate::dialogs::show_info_notification(
+                            "Credentials Cleared",
+                            &format!("{} saved credential(s) removed.", n),
+                        ),
+                        Err(e) => crate::dialogs::show_error_notification(
+                            "Clear Failed",
+                            &format!("Could not clear credentials: {}", e),
+                        ),
+                    }
+                });
+            }
+        });
+        confirm.present();
+    });
 
     // --- Response handler ---
     let settings_clone = settings.clone();

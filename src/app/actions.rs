@@ -5,7 +5,6 @@ use tracing::{error, info};
 use gtk4::Application as GtkApplication;
 use gtk4::prelude::*;
 
-use crate::credentials::CredentialStore;
 use crate::settings::Settings;
 use crate::tray::{TrayAction, VpnTray};
 
@@ -162,35 +161,6 @@ pub(crate) fn handle_tray_action(
         TrayAction::Quit => {
             info!("Tray action: Quit");
             gtk_app.quit();
-        }
-        TrayAction::ClearCredentials => {
-            info!("Tray action: Clear saved credentials");
-            glib::spawn_future_local(async move {
-                let store = match CredentialStore::new() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Failed to open credential store: {}", e);
-                        return;
-                    }
-                };
-                match store.clear_all_async().await {
-                    Ok(0) => crate::dialogs::show_info_notification(
-                        "Credentials Cleared",
-                        "No saved credentials found.",
-                    ),
-                    Ok(n) => crate::dialogs::show_info_notification(
-                        "Credentials Cleared",
-                        &format!("{} saved credential(s) removed.", n),
-                    ),
-                    Err(e) => {
-                        error!("Failed to clear credentials: {}", e);
-                        crate::dialogs::show_error_notification(
-                            "Clear Failed",
-                            &format!("Could not clear credentials: {}", e),
-                        );
-                    }
-                }
-            });
         }
     }
 }

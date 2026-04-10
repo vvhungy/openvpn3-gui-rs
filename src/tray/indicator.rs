@@ -21,7 +21,7 @@ pub enum TrayAction {
     ImportConfig,
     About,
     Quit,
-    ClearCredentials,
+
     Preferences,
 }
 
