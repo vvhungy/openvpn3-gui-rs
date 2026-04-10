@@ -21,8 +21,9 @@ pub enum TrayAction {
     ImportConfig,
     About,
     Quit,
-    ClearCredentials,
+
     Preferences,
+    ViewLogs(Option<String>), // Some(session path) for a specific session, None for all
 }
 
 /// A known VPN configuration

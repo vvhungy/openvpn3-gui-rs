@@ -3,8 +3,8 @@
 use futures::StreamExt;
 use gio::ApplicationFlags;
 use glib::ExitCode;
-use gtk4::Application as GtkApplication;
 use gtk4::prelude::*;
+use gtk4::{Application as GtkApplication, ApplicationWindow};
 use tracing::{error, info};
 
 use crate::config::APPLICATION_ID;
@@ -14,7 +14,7 @@ use crate::tray::{TrayAction, VpnTray};
 
 use super::actions::handle_tray_action;
 use super::config_ops::{import_config, refresh_configs};
-use super::dbus_init::init_dbus;
+use super::dbus_init::{init_dbus, watch_service_restart};
 use super::signal_handlers::setup_signal_handlers;
 
 /// Command-line arguments
@@ -77,6 +77,11 @@ impl Application {
         gtk_app.connect_startup(move |gtk_app| {
             info!("Application startup");
 
+            // Hidden window — never shown, used as transient parent for all dialogs
+            // so GTK doesn't warn about dialogs without a transient parent.
+            let parent_window = ApplicationWindow::builder().application(gtk_app).build();
+            super::set_dialog_parent(parent_window.clone());
+
             // Wire up the action receiver on the glib main loop
             let dbus = dbus_conn.clone();
             let settings_for_actions = settings_clone.clone();
@@ -92,6 +97,7 @@ impl Application {
                         &settings_for_actions,
                         &tray,
                         &gtk_app_clone,
+                        &parent_window,
                     );
                 }
             });
@@ -141,6 +147,14 @@ impl Application {
                     Err(e) => error!("Failed to setup signal handlers: {}", e),
                 }
             });
+
+            // Watch for OpenVPN3 service restart — re-initializes tray on recovery
+            let dbus = dbus_conn.clone();
+            let settings = settings_clone.clone();
+            let tray = tray_handle_clone.clone();
+            glib::spawn_future_local(async move {
+                watch_service_restart(&dbus, &settings, &tray).await;
+            });
         });
 
         // --- Activate signal ---
@@ -151,14 +165,15 @@ impl Application {
         // --- Open signal (file associations) ---
         let dbus_conn = dbus_connection.clone();
         let tray_for_open = tray_handle.clone();
-        gtk_app.connect_open(move |_app, files, _hint| {
+        gtk_app.connect_open(move |app, files, _hint| {
+            let parent = app.windows().into_iter().next();
             for file in files {
                 if let Some(path) = file.path() {
                     info!("Open file: {:?}", path);
                     let dbus = dbus_conn.clone();
                     let tray = tray_for_open.clone();
                     crate::dialogs::show_config_import_dialog(
-                        None,
+                        parent.as_ref(),
                         path.clone(),
                         move |name, path| {
                             let dbus = dbus.clone();

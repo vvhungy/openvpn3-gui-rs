@@ -66,12 +66,12 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
 
     items.push(MenuItem::Separator);
 
-    // --- Clear Credentials ---
+    // --- View Logs (always visible) ---
     items.push(
         StandardItem {
-            label: "Clear Saved Credentials".into(),
+            label: "View Logs".into(),
             activate: Box::new(|tray: &mut VpnTray| {
-                tray.send_action(TrayAction::ClearCredentials);
+                tray.send_action(TrayAction::ViewLogs(None));
             }),
             ..Default::default()
         }
@@ -181,6 +181,19 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
             label: "Disconnect".into(),
             activate: Box::new(move |tray: &mut VpnTray| {
                 tray.send_action(TrayAction::Disconnect(p.clone()));
+            }),
+            ..Default::default()
+        }
+        .into(),
+    );
+
+    // View Logs is always available for diagnostics
+    let p = session_path.clone();
+    items.push(
+        StandardItem {
+            label: "View Logs".into(),
+            activate: Box::new(move |tray: &mut VpnTray| {
+                tray.send_action(TrayAction::ViewLogs(Some(p.clone())));
             }),
             ..Default::default()
         }

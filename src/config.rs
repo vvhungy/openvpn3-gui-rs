@@ -12,6 +12,9 @@ pub const APPLICATION_ID: &str = "net.openvpn.openvpn3_gui_rs";
 /// Application version
 pub const APPLICATION_VERSION: &str = "0.2.0";
 
+/// OpenVPN3 configuration manager D-Bus service name (used to detect restarts)
+pub const OPENVPN3_SERVICE: &str = "net.openvpn.v3.configuration";
+
 /// Minimum supported OpenVPN3 manager version
 pub const MANAGER_VERSION_MINIMUM: u32 = 20;
 

@@ -1,5 +1,6 @@
 //! Challenge / OTP request flow
 
+use glib::object::Cast;
 use tracing::{error, info, warn};
 use zbus::zvariant::OwnedObjectPath;
 
@@ -95,8 +96,9 @@ pub(crate) async fn request_challenge(
         });
     };
 
+    let parent = super::dialog_parent();
     crate::dialogs::show_challenge_dialog(
-        None,
+        parent.as_ref().map(|w| w.upcast_ref()),
         &config_name,
         &challenge_text,
         move |response_text| {

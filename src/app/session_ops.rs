@@ -132,3 +132,55 @@ pub(crate) async fn disconnect_with_message(
     }
     crate::dialogs::show_error_notification(title, message);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const P1: &str = "/net/openvpn/v3/sessions/test000000000001";
+    const P2: &str = "/net/openvpn/v3/sessions/test000000000002";
+
+    fn cleanup(paths: &[&str]) {
+        if let Ok(mut set) = USER_DISCONNECTED.lock() {
+            for p in paths {
+                set.remove(*p);
+            }
+        }
+    }
+
+    #[test]
+    fn test_user_disconnected_insert_and_remove() {
+        cleanup(&[P1]);
+        USER_DISCONNECTED.lock().unwrap().insert(P1.to_string());
+        let removed = USER_DISCONNECTED.lock().unwrap().remove(P1);
+        assert!(removed, "inserted path should be removable");
+        let again = USER_DISCONNECTED.lock().unwrap().remove(P1);
+        assert!(!again, "second remove of same path should return false");
+    }
+
+    #[test]
+    fn test_user_disconnected_missing_path_returns_false() {
+        cleanup(&[P2]);
+        let removed = USER_DISCONNECTED.lock().unwrap().remove(P2);
+        assert!(!removed, "removing absent path should return false");
+    }
+
+    #[test]
+    fn test_user_disconnected_multiple_sessions() {
+        cleanup(&[P1, P2]);
+        {
+            let mut set = USER_DISCONNECTED.lock().unwrap();
+            set.insert(P1.to_string());
+            set.insert(P2.to_string());
+        }
+        USER_DISCONNECTED.lock().unwrap().remove(P1);
+        let p2_present = USER_DISCONNECTED.lock().unwrap().contains(P2);
+        assert!(p2_present, "P2 should still be present after removing P1");
+        cleanup(&[P2]);
+    }
+
+    #[test]
+    fn test_user_disconnected_lock_accessible() {
+        let _guard = USER_DISCONNECTED.lock().unwrap();
+    }
+}
