@@ -7,7 +7,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{CheckButton, Dialog, Entry, Grid, Label, PasswordEntry, ResponseType};
+use gtk4::{Box as GtkBox, CheckButton, Entry, Grid, Label, Orientation, PasswordEntry};
+
+use super::layout::{CONTENT_MARGIN, GRID_SPACING, make_button_row};
 
 /// A credential field descriptor
 #[derive(Debug, Clone)]
@@ -38,23 +40,25 @@ pub fn show_credentials_dialog<F, C>(
     F: Fn(Vec<(String, String)>, bool) + 'static,
     C: Fn() + 'static,
 {
-    let dialog = Dialog::builder()
+    let window = gtk4::Window::builder()
         .title("VPN Credentials")
         .modal(true)
+        .resizable(false)
         .build();
 
-    dialog.add_button("Cancel", ResponseType::Cancel);
-    dialog.add_button("Connect", ResponseType::Accept);
+    if let Some(p) = parent {
+        window.set_transient_for(Some(p));
+    }
 
-    let content = dialog.content_area();
+    let vbox = GtkBox::new(Orientation::Vertical, 0);
 
     let grid = Grid::builder()
-        .margin_top(20)
-        .margin_bottom(20)
-        .margin_start(20)
-        .margin_end(20)
-        .row_spacing(10)
-        .column_spacing(10)
+        .margin_top(CONTENT_MARGIN)
+        .margin_bottom(CONTENT_MARGIN)
+        .margin_start(CONTENT_MARGIN)
+        .margin_end(CONTENT_MARGIN)
+        .row_spacing(GRID_SPACING)
+        .column_spacing(GRID_SPACING)
         .build();
 
     // Config name label
@@ -66,7 +70,6 @@ pub fn show_credentials_dialog<F, C>(
     grid.attach(&config_label, 0, 0, 2, 1);
 
     // Dynamically create entry fields for each credential slot
-    // Store entries as (label, Entry/PasswordEntry widget getter)
     let mut entry_getters: Vec<(String, Box<dyn Fn() -> String>)> = Vec::new();
     let mut first_empty_entry: Option<gtk4::Widget> = None;
     let has_storable = fields.iter().any(|f| f.can_store);
@@ -123,42 +126,52 @@ pub fn show_credentials_dialog<F, C>(
         .build();
     grid.attach(&remember_check, 0, remember_row, 2, 1);
 
-    content.append(&grid);
+    vbox.append(&grid);
 
-    if let Some(p) = parent {
-        dialog.set_transient_for(Some(p));
-    }
+    // Guard against double-fire
+    let handled = Rc::new(Cell::new(false));
+    let entry_getters = Rc::new(entry_getters);
+
+    vbox.append(&make_button_row(
+        "Cancel",
+        "Connect",
+        {
+            let window = window.clone();
+            let handled = handled.clone();
+            move || {
+                if handled.get() {
+                    return;
+                }
+                handled.set(true);
+                on_cancel();
+                window.close();
+            }
+        },
+        {
+            let window = window.clone();
+            move || {
+                if handled.get() {
+                    return;
+                }
+                handled.set(true);
+                let values: Vec<(String, String)> = entry_getters
+                    .iter()
+                    .map(|(label, getter)| (label.clone(), getter()))
+                    .collect();
+                let remember = remember_check.is_active();
+                on_submit(values, remember);
+                window.close();
+            }
+        },
+    ));
 
     // Focus first empty field, or first field
     if let Some(entry) = first_empty_entry {
         entry.grab_focus();
     }
 
-    // Guard against double-fire: dialog.close() can emit another response
-    let handled = Rc::new(Cell::new(false));
-    let entry_getters = Rc::new(entry_getters);
-
-    dialog.connect_response(move |dialog, response| {
-        if handled.get() {
-            dialog.close();
-            return;
-        }
-        handled.set(true);
-
-        if response == ResponseType::Accept {
-            let values: Vec<(String, String)> = entry_getters
-                .iter()
-                .map(|(label, getter)| (label.clone(), getter()))
-                .collect();
-            let remember = remember_check.is_active();
-            on_submit(values, remember);
-        } else {
-            on_cancel();
-        }
-        dialog.close();
-    });
-
-    dialog.present();
+    window.set_child(Some(&vbox));
+    window.present();
 }
 
 /// Show a challenge/response dialog for OTP or challenge-based authentication.
@@ -174,23 +187,25 @@ pub fn show_challenge_dialog<F, C>(
     F: Fn(String) + 'static,
     C: Fn() + 'static,
 {
-    let dialog = Dialog::builder()
+    let window = gtk4::Window::builder()
         .title("VPN Authentication Challenge")
         .modal(true)
+        .resizable(false)
         .build();
 
-    dialog.add_button("Cancel", ResponseType::Cancel);
-    dialog.add_button("Submit", ResponseType::Accept);
+    if let Some(p) = parent {
+        window.set_transient_for(Some(p));
+    }
 
-    let content = dialog.content_area();
+    let vbox = GtkBox::new(Orientation::Vertical, 0);
 
     let grid = Grid::builder()
-        .margin_top(20)
-        .margin_bottom(20)
-        .margin_start(20)
-        .margin_end(20)
-        .row_spacing(10)
-        .column_spacing(10)
+        .margin_top(CONTENT_MARGIN)
+        .margin_bottom(CONTENT_MARGIN)
+        .margin_start(CONTENT_MARGIN)
+        .margin_end(CONTENT_MARGIN)
+        .row_spacing(GRID_SPACING)
+        .column_spacing(GRID_SPACING)
         .build();
 
     // Config name
@@ -205,8 +220,8 @@ pub fn show_challenge_dialog<F, C>(
         .label(challenge)
         .halign(gtk4::Align::Start)
         .wrap(true)
-        .margin_top(10)
-        .margin_bottom(10)
+        .margin_top(GRID_SPACING)
+        .margin_bottom(GRID_SPACING)
         .build();
     grid.attach(&challenge_label, 0, 1, 2, 1);
 
@@ -223,34 +238,45 @@ pub fn show_challenge_dialog<F, C>(
         .build();
     grid.attach(&response_entry, 1, 2, 1, 1);
 
-    content.append(&grid);
+    vbox.append(&grid);
 
-    if let Some(p) = parent {
-        dialog.set_transient_for(Some(p));
-    }
-
-    response_entry.grab_focus();
-
+    // Guard against double-fire
     let handled = Rc::new(Cell::new(false));
 
     let response_clone = response_entry.clone();
-    dialog.connect_response(move |dialog, response| {
-        if handled.get() {
-            dialog.close();
-            return;
-        }
-        handled.set(true);
-
-        if response == ResponseType::Accept {
-            let response_text = response_clone.text().to_string();
-            if !response_text.is_empty() {
-                on_response(response_text);
+    vbox.append(&make_button_row(
+        "Cancel",
+        "Submit",
+        {
+            let window = window.clone();
+            let handled = handled.clone();
+            move || {
+                if handled.get() {
+                    return;
+                }
+                handled.set(true);
+                on_cancel();
+                window.close();
             }
-        } else {
-            on_cancel();
-        }
-        dialog.close();
-    });
+        },
+        {
+            let window = window.clone();
+            move || {
+                if handled.get() {
+                    return;
+                }
+                handled.set(true);
+                let response_text = response_clone.text().to_string();
+                if !response_text.is_empty() {
+                    on_response(response_text);
+                }
+                window.close();
+            }
+        },
+    ));
 
-    dialog.present();
+    response_entry.grab_focus();
+
+    window.set_child(Some(&vbox));
+    window.present();
 }
