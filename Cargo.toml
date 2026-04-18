@@ -40,6 +40,9 @@ anyhow = "1"
 # Async utilities
 futures = "0.3"
 
+# Time formatting for log viewer
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 [build-dependencies]
 glib-build-tools = "0.20"
 
