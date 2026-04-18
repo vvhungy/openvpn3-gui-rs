@@ -143,6 +143,24 @@ impl Settings {
         }
     }
 
+    /// Get the connection timeout in seconds (default 30)
+    pub fn connection_timeout(&self) -> u32 {
+        self.settings
+            .as_ref()
+            .map(|s| s.uint("connection-timeout"))
+            .unwrap_or(30)
+            .clamp(5, 300)
+    }
+
+    /// Set the connection timeout in seconds
+    pub fn set_connection_timeout(&self, secs: u32) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_uint("connection-timeout", secs.clamp(5, 300))
+        {
+            error!("Failed to set connection-timeout: {}", e);
+        }
+    }
+
     /// Check if notifications are enabled
     pub fn show_notifications(&self) -> bool {
         self.settings
@@ -249,5 +267,15 @@ mod tests {
     #[test]
     fn test_set_tooltip_refresh_interval_no_panic() {
         Settings::new_empty().set_tooltip_refresh_interval(60);
+    }
+
+    #[test]
+    fn test_connection_timeout_default() {
+        assert_eq!(Settings::new_empty().connection_timeout(), 30);
+    }
+
+    #[test]
+    fn test_set_connection_timeout_no_panic() {
+        Settings::new_empty().set_connection_timeout(60);
     }
 }

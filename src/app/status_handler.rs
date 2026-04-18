@@ -318,12 +318,14 @@ pub(super) async fn setup_status_handler(
                         }
                     });
 
-                    // Connection timeout watcher — notify if still connecting after 30s
+                    // Connection timeout watcher — notify if still connecting after
+                    // the user-configured timeout (default 30s).
                     let is_now_connecting = status.is_connecting();
                     if is_now_connecting {
                         let tray_for_timeout = tray_for_status.clone();
+                        let timeout_secs = crate::settings::Settings::new().connection_timeout();
                         glib::spawn_future_local(async move {
-                            glib::timeout_future_seconds(30).await;
+                            glib::timeout_future_seconds(timeout_secs).await;
                             let still_connecting = tray_for_timeout
                                 .update(|t| {
                                     t.sessions
@@ -342,8 +344,8 @@ pub(super) async fn setup_status_handler(
                                     .flatten()
                                     .unwrap_or_else(|| "VPN".to_string());
                                 info!(
-                                    "Connection timeout watcher: '{}' still connecting after 30s",
-                                    config_name
+                                    "Connection timeout watcher: '{}' still connecting after {}s",
+                                    config_name, timeout_secs
                                 );
                                 crate::dialogs::show_error_notification(
                                     &format!("{}: Still Connecting", config_name),

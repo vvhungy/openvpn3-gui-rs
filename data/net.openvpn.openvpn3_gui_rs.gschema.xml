@@ -51,5 +51,14 @@
         the connected-duration display. Range: 10–300.
       </description>
     </key>
+
+    <key name="connection-timeout" type="u">
+      <default>30</default>
+      <summary>Connection timeout (seconds)</summary>
+      <description>
+        How long to wait (in seconds) before notifying the user that a VPN
+        connection is still pending. Range: 5–300.
+      </description>
+    </key>
   </schema>
 </schemalist>
