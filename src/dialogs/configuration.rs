@@ -1,8 +1,10 @@
 //! Configuration dialogs
 
 use gtk4::prelude::*;
-use gtk4::{Dialog, Entry, FileChooserAction, FileChooserDialog, Grid, Label, ResponseType};
+use gtk4::{Entry, FileChooserAction, FileChooserDialog, Grid, Label, ResponseType};
 use tracing::info;
+
+use super::layout::{CONTENT_MARGIN, GRID_SPACING, make_button_row};
 
 /// Show file chooser dialog for selecting an OpenVPN configuration file
 pub fn show_config_select_dialog<F>(parent: Option<&gtk4::Window>, on_select: F)
@@ -55,24 +57,26 @@ pub fn show_config_import_dialog<F>(
 ) where
     F: Fn(String, std::path::PathBuf) + 'static,
 {
-    let dialog = Dialog::builder()
+    let window = gtk4::Window::builder()
         .title("Import Configuration")
         .modal(true)
         .default_width(400)
+        .resizable(false)
         .build();
 
-    dialog.add_button("Cancel", ResponseType::Cancel);
-    dialog.add_button("Import", ResponseType::Accept);
+    if let Some(p) = parent {
+        window.set_transient_for(Some(p));
+    }
 
-    let content = dialog.content_area();
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
 
     let grid = Grid::builder()
-        .margin_top(20)
-        .margin_bottom(20)
-        .margin_start(20)
-        .margin_end(20)
-        .row_spacing(10)
-        .column_spacing(10)
+        .margin_top(CONTENT_MARGIN)
+        .margin_bottom(CONTENT_MARGIN)
+        .margin_start(CONTENT_MARGIN)
+        .margin_end(CONTENT_MARGIN)
+        .row_spacing(GRID_SPACING)
+        .column_spacing(GRID_SPACING)
         .build();
 
     let name_label = Label::builder()
@@ -103,24 +107,29 @@ pub fn show_config_import_dialog<F>(
         .build();
     grid.attach(&file_value, 1, 1, 1, 1);
 
-    content.append(&grid);
-
-    if let Some(p) = parent {
-        dialog.set_transient_for(Some(p));
-    }
-
-    dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept {
-            let name = name_entry.text().to_string();
-            if !name.is_empty() {
-                info!("Importing config '{}' from {:?}", name, path);
-                on_import(name, path.clone());
+    vbox.append(&grid);
+    vbox.append(&make_button_row(
+        "Cancel",
+        "Import",
+        {
+            let window = window.clone();
+            move || window.close()
+        },
+        {
+            let window = window.clone();
+            move || {
+                let name = name_entry.text().to_string();
+                if !name.is_empty() {
+                    info!("Importing config '{}' from {:?}", name, path);
+                    on_import(name, path.clone());
+                }
+                window.close();
             }
-        }
-        dialog.close();
-    });
+        },
+    ));
 
-    dialog.present();
+    window.set_child(Some(&vbox));
+    window.present();
 }
 
 /// Show configuration removal confirmation dialog
@@ -128,40 +137,48 @@ pub fn show_config_remove_dialog<F>(parent: Option<&gtk4::Window>, name: &str, o
 where
     F: Fn() + 'static,
 {
-    let dialog = Dialog::builder()
+    let window = gtk4::Window::builder()
         .title("Remove Configuration")
         .modal(true)
         .default_width(350)
+        .resizable(false)
         .build();
 
-    dialog.add_button("Cancel", ResponseType::Cancel);
-    dialog.add_button("Remove", ResponseType::Accept);
+    if let Some(p) = parent {
+        window.set_transient_for(Some(p));
+    }
 
-    let content = dialog.content_area();
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
 
     let label = Label::builder()
         .label(format!(
             "Remove configuration '{}'?\n\nThis action cannot be undone.",
             name
         ))
-        .margin_top(20)
-        .margin_bottom(20)
-        .margin_start(20)
-        .margin_end(20)
+        .margin_top(CONTENT_MARGIN)
+        .margin_bottom(CONTENT_MARGIN)
+        .margin_start(CONTENT_MARGIN)
+        .margin_end(CONTENT_MARGIN)
         .wrap(true)
         .build();
-    content.append(&label);
+    vbox.append(&label);
 
-    if let Some(p) = parent {
-        dialog.set_transient_for(Some(p));
-    }
+    vbox.append(&make_button_row(
+        "Cancel",
+        "Remove",
+        {
+            let window = window.clone();
+            move || window.close()
+        },
+        {
+            let window = window.clone();
+            move || {
+                on_remove();
+                window.close();
+            }
+        },
+    ));
 
-    dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept {
-            on_remove();
-        }
-        dialog.close();
-    });
-
-    dialog.present();
+    window.set_child(Some(&vbox));
+    window.present();
 }

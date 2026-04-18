@@ -35,27 +35,7 @@ pub(crate) async fn init_dbus(
         .await?;
 
     // Detect manager version
-    let manager_version = match config_manager.version().await {
-        Ok(version_str) => {
-            debug!("Manager version: {}", version_str);
-            if version_str.starts_with("git:") {
-                9999
-            } else if let Some(stripped) = version_str.strip_prefix('v') {
-                stripped
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>()
-                    .parse::<u32>()
-                    .unwrap_or(0)
-            } else {
-                0
-            }
-        }
-        Err(e) => {
-            warn!("Failed to get manager version: {}", e);
-            0
-        }
-    };
+    let manager_version = parse_manager_version(config_manager.version().await.ok());
 
     if manager_version < MANAGER_VERSION_MINIMUM {
         error!(
@@ -279,7 +259,7 @@ pub(crate) async fn watch_service_restart(
         if let Ok((name, old_owner, new_owner)) =
             msg.body().deserialize::<(String, String, String)>()
         {
-            if name != OPENVPN3_SERVICE || !old_owner.is_empty() || new_owner.is_empty() {
+            if !is_service_appeared(&name, &old_owner, &new_owner) {
                 continue;
             }
             info!("OpenVPN3 service restarted, clearing tray and re-initializing");
@@ -300,5 +280,104 @@ pub(crate) async fn watch_service_restart(
                 }
             }
         }
+    }
+}
+
+/// Parse the OpenVPN3 manager version string into a comparable number.
+///
+/// - `"git:..."` → 9999 (dev build, assume latest)
+/// - `"vNN..."`  → leading digits parsed as u32
+/// - other/None  → 0
+fn parse_manager_version(version: Option<String>) -> u32 {
+    let Some(version_str) = version else { return 0 };
+    debug!("Manager version: {}", version_str);
+    if version_str.starts_with("git:") {
+        9999
+    } else if let Some(stripped) = version_str.strip_prefix('v') {
+        stripped
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// True when the OpenVPN3 service just appeared on the bus (was absent before).
+fn is_service_appeared(name: &str, old_owner: &str, new_owner: &str) -> bool {
+    name == OPENVPN3_SERVICE && old_owner.is_empty() && !new_owner.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- parse_manager_version ---
+
+    #[test]
+    fn test_parse_version_none() {
+        assert_eq!(parse_manager_version(None), 0);
+    }
+
+    #[test]
+    fn test_parse_version_v_prefix() {
+        assert_eq!(parse_manager_version(Some("v18".into())), 18);
+    }
+
+    #[test]
+    fn test_parse_version_v_prefix_with_suffix() {
+        assert_eq!(parse_manager_version(Some("v18.2".into())), 18);
+    }
+
+    #[test]
+    fn test_parse_version_git() {
+        assert_eq!(parse_manager_version(Some("git:abc123".into())), 9999);
+    }
+
+    #[test]
+    fn test_parse_version_bare_number() {
+        assert_eq!(parse_manager_version(Some("42".into())), 0);
+    }
+
+    #[test]
+    fn test_parse_version_empty_string() {
+        assert_eq!(parse_manager_version(Some(String::new())), 0);
+    }
+
+    // --- is_service_appeared ---
+
+    #[test]
+    fn test_service_appeared_valid() {
+        assert!(is_service_appeared(
+            "net.openvpn.v3.configuration",
+            "",
+            ":1.42"
+        ));
+    }
+
+    #[test]
+    fn test_service_appeared_wrong_name() {
+        assert!(!is_service_appeared("com.example.Other", "", ":1.42"));
+    }
+
+    #[test]
+    fn test_service_appeared_old_owner_not_empty() {
+        assert!(!is_service_appeared(
+            "net.openvpn.v3.configuration",
+            ":1.10",
+            ":1.42"
+        ));
+    }
+
+    #[test]
+    fn test_service_appeared_new_owner_empty() {
+        assert!(!is_service_appeared("net.openvpn.v3.configuration", "", ""));
+    }
+
+    #[test]
+    fn test_service_appeared_both_owners_empty() {
+        assert!(!is_service_appeared("net.openvpn.v3.configuration", "", ""));
     }
 }

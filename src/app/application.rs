@@ -146,6 +146,9 @@ impl Application {
                     Ok(_) => info!("Signal handlers setup complete"),
                     Err(e) => error!("Failed to setup signal handlers: {}", e),
                 }
+
+                // Start buffering Log signals for the log viewer
+                super::log_buffer::subscribe(&dbus, &tray).await;
             });
 
             // Watch for OpenVPN3 service restart — re-initializes tray on recovery

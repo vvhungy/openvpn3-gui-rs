@@ -66,7 +66,51 @@ pub(super) async fn setup_status_handler(
 
                     let status = SessionStatus::new(major, minor, message.to_string());
 
-                    // Credentials required
+                    // Server needs user input (CfgRequireUser) — may be credentials
+                    // or dynamic challenge. Query the input queue to determine which.
+                    if status.needs_user_input() {
+                        info!("Server requires user input for {}", path);
+                        let session_path = path.clone();
+                        let dbus_conn = conn.clone();
+                        let config_name = tray_for_status
+                            .update(|t| {
+                                t.sessions.get(&session_path).map(|s| s.config_name.clone())
+                            })
+                            .flatten()
+                            .unwrap_or_else(|| "VPN Connection".to_string());
+                        glib::spawn_future_local(async move {
+                            match super::auth_dispatch::dispatch_for_session(
+                                &dbus_conn,
+                                &session_path,
+                            )
+                            .await
+                            {
+                                Some(super::auth_dispatch::AuthDispatch::Credentials) => {
+                                    super::credential_handler::request_credentials(
+                                        &dbus_conn,
+                                        &session_path,
+                                        &config_name,
+                                        Default::default(),
+                                    )
+                                    .await;
+                                }
+                                Some(super::auth_dispatch::AuthDispatch::Challenge) => {
+                                    super::challenge_handler::request_challenge(
+                                        &dbus_conn,
+                                        &session_path,
+                                        &config_name,
+                                    )
+                                    .await;
+                                }
+                                None => {
+                                    warn!("No input slots found for {}", session_path);
+                                }
+                            }
+                        });
+                        continue;
+                    }
+
+                    // Credentials required (legacy signal from session manager)
                     if status.needs_credentials() {
                         info!("Session requires credentials (username/password)");
                         let session_path = path.clone();
@@ -82,6 +126,7 @@ pub(super) async fn setup_status_handler(
                                 &dbus_conn,
                                 &session_path,
                                 &config_name,
+                                Default::default(),
                             )
                             .await;
                         });
@@ -235,6 +280,7 @@ pub(super) async fn setup_status_handler(
 
                     // Update tray session state
                     let message_owned = message.to_string();
+                    let path_for_timeout = path.clone();
                     let prev_info: Option<(String, &str)> = tray_for_status
                         .update(|t| {
                             t.sessions.get(&path).map(|s| {
@@ -271,6 +317,45 @@ pub(super) async fn setup_status_handler(
                             );
                         }
                     });
+
+                    // Connection timeout watcher — notify if still connecting after 30s
+                    let is_now_connecting = status.is_connecting();
+                    if is_now_connecting {
+                        let tray_for_timeout = tray_for_status.clone();
+                        glib::spawn_future_local(async move {
+                            glib::timeout_future_seconds(30).await;
+                            let still_connecting = tray_for_timeout
+                                .update(|t| {
+                                    t.sessions
+                                        .get(&path_for_timeout)
+                                        .map(|s| s.status.is_connecting())
+                                })
+                                .flatten()
+                                .unwrap_or(false);
+                            if still_connecting {
+                                let config_name = tray_for_timeout
+                                    .update(|t| {
+                                        t.sessions
+                                            .get(&path_for_timeout)
+                                            .map(|s| s.config_name.clone())
+                                    })
+                                    .flatten()
+                                    .unwrap_or_else(|| "VPN".to_string());
+                                info!(
+                                    "Connection timeout watcher: '{}' still connecting after 30s",
+                                    config_name
+                                );
+                                crate::dialogs::show_error_notification(
+                                    &format!("{}: Still Connecting", config_name),
+                                    &format!(
+                                        "Connection to '{}' is taking longer than expected. \
+                                         You can disconnect and try again.",
+                                        config_name
+                                    ),
+                                );
+                            }
+                        });
+                    }
 
                     // Desktop notification for status change
                     let new_desc =

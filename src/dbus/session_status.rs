@@ -37,6 +37,10 @@ impl SessionStatus {
         self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthChallenge
     }
 
+    pub fn needs_user_input(&self) -> bool {
+        self.major == StatusMajor::Connection && self.minor == StatusMinor::CfgRequireUser
+    }
+
     pub fn is_error(&self) -> bool {
         self.major == StatusMajor::CfgError
             || (self.major == StatusMajor::Connection
@@ -54,12 +58,17 @@ impl SessionStatus {
                 ))
     }
 
+    /// True when the session is in a terminal state and can only be reconnected
+    /// (not restarted/resumed). Covers disconnected, done, and all error states.
+    pub fn is_reconnectable(&self) -> bool {
+        self.is_disconnected() || self.is_error()
+    }
+
     pub fn needs_url_auth(&self) -> bool {
         self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthUrl
     }
 }
 
-#[cfg(test)]
 impl SessionStatus {
     pub fn is_connecting(&self) -> bool {
         self.major == StatusMajor::Connection
@@ -68,7 +77,10 @@ impl SessionStatus {
                 StatusMinor::ConnInit | StatusMinor::ConnConnecting | StatusMinor::ConnReconnecting
             )
     }
+}
 
+#[cfg(test)]
+impl SessionStatus {
     pub fn is_paused(&self) -> bool {
         self.major == StatusMajor::Connection && self.minor == StatusMinor::ConnPaused
     }
@@ -139,5 +151,31 @@ mod tests {
         assert!(SessionStatus::new(5, 28, String::new()).is_error());
         assert!(SessionStatus::new(5, 29, String::new()).is_error());
         assert!(!SessionStatus::new(2, 7, String::new()).is_error());
+    }
+
+    #[test]
+    fn test_needs_user_input() {
+        // CfgRequireUser: major=2/Connection, minor=4/CfgRequireUser
+        assert!(SessionStatus::new(2, 4, String::new()).needs_user_input());
+        // Should not match other statuses
+        assert!(!SessionStatus::new(3, 20, String::new()).needs_user_input()); // SessAuthUserpass
+        assert!(!SessionStatus::new(2, 7, String::new()).needs_user_input()); // ConnConnected
+        assert!(!SessionStatus::new(2, 11, String::new()).needs_user_input()); // ConnAuthFailed
+    }
+
+    #[test]
+    fn test_is_reconnectable() {
+        // Disconnected/done states
+        assert!(SessionStatus::new(2, 9, String::new()).is_reconnectable()); // ConnDisconnected
+        assert!(SessionStatus::new(2, 16, String::new()).is_reconnectable()); // ConnDone
+        // Error states
+        assert!(SessionStatus::new(1, 0, String::new()).is_reconnectable()); // CfgError
+        assert!(SessionStatus::new(2, 10, String::new()).is_reconnectable()); // ConnFailed
+        assert!(SessionStatus::new(2, 11, String::new()).is_reconnectable()); // ConnAuthFailed
+        assert!(SessionStatus::new(5, 28, String::new()).is_reconnectable()); // ProcStopped
+        // Not reconnectable
+        assert!(!SessionStatus::new(2, 7, String::new()).is_reconnectable()); // ConnConnected
+        assert!(!SessionStatus::new(2, 6, String::new()).is_reconnectable()); // ConnConnecting
+        assert!(!SessionStatus::new(2, 14, String::new()).is_reconnectable()); // ConnPaused
     }
 }

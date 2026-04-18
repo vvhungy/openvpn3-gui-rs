@@ -1,6 +1,7 @@
 //! Username / password credential request flow
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use glib::object::Cast;
 use tracing::{error, info, warn};
@@ -14,11 +15,18 @@ pub(crate) const MAX_CREDENTIAL_ATTEMPTS: u32 = 3;
 pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// Fetch credential input slots and show the credentials dialog
+/// Fetch credential input slots from D-Bus and show the credentials dialog.
+///
+/// This queries the D-Bus queue **once** to discover slots, then delegates to
+/// `show_credentials_with_slots` for the dialog loop (which never re-queries).
+///
+/// `prefilled` carries previously entered values (e.g. after an `invalid-input`
+/// retry) so the user doesn't have to re-type everything.
 pub(crate) async fn request_credentials(
     dbus: &zbus::Connection,
     session_path: &str,
     config_name: &str,
+    prefilled: HashMap<String, String>,
 ) {
     let dbus = dbus.clone();
     let session_path = session_path.to_string();
@@ -71,7 +79,7 @@ pub(crate) async fn request_credentials(
         }
     };
 
-    // Fetch credential slots from the session
+    // Fetch credential slots from the session — ONLY done once here
     let type_groups = match session.UserInputQueueGetTypeGroup().await {
         Ok(tg) => tg,
         Err(e) => {
@@ -111,22 +119,52 @@ pub(crate) async fn request_credentials(
         MAX_CREDENTIAL_ATTEMPTS
     );
 
-    // Use config_name as credential store key (stable across sessions)
+    // Resolve keyring values in async context before entering the sync dialog loop.
+    // Prefilled values (from a previous attempt) take priority over keyring values.
     let cred_key = config_name.clone();
     let cred_store = crate::credentials::CredentialStore::default();
-
-    // Build dynamic fields from the credential slots, loading saved values.
-    // Only username/password-like fields (masked) are storable; OTP/auth codes are not.
-    let mut fields = Vec::new();
+    let mut resolved = prefilled;
     for (_att_type, _group, _id, label, mask) in &slots {
+        if resolved.contains_key(label) {
+            continue;
+        }
         let label_lower = label.to_lowercase();
         let is_storable =
             label_lower.contains("username") || label_lower.contains("password") || *mask;
-        let saved = if is_storable {
-            cred_store.get_async(&cred_key, label).await.ok().flatten()
-        } else {
-            None
-        };
+        if is_storable
+            && let Some(val) = cred_store.get_async(&cred_key, label).await.ok().flatten()
+        {
+            resolved.insert(label.clone(), val);
+        }
+    }
+
+    // Delegate to the dialog loop — never re-queries D-Bus or keyring
+    show_credentials_with_slots(dbus, session_path, config_name, &slots, &resolved);
+}
+
+/// Show the credentials dialog with a **pre-built** slot list.
+///
+/// On `Ok(false)` (some fields left empty), re-shows the same dialog with
+/// all original slots and pre-filled values. **Never** re-queries the D-Bus
+/// queue — the slot list is fixed from the initial `request_credentials` call.
+fn show_credentials_with_slots(
+    dbus: zbus::Connection,
+    session_path: String,
+    config_name: String,
+    slots: &[(u32, u32, u32, String, bool)],
+    prefilled: &HashMap<String, String>,
+) {
+    // Use config_name as credential store key (stable across sessions)
+    let cred_key = config_name.clone();
+
+    // Build dynamic fields from the credential slots using pre-resolved values.
+    // Keyring lookups were already done in the async caller — prefilled contains them.
+    let mut fields = Vec::new();
+    for (_att_type, _group, _id, label, mask) in slots {
+        let label_lower = label.to_lowercase();
+        let is_storable =
+            label_lower.contains("username") || label_lower.contains("password") || *mask;
+        let saved = prefilled.get(label).cloned();
         // Map D-Bus labels to user-friendly display labels
         let display_label = if label_lower.contains("username") {
             "Auth Username".to_string()
@@ -171,100 +209,157 @@ pub(crate) async fn request_credentials(
         parent.as_ref().map(|w| w.upcast_ref()),
         &config_name,
         &fields,
-        move |values, remember| {
+        {
             let dbus = dbus.clone();
             let sp = session_path.clone();
-            let slots = slots.clone();
+            let cn = config_name.clone();
+            let slots = slots.to_vec();
             let ck = cred_key.clone();
-            glib::spawn_future_local(async move {
-                match submit_credentials(&dbus, &sp, &slots, &values).await {
-                    Ok(()) => {
-                        // Clear attempt counter on success
-                        if let Ok(mut attempts) = CREDENTIAL_ATTEMPTS.lock() {
-                            attempts.remove(&sp);
+            let prefilled = Rc::new(prefilled.clone());
+
+            move |values, remember| {
+                let dbus = dbus.clone();
+                let sp = sp.clone();
+                let cn = cn.clone();
+                let slots = slots.clone();
+                let ck = ck.clone();
+                let prev_snapshot = prefilled.clone();
+
+                glib::spawn_future_local(async move {
+                    match submit_credentials(&dbus, &sp, &slots, &values).await {
+                        Ok(true) => {
+                            // All slots provided and connected
+                            if let Ok(mut attempts) = CREDENTIAL_ATTEMPTS.lock() {
+                                attempts.remove(&sp);
+                            }
+                            // Save only storable credentials (username/password, not OTP)
+                            let store = crate::credentials::CredentialStore::default();
+                            for (label, value) in &values {
+                                let ll = label.to_lowercase();
+                                let is_storable = ll.contains("username")
+                                    || ll.contains("password")
+                                    || slots.iter().any(|(_, _, _, l, m)| l == label && *m);
+                                if !is_storable {
+                                    continue;
+                                }
+                                if remember {
+                                    if let Err(e) = store.set_async(&ck, label, value).await {
+                                        warn!(
+                                            "Failed to save credential '{}' to keyring: {}",
+                                            label, e
+                                        );
+                                    }
+                                } else {
+                                    if let Err(e) = store.delete_async(&ck, label).await {
+                                        warn!(
+                                            "Failed to delete credential '{}' from keyring: {}",
+                                            label, e
+                                        );
+                                    }
+                                }
+                            }
                         }
-                        // Save only storable credentials (username/password, not OTP)
-                        let store = crate::credentials::CredentialStore::default();
-                        for (label, value) in &values {
-                            let ll = label.to_lowercase();
-                            let is_storable = ll.contains("username")
-                                || ll.contains("password")
-                                || slots.iter().any(|(_, _, _, l, m)| l == label && *m);
-                            if !is_storable {
-                                continue;
-                            }
-                            if remember {
-                                if let Err(e) = store.set_async(&ck, label, value).await {
-                                    warn!(
-                                        "Failed to save credential '{}' to keyring: {}",
-                                        label, e
-                                    );
-                                }
-                            } else {
-                                if let Err(e) = store.delete_async(&ck, label).await {
-                                    warn!(
-                                        "Failed to delete credential '{}' from keyring: {}",
-                                        label, e
-                                    );
-                                }
-                            }
+                        Ok(false) => {
+                            // Some slots were skipped (empty values) — re-show the same
+                            // dialog with ALL original fields, pre-filling non-empty values.
+                            // We do NOT re-query the D-Bus queue — slots are already consumed.
+                            let merged: HashMap<String, String> = (*prev_snapshot)
+                                .clone()
+                                .into_iter()
+                                .chain(values.into_iter().filter(|(_, v)| !v.is_empty()))
+                                .collect();
+
+                            // Recurse with the same slots — never re-queries D-Bus
+                            show_credentials_with_slots(dbus, sp, cn, &slots, &merged);
+                        }
+                        Err(e) => {
+                            error!("Failed to submit credentials: {}", e);
+                            crate::dialogs::show_error_notification(
+                                "Authentication Failed",
+                                &format!("Server rejected credentials for '{}'.", cn),
+                            );
                         }
                     }
-                    Err(e) => {
-                        error!("Failed to submit credentials: {}", e);
-                    }
-                }
-            });
+                });
+            }
         },
         on_cancel,
     );
 }
 
-/// Submit credentials to all input slots by matching labels, then retry Ready() + Connect()
+/// Submit credentials to all input slots by matching labels, then call Ready() + Connect().
+/// Returns `Ok(true)` if all slots were provided and connection started.
+/// Returns `Ok(false)` if some slots were skipped (empty values) — caller should re-show dialog.
 async fn submit_credentials(
     dbus: &zbus::Connection,
     session_path: &str,
     slots: &[(u32, u32, u32, String, bool)],
     values: &[(String, String)],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let session_path_obj = OwnedObjectPath::try_from(session_path)?;
     let session = SessionProxy::builder(dbus)
         .path(session_path_obj)?
         .build()
         .await?;
 
-    // Provide values to each slot, matched by label
+    // Provide values to each slot, matched by label.
+    // Skip empty values — the server rejects them with invalid-input.
+    // Ignore already-provided errors — slot may have been filled in a previous attempt.
+    let mut any_skipped = false;
     for (att_type, group, id, label, _mask) in slots {
         let value = values
             .iter()
             .find(|(l, _)| l == label)
             .map(|(_, v)| v.as_str())
             .unwrap_or("");
-        session
+        if value.is_empty() {
+            info!(
+                "Skipping empty slot '{}' on session {}",
+                label, session_path
+            );
+            any_skipped = true;
+            continue;
+        }
+        match session
             .UserInputProvide(*att_type, *group, *id, value)
-            .await?;
-        info!(
-            "Provided input for slot '{}' on session {}",
-            label, session_path
-        );
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    "Provided input for slot '{}' on session {}",
+                    label, session_path
+                );
+            }
+            Err(e) => {
+                let err_str = format!("{}", e);
+                if err_str.contains("already-provided") {
+                    info!("Slot '{}' already provided, skipping", label);
+                } else {
+                    return Err(e.into());
+                }
+            }
+        }
     }
 
-    // Retry Ready() + Connect()
+    if any_skipped {
+        // Not all slots filled — caller should re-show dialog for remaining slots
+        return Ok(false);
+    }
+
+    // All slots provided — try to connect
     match session.Ready().await {
         Ok(()) => {
             session.Connect().await?;
             info!("Session connected after credentials: {}", session_path);
+            Ok(true)
         }
         Err(e) => {
-            // Not ready yet — may trigger another CFG_REQUIRE_USER for
-            // additional credentials (e.g. OTP after password).
-            // The StatusChange handler will call request_credentials again.
+            // May need dynamic challenge — the StatusChange handler will dispatch
             info!(
                 "Session still not ready after credentials (may need more input): {}",
                 e
             );
+            Ok(true)
         }
     }
-
-    Ok(())
 }

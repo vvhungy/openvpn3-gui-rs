@@ -71,7 +71,7 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
         StandardItem {
             label: "View Logs".into(),
             activate: Box::new(|tray: &mut VpnTray| {
-                tray.send_action(TrayAction::ViewLogs(None));
+                tray.send_action(TrayAction::ViewLogs);
             }),
             ..Default::default()
         }
@@ -120,6 +120,7 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
 /// Build session submenu actions based on session state.
 pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
     let session_path = session.session_path.clone();
+    let config_path = session.config_path.clone();
     let mut items = Vec::new();
 
     match session.status.minor {
@@ -174,6 +175,24 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
         _ => {}
     }
 
+    // Reconnect for disconnected/error sessions (creates a new session from the config)
+    if session.status.is_reconnectable() && !config_path.is_empty() {
+        let cp = config_path.clone();
+        let sp = session_path.clone();
+        items.push(
+            StandardItem {
+                label: "Reconnect".into(),
+                activate: Box::new(move |tray: &mut VpnTray| {
+                    // Disconnect the dead session first, then start fresh
+                    tray.send_action(TrayAction::Disconnect(sp.clone()));
+                    tray.send_action(TrayAction::Connect(cp.clone()));
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+    }
+
     // Disconnect is always available
     let p = session_path.clone();
     items.push(
@@ -181,19 +200,6 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
             label: "Disconnect".into(),
             activate: Box::new(move |tray: &mut VpnTray| {
                 tray.send_action(TrayAction::Disconnect(p.clone()));
-            }),
-            ..Default::default()
-        }
-        .into(),
-    );
-
-    // View Logs is always available for diagnostics
-    let p = session_path.clone();
-    items.push(
-        StandardItem {
-            label: "View Logs".into(),
-            activate: Box::new(move |tray: &mut VpnTray| {
-                tray.send_action(TrayAction::ViewLogs(Some(p.clone())));
             }),
             ..Default::default()
         }
@@ -225,4 +231,142 @@ pub(super) fn config_submenu(config: &ConfigInfo) -> Vec<MenuItem<VpnTray>> {
         }
         .into(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dbus::types::{SessionStatus, StatusMajor, StatusMinor};
+
+    fn menu_labels(items: &[MenuItem<VpnTray>]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                MenuItem::Standard(s) => s.label.clone(),
+                MenuItem::SubMenu(s) => format!("[{}]", s.label),
+                MenuItem::Separator => "---".into(),
+                _ => "?".into(),
+            })
+            .collect()
+    }
+
+    fn make_tray() -> VpnTray {
+        let (tx, _rx) = futures::channel::mpsc::unbounded();
+        VpnTray::new(tx)
+    }
+
+    fn make_session(
+        session_path: &str,
+        config_path: &str,
+        config_name: &str,
+        minor: StatusMinor,
+    ) -> SessionInfo {
+        SessionInfo {
+            session_path: session_path.into(),
+            config_path: config_path.into(),
+            config_name: config_name.into(),
+            status: SessionStatus {
+                major: StatusMajor::Connection,
+                minor,
+            },
+            connected_at: None,
+        }
+    }
+
+    #[test]
+    fn test_empty_tray_menu() {
+        let tray = make_tray();
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(
+            labels,
+            [
+                "Import Config...",
+                "---",
+                "View Logs",
+                "Preferences...",
+                "About",
+                "Quit"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_menu_with_config_only() {
+        let mut tray = make_tray();
+        tray.configs.push(ConfigInfo {
+            path: "/cfg/1".into(),
+            name: "Work VPN".into(),
+        });
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(labels[0], "[Work VPN]");
+        assert_eq!(labels[1], "---");
+    }
+
+    #[test]
+    fn test_menu_with_active_session_hides_config() {
+        let mut tray = make_tray();
+        tray.configs.push(ConfigInfo {
+            path: "/cfg/1".into(),
+            name: "Work VPN".into(),
+        });
+        tray.sessions.insert(
+            "/sess/1".into(),
+            make_session("/sess/1", "/cfg/1", "Work VPN", StatusMinor::ConnConnected),
+        );
+        let labels = menu_labels(&build_menu(&tray));
+        assert!(labels[0].starts_with("[Work VPN:"));
+        assert!(!labels.contains(&"[Work VPN]".into()));
+    }
+
+    #[test]
+    fn test_session_submenu_connected() {
+        let session = make_session("/sess/1", "/cfg/1", "VPN", StatusMinor::ConnConnected);
+        let labels = menu_labels(&session_submenu(&session));
+        assert_eq!(labels, ["Pause", "Restart", "Disconnect"]);
+    }
+
+    #[test]
+    fn test_session_submenu_paused() {
+        let session = make_session("/sess/1", "/cfg/1", "VPN", StatusMinor::ConnPaused);
+        let labels = menu_labels(&session_submenu(&session));
+        assert_eq!(labels, ["Resume", "Restart", "Disconnect"]);
+    }
+
+    #[test]
+    fn test_session_submenu_connecting() {
+        let session = make_session("/sess/1", "/cfg/1", "VPN", StatusMinor::ConnConnecting);
+        let labels = menu_labels(&session_submenu(&session));
+        assert_eq!(labels, ["Disconnect"]);
+    }
+
+    #[test]
+    fn test_session_submenu_disconnected_shows_reconnect() {
+        let session = make_session("/sess/1", "/cfg/1", "VPN", StatusMinor::ConnDisconnected);
+        let labels = menu_labels(&session_submenu(&session));
+        assert_eq!(labels, ["Reconnect", "Disconnect"]);
+    }
+
+    #[test]
+    fn test_session_submenu_error_shows_reconnect() {
+        let session = make_session("/sess/1", "/cfg/1", "VPN", StatusMinor::CfgError);
+        let labels = menu_labels(&session_submenu(&session));
+        assert_eq!(labels, ["Reconnect", "Disconnect"]);
+    }
+
+    #[test]
+    fn test_session_submenu_no_reconnect_without_config_path() {
+        let session = make_session("/sess/1", "", "VPN", StatusMinor::ConnDisconnected);
+        let labels = menu_labels(&session_submenu(&session));
+        assert_eq!(labels, ["Disconnect"]);
+    }
+
+    #[test]
+    fn test_config_submenu() {
+        let config = ConfigInfo {
+            path: "/cfg/1".into(),
+            name: "VPN".into(),
+        };
+        let labels = menu_labels(&config_submenu(&config));
+        assert_eq!(labels, ["Connect", "Remove"]);
+    }
 }
