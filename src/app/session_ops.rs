@@ -1,6 +1,6 @@
 //! Session D-Bus operations
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use tracing::{debug, error, info, warn};
 
@@ -82,7 +82,8 @@ pub(crate) async fn connect_to_config(
         Err(e) => {
             info!("Session not ready (needs credentials): {}", e);
             let sp = session_path.as_str().to_string();
-            super::credential_handler::request_credentials(dbus, &sp, &config_name).await;
+            super::credential_handler::request_credentials(dbus, &sp, &config_name, HashMap::new())
+                .await;
         }
     }
 

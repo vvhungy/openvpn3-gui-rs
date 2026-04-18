@@ -23,7 +23,7 @@ pub enum TrayAction {
     Quit,
 
     Preferences,
-    ViewLogs(Option<String>), // Some(session path) for a specific session, None for all
+    ViewLogs,
 }
 
 /// A known VPN configuration

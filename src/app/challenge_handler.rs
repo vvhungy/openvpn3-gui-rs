@@ -99,16 +99,34 @@ pub(crate) async fn request_challenge(
     let parent = super::dialog_parent();
     crate::dialogs::show_challenge_dialog(
         parent.as_ref().map(|w| w.upcast_ref()),
-        &config_name,
+        &config_name.clone(),
         &challenge_text,
         move |response_text| {
             let dbus = dbus.clone();
             let sp = session_path.clone();
+            let cn = config_name.clone();
             let slots = slots.clone();
             glib::spawn_future_local(async move {
                 match submit_challenge(&dbus, &sp, &slots, &response_text).await {
-                    Ok(()) => {}
-                    Err(e) => error!("Failed to submit challenge response: {}", e),
+                    Ok(true) => {
+                        // Server needs another round of input
+                        info!("Challenge accepted, server requires additional input");
+                        request_challenge(&dbus, &sp, &cn).await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        let err_str = format!("{}", e);
+                        if err_str.contains("invalid-input") {
+                            warn!("Server rejected empty challenge response");
+                            crate::dialogs::show_error_notification(
+                                "Challenge Required",
+                                &format!("A response is required for '{}'.", cn),
+                            );
+                            request_challenge(&dbus, &sp, &cn).await;
+                        } else {
+                            error!("Failed to submit challenge response: {}", e);
+                        }
+                    }
                 }
             });
         },
@@ -116,13 +134,14 @@ pub(crate) async fn request_challenge(
     );
 }
 
-/// Submit challenge response to all pending slots, then retry Ready() + Connect()
+/// Submit challenge response to all pending slots, then retry Ready() + Connect().
+/// Returns `Ok(true)` if the server requires another round of input, `Ok(false)` otherwise.
 async fn submit_challenge(
     dbus: &zbus::Connection,
     session_path: &str,
     slots: &[(u32, u32, u32)],
     response: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let session_path_obj = OwnedObjectPath::try_from(session_path)?;
     let session = SessionProxy::builder(dbus)
         .path(session_path_obj)?
@@ -143,11 +162,19 @@ async fn submit_challenge(
         Ok(()) => {
             session.Connect().await?;
             info!("Session connected after challenge: {}", session_path);
+            Ok(false)
         }
         Err(e) => {
-            info!("Session still not ready after challenge: {}", e);
+            info!(
+                "Session not ready after challenge (checking for pending input): {}",
+                e
+            );
+            // Actively re-check — server may not re-emit StatusChange for a second round.
+            let pending = session
+                .UserInputQueueGetTypeGroup()
+                .await
+                .unwrap_or_default();
+            Ok(!pending.is_empty())
         }
     }
-
-    Ok(())
 }

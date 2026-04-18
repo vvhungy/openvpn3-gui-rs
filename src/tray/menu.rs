@@ -71,7 +71,7 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
         StandardItem {
             label: "View Logs".into(),
             activate: Box::new(|tray: &mut VpnTray| {
-                tray.send_action(TrayAction::ViewLogs(None));
+                tray.send_action(TrayAction::ViewLogs);
             }),
             ..Default::default()
         }
@@ -120,6 +120,7 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
 /// Build session submenu actions based on session state.
 pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
     let session_path = session.session_path.clone();
+    let config_path = session.config_path.clone();
     let mut items = Vec::new();
 
     match session.status.minor {
@@ -174,6 +175,24 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
         _ => {}
     }
 
+    // Reconnect for disconnected/error sessions (creates a new session from the config)
+    if session.status.is_reconnectable() && !config_path.is_empty() {
+        let cp = config_path.clone();
+        let sp = session_path.clone();
+        items.push(
+            StandardItem {
+                label: "Reconnect".into(),
+                activate: Box::new(move |tray: &mut VpnTray| {
+                    // Disconnect the dead session first, then start fresh
+                    tray.send_action(TrayAction::Disconnect(sp.clone()));
+                    tray.send_action(TrayAction::Connect(cp.clone()));
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+    }
+
     // Disconnect is always available
     let p = session_path.clone();
     items.push(
@@ -181,19 +200,6 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
             label: "Disconnect".into(),
             activate: Box::new(move |tray: &mut VpnTray| {
                 tray.send_action(TrayAction::Disconnect(p.clone()));
-            }),
-            ..Default::default()
-        }
-        .into(),
-    );
-
-    // View Logs is always available for diagnostics
-    let p = session_path.clone();
-    items.push(
-        StandardItem {
-            label: "View Logs".into(),
-            activate: Box::new(move |tray: &mut VpnTray| {
-                tray.send_action(TrayAction::ViewLogs(Some(p.clone())));
             }),
             ..Default::default()
         }
