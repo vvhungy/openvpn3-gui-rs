@@ -46,9 +46,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 [build-dependencies]
 glib-build-tools = "0.20"
 
-[dev-dependencies]
-tokio-test = "0.4"
-
 [profile.release]
 lto = true
 strip = true
