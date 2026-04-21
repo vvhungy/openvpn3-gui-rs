@@ -284,6 +284,7 @@ pub(super) async fn setup_status_handler(
                     // Update tray session state
                     let message_owned = message.to_string();
                     let path_for_timeout = path.clone();
+                    let path_for_removal = path.clone();
                     let prev_info: Option<(String, &str)> = tray_for_status
                         .update(|t| {
                             t.sessions.get(&path).map(|s| {
@@ -303,8 +304,6 @@ pub(super) async fn setup_status_handler(
                             session.status = SessionStatus::new(major, minor, message_owned);
                             if is_now_connected && session.connected_at.is_none() {
                                 session.connected_at = Some(std::time::Instant::now());
-                            } else if is_now_disconnected {
-                                session.connected_at = None;
                             }
                         } else {
                             // New session not yet seen via SessCreated
@@ -320,6 +319,14 @@ pub(super) async fn setup_status_handler(
                             );
                         }
                     });
+
+                    // Remove terminal sessions from the tray immediately rather than
+                    // waiting for SessDestroyed. Prevents zombie "Profile: Done" entries.
+                    if is_now_disconnected {
+                        tray_for_status.update(move |t| {
+                            t.sessions.remove(&path_for_removal);
+                        });
+                    }
 
                     // Connection timeout watcher — notify if still connecting after
                     // the user-configured timeout (default 30s).
