@@ -278,33 +278,11 @@ fn show_credentials_with_slots(
                             show_credentials_with_slots(dbus, sp, cn, &slots, &merged);
                         }
                         Err(e) => {
-                            let err_str = format!("{}", e);
-                            if err_str.contains("User input not required") {
-                                warn!(
-                                    "Session '{}' no longer waiting for input, disconnecting",
-                                    cn
-                                );
-                                if let Ok(mut attempts) = CREDENTIAL_ATTEMPTS.lock() {
-                                    attempts.remove(&sp);
-                                }
-                                super::session_ops::disconnect_with_message(
-                                    &dbus,
-                                    &sp,
-                                    "Session Expired",
-                                    &format!(
-                                        "Session for '{}' is no longer waiting for input. \
-                                         Disconnected — you can reconnect from the menu.",
-                                        cn
-                                    ),
-                                )
-                                .await;
-                            } else {
-                                error!("Failed to submit credentials: {}", e);
-                                crate::dialogs::show_error_notification(
-                                    "Authentication Failed",
-                                    &format!("Server rejected credentials for '{}'.", cn),
-                                );
-                            }
+                            error!("Failed to submit credentials: {}", e);
+                            crate::dialogs::show_error_notification(
+                                "Authentication Failed",
+                                &format!("Server rejected credentials for '{}'.", cn),
+                            );
                         }
                     }
                 });
@@ -361,12 +339,6 @@ async fn submit_credentials(
                 let err_str = format!("{}", e);
                 if err_str.contains("already-provided") {
                     info!("Slot '{}' already provided, skipping", label);
-                } else if err_str.contains("User input not required") {
-                    info!(
-                        "Slot '{}' — session no longer waiting for input, aborting",
-                        label
-                    );
-                    anyhow::bail!("User input not required");
                 } else {
                     return Err(e.into());
                 }
