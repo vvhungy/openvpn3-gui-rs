@@ -8,12 +8,10 @@ use anyhow::{Context, Result};
 const APP_ID: &str = "net.openvpn.openvpn3-gui-rs";
 
 /// Credential storage using Secret Service
-#[allow(dead_code)]
 pub struct CredentialStore {
     // Keyring is created lazily when needed
 }
 
-#[allow(dead_code)]
 impl CredentialStore {
     /// Create a new CredentialStore instance
     pub fn new() -> Result<Self> {
@@ -23,24 +21,6 @@ impl CredentialStore {
     /// Create a new CredentialStore instance (sync wrapper)
     pub fn new_sync() -> Self {
         Self {}
-    }
-
-    /// Get a credential from the store (sync - returns None, use get_async)
-    pub fn get(&self, _config_id: &str, _key: &str) -> Result<Option<String>> {
-        // Use get_async instead
-        Ok(None)
-    }
-
-    /// Store a credential (sync - does nothing, use set_async)
-    pub fn set(&self, _config_id: &str, _key: &str, _value: &str) -> Result<()> {
-        // Use set_async instead
-        Ok(())
-    }
-
-    /// Delete a credential from the store (sync - does nothing, use delete_async)
-    pub fn delete(&self, _config_id: &str, _key: &str) -> Result<()> {
-        // Use delete_async instead
-        Ok(())
     }
 }
 
@@ -160,25 +140,5 @@ mod tests {
     #[test]
     fn test_default_creates_instance() {
         let _store = CredentialStore::default();
-    }
-
-    #[test]
-    fn test_sync_get_returns_none() {
-        let store = CredentialStore::default();
-        let result = store.get("my-vpn", "username");
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-    }
-
-    #[test]
-    fn test_sync_set_is_ok() {
-        let store = CredentialStore::default();
-        assert!(store.set("my-vpn", "username", "user@example.com").is_ok());
-    }
-
-    #[test]
-    fn test_sync_delete_is_ok() {
-        let store = CredentialStore::default();
-        assert!(store.delete("my-vpn", "username").is_ok());
     }
 }

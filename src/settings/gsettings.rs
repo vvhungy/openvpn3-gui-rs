@@ -15,7 +15,6 @@ pub struct Settings {
     settings: Option<GioSettings>,
 }
 
-#[allow(dead_code)] // Predicate helpers (should_*) are tested but not yet called in production paths
 impl Settings {
     /// Create a new Settings instance
     pub fn new() -> Self {
@@ -36,14 +35,6 @@ impl Settings {
         let schema_source = gio::SettingsSchemaSource::default()?;
         let _schema = schema_source.lookup(SCHEMA_ID, true)?;
         Some(GioSettings::new(SCHEMA_ID))
-    }
-
-    /// Create Settings with a specific GioSettings instance (for testing)
-    #[cfg(test)]
-    pub fn new_with_settings(settings: GioSettings) -> Self {
-        Self {
-            settings: Some(settings),
-        }
     }
 
     /// Get the startup action
@@ -143,6 +134,24 @@ impl Settings {
         }
     }
 
+    /// Get the connection timeout in seconds (default 30)
+    pub fn connection_timeout(&self) -> u32 {
+        self.settings
+            .as_ref()
+            .map(|s| s.uint("connection-timeout"))
+            .unwrap_or(30)
+            .clamp(5, 300)
+    }
+
+    /// Set the connection timeout in seconds
+    pub fn set_connection_timeout(&self, secs: u32) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_uint("connection-timeout", secs.clamp(5, 300))
+        {
+            error!("Failed to set connection-timeout: {}", e);
+        }
+    }
+
     /// Check if notifications are enabled
     pub fn show_notifications(&self) -> bool {
         self.settings
@@ -158,16 +167,6 @@ impl Settings {
         {
             error!("Failed to set show-notifications: {}", e);
         }
-    }
-
-    /// Check if should connect to most recent on startup
-    pub fn should_connect_recent_on_startup(&self) -> bool {
-        self.startup_action() == "connect-recent"
-    }
-
-    /// Check if should connect to specific config on startup
-    pub fn should_connect_specific_on_startup(&self) -> bool {
-        self.startup_action() == "connect-specific"
     }
 }
 
@@ -212,18 +211,6 @@ mod tests {
         assert_eq!(Settings::new_empty().specific_config_path(), "");
     }
 
-    // --- Predicate logic ---
-
-    #[test]
-    fn test_should_connect_recent_on_startup_false_when_no_schema() {
-        assert!(!Settings::new_empty().should_connect_recent_on_startup());
-    }
-
-    #[test]
-    fn test_should_connect_specific_on_startup_false_when_no_schema() {
-        assert!(!Settings::new_empty().should_connect_specific_on_startup());
-    }
-
     // --- Setters do not panic when schema is absent ---
 
     #[test]
@@ -249,5 +236,15 @@ mod tests {
     #[test]
     fn test_set_tooltip_refresh_interval_no_panic() {
         Settings::new_empty().set_tooltip_refresh_interval(60);
+    }
+
+    #[test]
+    fn test_connection_timeout_default() {
+        assert_eq!(Settings::new_empty().connection_timeout(), 30);
+    }
+
+    #[test]
+    fn test_set_connection_timeout_no_panic() {
+        Settings::new_empty().set_connection_timeout(60);
     }
 }

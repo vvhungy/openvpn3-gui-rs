@@ -17,13 +17,9 @@ use super::config_ops::{import_config, refresh_configs};
 use super::dbus_init::{init_dbus, watch_service_restart};
 use super::signal_handlers::setup_signal_handlers;
 
-/// Command-line arguments
+/// Command-line arguments consumed by the application
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct AppArgs {
-    pub verbose: u8,
-    pub debug: bool,
-    pub silent: bool,
     pub clear_secret_storage: bool,
 }
 

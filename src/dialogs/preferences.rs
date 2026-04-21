@@ -112,6 +112,19 @@ pub fn show_preferences_dialog(
     interval_row.append(&interval_spin);
     content.append(&interval_row);
 
+    // --- Connection timeout ---
+    let timeout_row = GtkBox::new(Orientation::Horizontal, 8);
+    let timeout_label = Label::builder()
+        .label("Connection timeout (seconds):")
+        .halign(gtk4::Align::Start)
+        .hexpand(true)
+        .build();
+    let timeout_spin = SpinButton::with_range(5.0, 300.0, 5.0);
+    timeout_spin.set_value(settings.connection_timeout() as f64);
+    timeout_row.append(&timeout_label);
+    timeout_row.append(&timeout_spin);
+    content.append(&timeout_row);
+
     // --- Security ---
     content.append(&Separator::new(Orientation::Horizontal));
 
@@ -166,6 +179,7 @@ pub fn show_preferences_dialog(
                 settings_clone.set_startup_action(action);
                 settings_clone.set_show_notifications(notif_check.is_active());
                 settings_clone.set_tooltip_refresh_interval(interval_spin.value() as u32);
+                settings_clone.set_connection_timeout(timeout_spin.value() as u32);
                 window.close();
             }
         },

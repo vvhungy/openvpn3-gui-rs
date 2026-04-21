@@ -15,6 +15,24 @@ pub(crate) const MAX_CREDENTIAL_ATTEMPTS: u32 = 3;
 pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
+/// Whether a credential field should be persisted to the keyring.
+pub(crate) fn is_storable_field(label: &str, mask: bool) -> bool {
+    let lower = label.to_lowercase();
+    lower.contains("username") || lower.contains("password") || mask
+}
+
+/// Map a D-Bus slot label to a user-facing display label.
+pub(crate) fn display_label_for(label: &str) -> String {
+    let lower = label.to_lowercase();
+    if lower.contains("username") {
+        "Auth Username".to_string()
+    } else if lower.contains("password") {
+        "Auth Password".to_string()
+    } else {
+        "Authentication Code".to_string()
+    }
+}
+
 /// Fetch credential input slots from D-Bus and show the credentials dialog.
 ///
 /// This queries the D-Bus queue **once** to discover slots, then delegates to
@@ -128,10 +146,7 @@ pub(crate) async fn request_credentials(
         if resolved.contains_key(label) {
             continue;
         }
-        let label_lower = label.to_lowercase();
-        let is_storable =
-            label_lower.contains("username") || label_lower.contains("password") || *mask;
-        if is_storable
+        if is_storable_field(label, *mask)
             && let Some(val) = cred_store.get_async(&cred_key, label).await.ok().flatten()
         {
             resolved.insert(label.clone(), val);
@@ -161,23 +176,12 @@ fn show_credentials_with_slots(
     // Keyring lookups were already done in the async caller — prefilled contains them.
     let mut fields = Vec::new();
     for (_att_type, _group, _id, label, mask) in slots {
-        let label_lower = label.to_lowercase();
-        let is_storable =
-            label_lower.contains("username") || label_lower.contains("password") || *mask;
         let saved = prefilled.get(label).cloned();
-        // Map D-Bus labels to user-friendly display labels
-        let display_label = if label_lower.contains("username") {
-            "Auth Username".to_string()
-        } else if label_lower.contains("password") {
-            "Auth Password".to_string()
-        } else {
-            "Authentication Code".to_string()
-        };
         fields.push(crate::dialogs::CredentialField {
             key: label.clone(),
-            label: display_label,
+            label: display_label_for(label),
             masked: *mask,
-            can_store: is_storable,
+            can_store: is_storable_field(label, *mask),
             saved_value: saved,
         });
     }
@@ -235,11 +239,12 @@ fn show_credentials_with_slots(
                             // Save only storable credentials (username/password, not OTP)
                             let store = crate::credentials::CredentialStore::default();
                             for (label, value) in &values {
-                                let ll = label.to_lowercase();
-                                let is_storable = ll.contains("username")
-                                    || ll.contains("password")
-                                    || slots.iter().any(|(_, _, _, l, m)| l == label && *m);
-                                if !is_storable {
+                                let mask = slots
+                                    .iter()
+                                    .find(|(_, _, _, l, _)| l == label)
+                                    .map(|(_, _, _, _, m)| *m)
+                                    .unwrap_or(false);
+                                if !is_storable_field(label, mask) {
                                     continue;
                                 }
                                 if remember {
@@ -361,5 +366,55 @@ async fn submit_credentials(
             );
             Ok(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- is_storable_field ---
+
+    #[test]
+    fn test_storable_username() {
+        assert!(is_storable_field("Username", false));
+        assert!(is_storable_field("username", false));
+    }
+
+    #[test]
+    fn test_storable_password() {
+        assert!(is_storable_field("Password", false));
+        assert!(is_storable_field("password", false));
+    }
+
+    #[test]
+    fn test_storable_masked_field() {
+        assert!(is_storable_field("One-Time Code", true));
+    }
+
+    #[test]
+    fn test_not_storable_unmasked_other() {
+        assert!(!is_storable_field("One-Time Code", false));
+        assert!(!is_storable_field("challenge", false));
+    }
+
+    // --- display_label_for ---
+
+    #[test]
+    fn test_display_label_username() {
+        assert_eq!(display_label_for("Username"), "Auth Username");
+        assert_eq!(display_label_for("Enter username"), "Auth Username");
+    }
+
+    #[test]
+    fn test_display_label_password() {
+        assert_eq!(display_label_for("Password"), "Auth Password");
+        assert_eq!(display_label_for("Your password"), "Auth Password");
+    }
+
+    #[test]
+    fn test_display_label_fallback() {
+        assert_eq!(display_label_for("One-Time Code"), "Authentication Code");
+        assert_eq!(display_label_for("challenge"), "Authentication Code");
     }
 }
