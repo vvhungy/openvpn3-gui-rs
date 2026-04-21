@@ -44,13 +44,22 @@ async fn handle_session_created(
 
     let sp = session_path.to_string();
     tray.update(move |t| {
-        t.sessions.entry(sp.clone()).or_insert_with(|| SessionInfo {
-            session_path: sp.clone(),
-            config_path,
-            config_name,
-            status: SessionStatus::new(major, minor, message),
-            connected_at: None,
-        });
+        t.sessions
+            .entry(sp.clone())
+            .and_modify(|e| {
+                // Update placeholder inserted by a StatusChange that arrived before SessCreated
+                if e.config_path.is_empty() {
+                    e.config_path = config_path.clone();
+                    e.config_name = config_name.clone();
+                }
+            })
+            .or_insert_with(|| SessionInfo {
+                session_path: sp.clone(),
+                config_path,
+                config_name,
+                status: SessionStatus::new(major, minor, message),
+                connected_at: None,
+            });
     });
 
     Ok(())

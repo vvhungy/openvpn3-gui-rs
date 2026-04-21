@@ -149,7 +149,7 @@ pub(super) async fn setup_status_handler(
                         } else {
                             format!("Opening browser for authentication:\n{}", url)
                         };
-                        crate::dialogs::show_error_notification(
+                        crate::dialogs::show_info_notification(
                             &format!("{}: Browser Authentication Required", config_name),
                             &notif_body,
                         );
