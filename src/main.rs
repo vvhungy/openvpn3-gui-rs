@@ -98,9 +98,6 @@ fn main() -> ExitCode {
 
     // Convert args to AppArgs
     let app_args = AppArgs {
-        verbose: args.verbose,
-        debug: args.debug,
-        silent: args.silent,
         clear_secret_storage: args.clear_secret_storage,
     };
 
