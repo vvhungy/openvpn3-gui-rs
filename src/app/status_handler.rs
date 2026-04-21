@@ -9,6 +9,9 @@ use tracing::{info, warn};
 use crate::dbus::types::{SessionStatus, StatusMajor, StatusMinor};
 use crate::tray::{SessionInfo, VpnTray};
 
+/// Fallback label when config/profile name is unavailable.
+const FALLBACK_NAME: &str = "VPN Connection";
+
 /// Subscribe to StatusChange signals and spawn the handler loop.
 pub(super) async fn setup_status_handler(
     dbus: &zbus::Connection,
@@ -77,7 +80,7 @@ pub(super) async fn setup_status_handler(
                                 t.sessions.get(&session_path).map(|s| s.config_name.clone())
                             })
                             .flatten()
-                            .unwrap_or_else(|| "VPN Connection".to_string());
+                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
                         glib::spawn_future_local(async move {
                             match super::auth_dispatch::dispatch_for_session(
                                 &dbus_conn,
@@ -120,7 +123,7 @@ pub(super) async fn setup_status_handler(
                                 t.sessions.get(&session_path).map(|s| s.config_name.clone())
                             })
                             .flatten()
-                            .unwrap_or_else(|| "VPN Connection".to_string());
+                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
                         glib::spawn_future_local(async move {
                             super::credential_handler::request_credentials(
                                 &dbus_conn,
@@ -140,7 +143,7 @@ pub(super) async fn setup_status_handler(
                         let config_name = tray_for_status
                             .update(|t| t.sessions.get(&path).map(|s| s.config_name.clone()))
                             .flatten()
-                            .unwrap_or_else(|| "VPN Connection".to_string());
+                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
                         let notif_body = if url.is_empty() {
                             "Please complete authentication in your browser.".to_string()
                         } else {
@@ -171,7 +174,7 @@ pub(super) async fn setup_status_handler(
                                 t.sessions.get(&session_path).map(|s| s.config_name.clone())
                             })
                             .flatten()
-                            .unwrap_or_else(|| "VPN Connection".to_string());
+                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
                         glib::spawn_future_local(async move {
                             super::challenge_handler::request_challenge(
                                 &dbus_conn,
@@ -195,7 +198,7 @@ pub(super) async fn setup_status_handler(
                                 t.sessions.get(&session_path).map(|s| s.config_name.clone())
                             })
                             .flatten()
-                            .unwrap_or_else(|| "VPN Connection".to_string());
+                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
                         glib::spawn_future_local(async move {
                             super::session_ops::disconnect_with_message(
                                 &dbus_conn,
@@ -223,7 +226,7 @@ pub(super) async fn setup_status_handler(
                                 t.sessions.get(&session_path).map(|s| s.config_name.clone())
                             })
                             .flatten()
-                            .unwrap_or_else(|| "VPN Connection".to_string());
+                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
                         glib::spawn_future_local(async move {
                             super::session_ops::disconnect_with_message(
                                 &dbus_conn,
@@ -252,7 +255,7 @@ pub(super) async fn setup_status_handler(
                                 t.sessions.get(&session_path).map(|s| s.config_name.clone())
                             })
                             .flatten()
-                            .unwrap_or_else(|| "VPN Connection".to_string());
+                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
                         let body = if message.is_empty() {
                             format!("VPN error for '{}'.", config_name)
                         } else {
