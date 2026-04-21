@@ -69,6 +69,19 @@ pub(super) async fn setup_status_handler(
 
                     let status = SessionStatus::new(major, minor, message.to_string());
 
+                    // Always update the tray session status so the menu reflects the
+                    // current state (e.g. "Authentication required") even when auth
+                    // handlers dispatch dialogs and `continue` before the generic path.
+                    {
+                        let p = path.clone();
+                        let msg = message.to_string();
+                        tray_for_status.update(move |t| {
+                            if let Some(session) = t.sessions.get_mut(&p) {
+                                session.status = SessionStatus::new(major, minor, msg);
+                            }
+                        });
+                    }
+
                     // Server needs user input (CfgRequireUser) — may be credentials
                     // or dynamic challenge. Query the input queue to determine which.
                     if status.needs_user_input() {
@@ -281,8 +294,7 @@ pub(super) async fn setup_status_handler(
                         attempts.remove(&path);
                     }
 
-                    // Update tray session state
-                    let message_owned = message.to_string();
+                    // Update tray session state (connected_at, new sessions, removal)
                     let path_for_timeout = path.clone();
                     let path_for_removal = path.clone();
                     let prev_info: Option<(String, &str)> = tray_for_status
@@ -299,9 +311,9 @@ pub(super) async fn setup_status_handler(
 
                     let is_now_connected = status.is_connected();
                     let is_now_disconnected = status.is_disconnected();
+                    let msg_owned = message.to_string();
                     tray_for_status.update(move |t| {
                         if let Some(session) = t.sessions.get_mut(&path) {
-                            session.status = SessionStatus::new(major, minor, message_owned);
                             if is_now_connected && session.connected_at.is_none() {
                                 session.connected_at = Some(std::time::Instant::now());
                             }
@@ -313,7 +325,7 @@ pub(super) async fn setup_status_handler(
                                     session_path: path.clone(),
                                     config_path: String::new(),
                                     config_name: "VPN".to_string(),
-                                    status: SessionStatus::new(major, minor, message_owned),
+                                    status: SessionStatus::new(major, minor, msg_owned),
                                     connected_at: None,
                                 },
                             );
