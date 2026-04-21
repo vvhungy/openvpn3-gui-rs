@@ -160,8 +160,8 @@ pub(crate) async fn request_credentials(
 /// Show the credentials dialog with a **pre-built** slot list.
 ///
 /// On `Ok(false)` (some fields left empty), re-shows the same dialog with
-/// all original slots and pre-filled values. **Never** re-queries the D-Bus
-/// queue — the slot list is fixed from the initial `request_credentials` call.
+/// pre-filled values. Safe because `submit_credentials` returns `Ok(false)`
+/// *before* consuming any slots.
 fn show_credentials_with_slots(
     dbus: zbus::Connection,
     session_path: String,
@@ -265,24 +265,34 @@ fn show_credentials_with_slots(
                             }
                         }
                         Ok(false) => {
-                            // Some slots were skipped (empty values) — re-show the same
-                            // dialog with ALL original fields, pre-filling non-empty values.
-                            // We do NOT re-query the D-Bus queue — slots are already consumed.
+                            // Some fields left empty — no slots were consumed, so
+                            // re-show the same dialog with pre-filled values.
                             let merged: HashMap<String, String> = (*prev_snapshot)
                                 .clone()
                                 .into_iter()
                                 .chain(values.into_iter().filter(|(_, v)| !v.is_empty()))
                                 .collect();
 
-                            // Recurse with the same slots — never re-queries D-Bus
                             show_credentials_with_slots(dbus, sp, cn, &slots, &merged);
                         }
                         Err(e) => {
-                            error!("Failed to submit credentials: {}", e);
-                            crate::dialogs::show_error_notification(
-                                "Authentication Failed",
-                                &format!("Server rejected credentials for '{}'.", cn),
-                            );
+                            let err_str = format!("{}", e);
+                            if err_str.contains("User input not required") {
+                                info!("Session '{}' queue reset, re-dispatching credentials", cn);
+                                super::credential_handler::request_credentials(
+                                    &dbus,
+                                    &sp,
+                                    &cn,
+                                    Default::default(),
+                                )
+                                .await;
+                            } else {
+                                error!("Failed to submit credentials: {}", e);
+                                crate::dialogs::show_error_notification(
+                                    "Authentication Failed",
+                                    &format!("Server rejected credentials for '{}'.", cn),
+                                );
+                            }
                         }
                     }
                 });
@@ -307,24 +317,27 @@ async fn submit_credentials(
         .build()
         .await?;
 
-    // Provide values to each slot, matched by label.
-    // Skip empty values — the server rejects them with invalid-input.
-    // Ignore already-provided errors — slot may have been filled in a previous attempt.
-    let mut any_skipped = false;
+    // Check if all fields are filled before consuming any slots.
+    // If any field is empty, return early — no slots are consumed,
+    // so the dialog can safely re-show with the same (still-valid) slots.
+    let any_skipped = slots.iter().any(|(_, _, _, label, _)| {
+        values
+            .iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| v.is_empty())
+            .unwrap_or(true)
+    });
+    if any_skipped {
+        return Ok(false);
+    }
+
+    // All fields filled — provide values to each slot.
     for (att_type, group, id, label, _mask) in slots {
         let value = values
             .iter()
             .find(|(l, _)| l == label)
             .map(|(_, v)| v.as_str())
             .unwrap_or("");
-        if value.is_empty() {
-            info!(
-                "Skipping empty slot '{}' on session {}",
-                label, session_path
-            );
-            any_skipped = true;
-            continue;
-        }
         match session
             .UserInputProvide(*att_type, *group, *id, value)
             .await
@@ -339,6 +352,9 @@ async fn submit_credentials(
                 let err_str = format!("{}", e);
                 if err_str.contains("already-provided") {
                     info!("Slot '{}' already provided, skipping", label);
+                } else if err_str.contains("User input not required") {
+                    info!("Slot '{}' — session queue reset, aborting", label);
+                    anyhow::bail!("User input not required");
                 } else {
                     return Err(e.into());
                 }

@@ -69,6 +69,20 @@ pub(super) async fn setup_status_handler(
 
                     let status = SessionStatus::new(major, minor, message.to_string());
 
+                    // Capture previous status BEFORE the tray update so the
+                    // notification at the bottom can detect the transition.
+                    let prev_info: Option<(String, &str)> = tray_for_status
+                        .update(|t| {
+                            t.sessions.get(&path).map(|s| {
+                                let prev = crate::status::get_status_description(
+                                    s.status.major,
+                                    s.status.minor,
+                                );
+                                (s.config_name.clone(), prev)
+                            })
+                        })
+                        .flatten();
+
                     // Always update the tray session status so the menu reflects the
                     // current state (e.g. "Authentication required") even when auth
                     // handlers dispatch dialogs and `continue` before the generic path.
@@ -297,17 +311,6 @@ pub(super) async fn setup_status_handler(
                     // Update tray session state (connected_at, new sessions, removal)
                     let path_for_timeout = path.clone();
                     let path_for_removal = path.clone();
-                    let prev_info: Option<(String, &str)> = tray_for_status
-                        .update(|t| {
-                            t.sessions.get(&path).map(|s| {
-                                let prev = crate::status::get_status_description(
-                                    s.status.major,
-                                    s.status.minor,
-                                );
-                                (s.config_name.clone(), prev)
-                            })
-                        })
-                        .flatten();
 
                     let is_now_connected = status.is_connected();
                     let is_now_disconnected = status.is_disconnected();
