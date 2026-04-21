@@ -117,7 +117,8 @@ pub(crate) async fn session_action(
     Ok(())
 }
 
-/// Disconnect a session and show an error notification
+/// Disconnect a session and show an error notification.
+/// Marks the session as user-initiated so SessDestroyed won't show a redundant reconnect prompt.
 pub(crate) async fn disconnect_with_message(
     dbus: &zbus::Connection,
     session_path: &str,
@@ -128,6 +129,11 @@ pub(crate) async fn disconnect_with_message(
     if let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock() {
         attempts.remove(session_path);
     }
+    // Mark as user-initiated to suppress the SessDestroyed reconnect notification
+    USER_DISCONNECTED
+        .lock()
+        .unwrap()
+        .insert(session_path.to_string());
     if let Err(e) = session_action(dbus, session_path, "disconnect").await {
         error!("Failed to disconnect session {}: {}", session_path, e);
     }

@@ -69,6 +69,33 @@ pub(super) async fn setup_status_handler(
 
                     let status = SessionStatus::new(major, minor, message.to_string());
 
+                    // Capture previous status BEFORE the tray update so the
+                    // notification at the bottom can detect the transition.
+                    let prev_info: Option<(String, &str)> = tray_for_status
+                        .update(|t| {
+                            t.sessions.get(&path).map(|s| {
+                                let prev = crate::status::get_status_description(
+                                    s.status.major,
+                                    s.status.minor,
+                                );
+                                (s.config_name.clone(), prev)
+                            })
+                        })
+                        .flatten();
+
+                    // Always update the tray session status so the menu reflects the
+                    // current state (e.g. "Authentication required") even when auth
+                    // handlers dispatch dialogs and `continue` before the generic path.
+                    {
+                        let p = path.clone();
+                        let msg = message.to_string();
+                        tray_for_status.update(move |t| {
+                            if let Some(session) = t.sessions.get_mut(&p) {
+                                session.status = SessionStatus::new(major, minor, msg);
+                            }
+                        });
+                    }
+
                     // Server needs user input (CfgRequireUser) — may be credentials
                     // or dynamic challenge. Query the input queue to determine which.
                     if status.needs_user_input() {
@@ -149,7 +176,7 @@ pub(super) async fn setup_status_handler(
                         } else {
                             format!("Opening browser for authentication:\n{}", url)
                         };
-                        crate::dialogs::show_error_notification(
+                        crate::dialogs::show_info_notification(
                             &format!("{}: Browser Authentication Required", config_name),
                             &notif_body,
                         );
@@ -281,30 +308,17 @@ pub(super) async fn setup_status_handler(
                         attempts.remove(&path);
                     }
 
-                    // Update tray session state
-                    let message_owned = message.to_string();
+                    // Update tray session state (connected_at, new sessions, removal)
                     let path_for_timeout = path.clone();
-                    let prev_info: Option<(String, &str)> = tray_for_status
-                        .update(|t| {
-                            t.sessions.get(&path).map(|s| {
-                                let prev = crate::status::get_status_description(
-                                    s.status.major,
-                                    s.status.minor,
-                                );
-                                (s.config_name.clone(), prev)
-                            })
-                        })
-                        .flatten();
+                    let path_for_removal = path.clone();
 
                     let is_now_connected = status.is_connected();
                     let is_now_disconnected = status.is_disconnected();
+                    let msg_owned = message.to_string();
                     tray_for_status.update(move |t| {
                         if let Some(session) = t.sessions.get_mut(&path) {
-                            session.status = SessionStatus::new(major, minor, message_owned);
                             if is_now_connected && session.connected_at.is_none() {
                                 session.connected_at = Some(std::time::Instant::now());
-                            } else if is_now_disconnected {
-                                session.connected_at = None;
                             }
                         } else {
                             // New session not yet seen via SessCreated
@@ -314,12 +328,20 @@ pub(super) async fn setup_status_handler(
                                     session_path: path.clone(),
                                     config_path: String::new(),
                                     config_name: "VPN".to_string(),
-                                    status: SessionStatus::new(major, minor, message_owned),
+                                    status: SessionStatus::new(major, minor, msg_owned),
                                     connected_at: None,
                                 },
                             );
                         }
                     });
+
+                    // Remove terminal sessions from the tray immediately rather than
+                    // waiting for SessDestroyed. Prevents zombie "Profile: Done" entries.
+                    if is_now_disconnected {
+                        tray_for_status.update(move |t| {
+                            t.sessions.remove(&path_for_removal);
+                        });
+                    }
 
                     // Connection timeout watcher — notify if still connecting after
                     // the user-configured timeout (default 30s).
