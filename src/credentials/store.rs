@@ -70,7 +70,7 @@ impl CredentialStore {
         attributes.insert("config-id", config_id);
         attributes.insert("key", key);
 
-        let label = format!("OpenVPN3 Indicator: {} - {}", config_id, key);
+        let label = format!("OpenVPN3 GUI: {} - {}", config_id, key);
 
         keyring
             .create_item(&label, &attributes, value.as_bytes(), true)
