@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Session paths the user explicitly disconnected (not unexpected drops)
 pub(crate) static USER_DISCONNECTED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
@@ -64,14 +64,11 @@ pub(crate) async fn connect_to_config(
         );
     });
 
-    // Enable log/status forwarding so we receive StatusChange signals
+    // Try Ready() — will fail if credentials are needed
     let session = SessionProxy::builder(dbus)
         .path(session_path.clone())?
         .build()
         .await?;
-    if let Err(e) = session.LogForward(true).await {
-        debug!("LogForward not available (ok for older versions): {}", e);
-    }
 
     // Try Ready() — will fail if credentials are needed
     match session.Ready().await {
