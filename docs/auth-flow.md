@@ -107,3 +107,6 @@ Server sends:  StatusChange(major=3/Session, minor=22/SessAuthUrl, "https://..."
 | CHALLENGE_STATIC | 4 | Static challenge (pre-connect, in same batch as creds) |
 | CHALLENGE_DYNAMIC | 5 | Dynamic challenge (post-connect, from VPN server) |
 | CHALLENGE_AUTH_PENDING | 6 | CR_TEXT auth pending (modern OpenVPN protocol) |
+
+> **Note:** Groups 2 (HTTP_PROXY_CREDS) and 3 (PK_PASSPHRASE) are not handled by the
+> current auth dispatch logic. If they appear, `dispatch_for_session()` returns `None`.

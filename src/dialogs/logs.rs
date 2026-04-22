@@ -137,6 +137,19 @@ pub fn show_log_viewer(
     let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     vbox.append(&notebook);
 
+    let notif_note = gtk4::Label::new(Some(
+        "Opening this window may suppress notifications on some desktop environments.",
+    ));
+    notif_note.add_css_class("dim-label");
+    let notif_icon = gtk4::Image::from_icon_name("dialog-information-symbolic");
+    let notif_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    notif_box.set_margin_top(4);
+    notif_box.set_margin_start(8);
+    notif_box.set_halign(gtk4::Align::Start);
+    notif_box.append(&notif_icon);
+    notif_box.append(&notif_note);
+    vbox.append(&notif_box);
+
     let close_btn = gtk4::Button::with_label("Close");
     let btn_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     btn_box.set_halign(gtk4::Align::End);

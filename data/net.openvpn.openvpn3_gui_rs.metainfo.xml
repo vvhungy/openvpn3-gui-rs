@@ -14,28 +14,23 @@
     </p>
     <p>Features:</p>
     <ul>
-      <li>System tray icon showing connection status</li>
+      <li>System tray icon with dynamic status (idle, connecting, active, paused, error)</li>
       <li>VPN configuration management (import, remove)</li>
-      <li>Session management (connect, disconnect, pause, resume)</li>
-      <li>Desktop notifications for connection events</li>
-      <li>Secure credential storage via Secret Service</li>
-      <li>Automatic reconnection on startup</li>
+      <li>Session management (connect, disconnect, pause, resume, restart, reconnect)</li>
+      <li>Desktop notifications for status changes (deduplicated, grouped per connection)</li>
+      <li>Secure credential storage via Secret Service (oo7)</li>
+      <li>Auto-connect on startup (most-recent or specific profile)</li>
+      <li>Reconnect prompt on unexpected session drop</li>
+      <li>Username/password, challenge/OTP, and browser-redirect authentication</li>
+      <li>Tabbed session log viewer with live log streaming</li>
+      <li>Preferences dialog (startup, notifications, timeout, credentials)</li>
+      <li>Configurable connection timeout with notification</li>
+      <li>Automatic recovery when the OpenVPN3 service restarts</li>
       <li>Multiple VPN configuration support</li>
     </ul>
   </description>
 
   <launchable type="desktop-id">net.openvpn.openvpn3_gui_rs.desktop</launchable>
-
-  <screenshots>
-    <screenshot type="default">
-      <caption>System tray icon showing connected status</caption>
-      <image type="source" width="256" height="256">https://raw.githubusercontent.com/vvhungy/openvpn3-gui-rs/main/data/screenshots/tray-icon.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>Connection menu with VPN configurations</caption>
-      <image type="source" width="400" height="300">https://raw.githubusercontent.com/vvhungy/openvpn3-gui-rs/main/data/screenshots/menu.png</image>
-    </screenshot>
-  </screenshots>
 
   <url type="homepage">https://github.com/vvhungy/openvpn3-gui-rs</url>
   <url type="bugtracker">https://github.com/vvhungy/openvpn3-gui-rs/issues</url>

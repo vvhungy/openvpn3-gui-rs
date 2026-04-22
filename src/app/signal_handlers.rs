@@ -112,11 +112,19 @@ pub(crate) async fn setup_signal_handlers(
                             })
                             .flatten();
 
+                        // Delay removal so status notifications complete with the
+                        // correct profile name. The status_handler also schedules a
+                        // 3s delayed removal on is_disconnected(); this 5s removal
+                        // is a safety net in case no terminal StatusChange arrives.
                         let sp = session_path.clone();
-                        tray_for_session.update(move |t| {
-                            t.sessions.remove(&sp);
+                        let tray_for_removal = tray_for_session.clone();
+                        glib::spawn_future_local(async move {
+                            glib::timeout_future_seconds(5).await;
+                            tray_for_removal.update(move |t| {
+                                t.sessions.remove(&sp);
+                            });
                         });
-                        info!("Session removed from tray");
+                        info!("Session destroyed, scheduled delayed removal");
 
                         // Check whether the user initiated this disconnect
                         let user_initiated =

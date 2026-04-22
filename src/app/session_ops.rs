@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Session paths the user explicitly disconnected (not unexpected drops)
 pub(crate) static USER_DISCONNECTED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
@@ -38,6 +38,16 @@ pub(crate) async fn connect_to_config(
     // Save as most recent
     settings.set_most_recent_config(config_path_str, &config_name);
 
+    // Remove any stale sessions for this config before creating a new one.
+    // Sessions linger in the tray for 3-5s after disconnect (delayed removal);
+    // without cleanup, reconnecting would leave duplicate entries.
+    {
+        let cp = config_path_str.to_string();
+        tray.update(move |t| {
+            t.sessions.retain(|_, s| s.config_path != cp);
+        });
+    }
+
     // Create session
     let session_manager = SessionManagerProxy::builder(dbus)
         .cache_properties(CacheProperties::No)
@@ -64,14 +74,11 @@ pub(crate) async fn connect_to_config(
         );
     });
 
-    // Enable log/status forwarding so we receive StatusChange signals
+    // Try Ready() — will fail if credentials are needed
     let session = SessionProxy::builder(dbus)
         .path(session_path.clone())?
         .build()
         .await?;
-    if let Err(e) = session.LogForward(true).await {
-        debug!("LogForward not available (ok for older versions): {}", e);
-    }
 
     // Try Ready() — will fail if credentials are needed
     match session.Ready().await {

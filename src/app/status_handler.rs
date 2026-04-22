@@ -13,6 +13,11 @@ use crate::tray::{SessionInfo, VpnTray};
 const FALLBACK_NAME: &str = "VPN Connection";
 
 /// Subscribe to StatusChange signals and spawn the handler loop.
+///
+/// An AddMatch rule is required for the D-Bus daemon to deliver signals to our
+/// connection. `LogForward(true)` tells OpenVPN3 to emit signals, but without
+/// AddMatch the daemon won't route them here. Dedup is handled in-line by
+/// skipping signals with the same (major, minor) as the previous for each path.
 pub(super) async fn setup_status_handler(
     dbus: &zbus::Connection,
     tray: &ksni::blocking::Handle<VpnTray>,
@@ -25,8 +30,6 @@ pub(super) async fn setup_status_handler(
         &"type='signal',interface='net.openvpn.v3.backends',member='StatusChange'",
     )
     .await?;
-    info!("Added D-Bus match rule for StatusChange signals");
-
     let conn = dbus.clone();
     let tray_for_status = tray.clone();
     glib::spawn_future_local(async move {
@@ -34,6 +37,8 @@ pub(super) async fn setup_status_handler(
         use zbus::message::Type as MessageType;
 
         let mut stream = MessageStream::from(&conn);
+        let mut last_signal: std::collections::HashMap<String, (u32, u32)> =
+            std::collections::HashMap::new();
 
         while let Some(msg_result) = stream.next().await {
             let msg = match msg_result {
@@ -68,6 +73,13 @@ pub(super) async fn setup_status_handler(
                     );
 
                     let status = SessionStatus::new(major, minor, message.to_string());
+
+                    // Dedup: skip duplicate (path, major, minor) signals caused by
+                    // LogForward + AddMatch both delivering the same signal.
+                    if last_signal.get(&path) == Some(&(major, minor)) {
+                        continue;
+                    }
+                    last_signal.insert(path.clone(), (major, minor));
 
                     // Capture previous status BEFORE the tray update so the
                     // notification at the bottom can detect the transition.
@@ -310,7 +322,7 @@ pub(super) async fn setup_status_handler(
 
                     // Update tray session state (connected_at, new sessions, removal)
                     let path_for_timeout = path.clone();
-                    let path_for_removal = path.clone();
+                    let path_for_removal = path.clone(); // moved into delayed removal closure
 
                     let is_now_connected = status.is_connected();
                     let is_now_disconnected = status.is_disconnected();
@@ -338,8 +350,14 @@ pub(super) async fn setup_status_handler(
                     // Remove terminal sessions from the tray immediately rather than
                     // waiting for SessDestroyed. Prevents zombie "Profile: Done" entries.
                     if is_now_disconnected {
-                        tray_for_status.update(move |t| {
-                            t.sessions.remove(&path_for_removal);
+                        // Delay removal so the notification chain completes with
+                        // the correct profile name (Disconnecting → Disconnected → Done).
+                        let tray_for_removal = tray_for_status.clone();
+                        glib::spawn_future_local(async move {
+                            glib::timeout_future_seconds(3).await;
+                            tray_for_removal.update(move |t| {
+                                t.sessions.remove(&path_for_removal);
+                            });
                         });
                     }
 
