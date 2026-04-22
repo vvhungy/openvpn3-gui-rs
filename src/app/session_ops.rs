@@ -38,6 +38,16 @@ pub(crate) async fn connect_to_config(
     // Save as most recent
     settings.set_most_recent_config(config_path_str, &config_name);
 
+    // Remove any stale sessions for this config before creating a new one.
+    // Sessions linger in the tray for 3-5s after disconnect (delayed removal);
+    // without cleanup, reconnecting would leave duplicate entries.
+    {
+        let cp = config_path_str.to_string();
+        tray.update(move |t| {
+            t.sessions.retain(|_, s| s.config_path != cp);
+        });
+    }
+
     // Create session
     let session_manager = SessionManagerProxy::builder(dbus)
         .cache_properties(CacheProperties::No)
