@@ -59,6 +59,8 @@ async fn handle_session_created(
                 config_name,
                 status: SessionStatus::new(major, minor, message),
                 connected_at: None,
+                bytes_in: 0,
+                bytes_out: 0,
             });
     });
 

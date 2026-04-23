@@ -428,6 +428,8 @@ pub(super) async fn setup_status_handler(
                                     config_name: "VPN".to_string(),
                                     status: SessionStatus::new(major, minor, msg_owned),
                                     connected_at: None,
+                                    bytes_in: 0,
+                                    bytes_out: 0,
                                 },
                             );
                         }

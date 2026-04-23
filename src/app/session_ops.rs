@@ -70,6 +70,8 @@ pub(crate) async fn connect_to_config(
                 config_name: cn,
                 status: SessionStatus::new(0, 0, "Connecting".to_string()),
                 connected_at: None,
+                bytes_in: 0,
+                bytes_out: 0,
             },
         );
     });

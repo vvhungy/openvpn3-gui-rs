@@ -268,6 +268,8 @@ mod tests {
                 minor,
             },
             connected_at: None,
+            bytes_in: 0,
+            bytes_out: 0,
         }
     }
 
