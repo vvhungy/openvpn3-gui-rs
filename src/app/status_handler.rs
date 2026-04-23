@@ -39,6 +39,8 @@ pub(super) async fn setup_status_handler(
         let mut stream = MessageStream::from(&conn);
         let mut last_signal: std::collections::HashMap<String, (u32, u32)> =
             std::collections::HashMap::new();
+        let timeout_gen: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, u64>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
 
         while let Some(msg_result) = stream.next().await {
             let msg = match msg_result {
@@ -225,31 +227,108 @@ pub(super) async fn setup_status_handler(
                         continue;
                     }
 
-                    // Authentication failure
+                    // Authentication failure — auto-retry by creating a new tunnel
+                    // up to MAX_CREDENTIAL_ATTEMPTS times, then disconnect.
                     if status.major == StatusMajor::Connection
                         && status.minor == StatusMinor::ConnAuthFailed
                     {
-                        warn!("Authentication failed for session {}", path);
                         let session_path = path.clone();
                         let dbus_conn = conn.clone();
-                        let config_name = tray_for_status
+                        let (config_name, config_path) = tray_for_status
                             .update(|t| {
-                                t.sessions.get(&session_path).map(|s| s.config_name.clone())
+                                t.sessions
+                                    .get(&session_path)
+                                    .map(|s| (s.config_name.clone(), s.config_path.clone()))
                             })
                             .flatten()
-                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
-                        glib::spawn_future_local(async move {
-                            super::session_ops::disconnect_with_message(
-                                &dbus_conn,
-                                &session_path,
-                                "Authentication Failed",
-                                &format!(
-                                    "Authentication failed for '{}'. Please check your credentials.",
-                                    config_name
-                                ),
-                            )
-                            .await;
-                        });
+                            .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()));
+
+                        let attempt = {
+                            use super::credential_handler::{AUTH_RETRY_WINDOW_SECS, AuthAttempt};
+                            let mut attempts = super::credential_handler::CREDENTIAL_ATTEMPTS
+                                .lock()
+                                .unwrap();
+                            let entry =
+                                attempts.entry(config_name.clone()).or_insert(AuthAttempt {
+                                    count: 0,
+                                    last_failure: std::time::Instant::now(),
+                                });
+                            // Reset counter if last failure was too long ago
+                            if entry.last_failure.elapsed().as_secs() > AUTH_RETRY_WINDOW_SECS {
+                                entry.count = 0;
+                            }
+                            entry.count += 1;
+                            entry.last_failure = std::time::Instant::now();
+                            entry.count
+                        };
+
+                        if attempt < super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
+                            && !config_path.is_empty()
+                        {
+                            warn!(
+                                "Authentication failed for '{}' (attempt {}/{}) — creating new tunnel",
+                                config_name,
+                                attempt,
+                                super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
+                            );
+                            crate::dialogs::show_error_notification(
+                                &format!("{}: Authentication Failed", config_name),
+                                &format!("Wrong credentials for '{}'. Retrying...", config_name,),
+                            );
+                            // Mark old session so SessDestroyed won't show reconnect prompt
+                            super::session_ops::USER_DISCONNECTED
+                                .lock()
+                                .unwrap()
+                                .insert(session_path.clone());
+                            let tray_for_retry = tray_for_status.clone();
+                            let settings = crate::settings::Settings::new();
+                            let sp_for_disconnect = session_path;
+                            let dbus_for_disconnect = dbus_conn.clone();
+                            glib::spawn_future_local(async move {
+                                // Disconnect the failed session on D-Bus to
+                                // prevent orphan sessions from accumulating.
+                                if let Err(e) = super::session_ops::session_action(
+                                    &dbus_for_disconnect,
+                                    &sp_for_disconnect,
+                                    "disconnect",
+                                )
+                                .await
+                                {
+                                    tracing::warn!("Failed to disconnect orphan session: {}", e);
+                                }
+                                if let Err(e) = super::session_ops::connect_to_config(
+                                    &dbus_conn,
+                                    &config_path,
+                                    &tray_for_retry,
+                                    &settings,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        "Auto-reconnect after auth failure failed: {}",
+                                        e
+                                    );
+                                }
+                            });
+                        } else {
+                            warn!(
+                                "Max auth attempts reached for '{}' — disconnecting",
+                                config_name
+                            );
+                            glib::spawn_future_local(async move {
+                                super::session_ops::disconnect_with_message(
+                                    &dbus_conn,
+                                    &session_path,
+                                    &config_name,
+                                    "Authentication Failed",
+                                    &format!(
+                                        "Too many failed attempts for '{}'. Session disconnected.",
+                                        config_name
+                                    ),
+                                )
+                                .await;
+                            });
+                        }
                         continue;
                     }
 
@@ -270,6 +349,7 @@ pub(super) async fn setup_status_handler(
                             super::session_ops::disconnect_with_message(
                                 &dbus_conn,
                                 &session_path,
+                                &config_name,
                                 "Connection Failed",
                                 &format!(
                                     "Connection failed for '{}'. Please try again.",
@@ -304,6 +384,7 @@ pub(super) async fn setup_status_handler(
                             super::session_ops::disconnect_with_message(
                                 &dbus_conn,
                                 &session_path,
+                                &config_name,
                                 "VPN Error",
                                 &body,
                             )
@@ -313,11 +394,16 @@ pub(super) async fn setup_status_handler(
                     }
 
                     // Clear credential attempts on successful connection
-                    if status.is_connected()
-                        && let Ok(mut attempts) =
-                            super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
-                    {
-                        attempts.remove(&path);
+                    if status.is_connected() {
+                        let cn = tray_for_status
+                            .update(|t| t.sessions.get(&path).map(|s| s.config_name.clone()))
+                            .flatten();
+                        if let Some(cn) = cn
+                            && let Ok(mut attempts) =
+                                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
+                        {
+                            attempts.remove(&cn);
+                        }
                     }
 
                     // Update tray session state (connected_at, new sessions, removal)
@@ -362,13 +448,25 @@ pub(super) async fn setup_status_handler(
                     }
 
                     // Connection timeout watcher — notify if still connecting after
-                    // the user-configured timeout (default 30s).
+                    // the user-configured timeout (default 30s). Uses a generation
+                    // counter so only the latest watcher per session can fire.
                     let is_now_connecting = status.is_connecting();
                     if is_now_connecting {
+                        let expected_gen = {
+                            let mut tg = timeout_gen.borrow_mut();
+                            let entry = tg.entry(path_for_timeout.clone()).or_insert(0);
+                            *entry += 1;
+                            *entry
+                        };
                         let tray_for_timeout = tray_for_status.clone();
                         let timeout_secs = crate::settings::Settings::new().connection_timeout();
+                        let tg_check = timeout_gen.clone();
                         glib::spawn_future_local(async move {
                             glib::timeout_future_seconds(timeout_secs).await;
+                            // Stale watcher — a newer one was spawned for this session
+                            if tg_check.borrow().get(&path_for_timeout) != Some(&expected_gen) {
+                                return;
+                            }
                             let still_connecting = tray_for_timeout
                                 .update(|t| {
                                     t.sessions

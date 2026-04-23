@@ -12,8 +12,17 @@ use crate::dbus::types::ClientAttentionType;
 
 pub(crate) const MAX_CREDENTIAL_ATTEMPTS: u32 = 3;
 
-pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, u32>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// Auth failures older than this are considered stale and the counter resets.
+pub(crate) const AUTH_RETRY_WINDOW_SECS: u64 = 300; // 5 minutes
+
+pub(crate) struct AuthAttempt {
+    pub(crate) count: u32,
+    pub(crate) last_failure: std::time::Instant,
+}
+
+pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, AuthAttempt>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Whether a credential field should be persisted to the keyring.
 pub(crate) fn is_storable_field(label: &str, mask: bool) -> bool {
@@ -49,32 +58,6 @@ pub(crate) async fn request_credentials(
     let dbus = dbus.clone();
     let session_path = session_path.to_string();
     let config_name = config_name.to_string();
-
-    // Check attempt count
-    let attempt = {
-        let mut attempts = CREDENTIAL_ATTEMPTS.lock().unwrap();
-        let count = attempts.entry(session_path.clone()).or_insert(0);
-        *count += 1;
-        *count
-    };
-
-    if attempt > MAX_CREDENTIAL_ATTEMPTS {
-        warn!(
-            "Max credential attempts ({}) reached for {}",
-            MAX_CREDENTIAL_ATTEMPTS, session_path
-        );
-        super::session_ops::disconnect_with_message(
-            &dbus,
-            &session_path,
-            "Authentication Failed",
-            &format!(
-                "Too many failed attempts for '{}'. Session disconnected.",
-                config_name
-            ),
-        )
-        .await;
-        return;
-    }
 
     let session_path_obj = match OwnedObjectPath::try_from(session_path.as_str()) {
         Ok(p) => p,
@@ -130,11 +113,9 @@ pub(crate) async fn request_credentials(
     }
 
     info!(
-        "Found {} credential slots for session {} (attempt {}/{})",
+        "Found {} credential slots for session {}",
         slots.len(),
         session_path,
-        attempt,
-        MAX_CREDENTIAL_ATTEMPTS
     );
 
     // Resolve keyring values in async context before entering the sync dialog loop.
@@ -198,6 +179,7 @@ fn show_credentials_with_slots(
             super::session_ops::disconnect_with_message(
                 &dbus,
                 &sp,
+                &cn,
                 "Connection Cancelled",
                 &format!(
                     "Authentication cancelled for '{}'. Session disconnected.",
@@ -232,10 +214,8 @@ fn show_credentials_with_slots(
                 glib::spawn_future_local(async move {
                     match submit_credentials(&dbus, &sp, &slots, &values).await {
                         Ok(true) => {
-                            // All slots provided and connected
-                            if let Ok(mut attempts) = CREDENTIAL_ATTEMPTS.lock() {
-                                attempts.remove(&sp);
-                            }
+                            // All slots provided and Connect() sent — counter is
+                            // cleared by status_handler when is_connected() fires.
                             // Save only storable credentials (username/password, not OTP)
                             let store = crate::credentials::CredentialStore::default();
                             for (label, value) in &values {
