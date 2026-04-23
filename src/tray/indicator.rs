@@ -12,12 +12,13 @@ use tracing::error;
 /// Action to dispatch from tray menu clicks back to the GTK app
 #[derive(Debug, Clone)]
 pub enum TrayAction {
-    Connect(String),      // config D-Bus path
-    Disconnect(String),   // session D-Bus path
-    Pause(String),        // session D-Bus path
-    Resume(String),       // session D-Bus path
-    Restart(String),      // session D-Bus path
-    RemoveConfig(String), // config D-Bus path
+    Connect(String),           // config D-Bus path
+    Disconnect(String),        // session D-Bus path
+    Pause(String),             // session D-Bus path
+    Resume(String),            // session D-Bus path
+    Restart(String),           // session D-Bus path
+    Reconnect(String, String), // (session_path, config_path) for disconnected/error sessions
+    RemoveConfig(String),      // config D-Bus path
     ImportConfig,
     About,
     Quit,
