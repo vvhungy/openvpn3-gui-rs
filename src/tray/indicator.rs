@@ -113,6 +113,8 @@ pub struct VpnTray {
     pub sessions: HashMap<String, SessionInfo>,
     /// Channel to send actions to the GTK main loop
     pub action_tx: ActionSender,
+    /// Pre-rendered ARGB32 pixmaps for each status icon (GNOME compat)
+    pixmaps: HashMap<&'static str, Vec<ksni::Icon>>,
 }
 
 impl VpnTray {
@@ -120,6 +122,7 @@ impl VpnTray {
         Self {
             configs: Vec::new(),
             sessions: HashMap::new(),
+            pixmaps: super::pixmaps::build_pixmap_cache(),
             action_tx,
         }
     }
@@ -200,11 +203,21 @@ impl ksni::Tray for VpnTray {
     }
 
     fn icon_name(&self) -> String {
-        self.current_icon().into()
+        // Return empty so GNOME's AppIndicator extension falls through to
+        // icon_pixmap() instead of creating an unresolvable Gio.ThemedIcon.
+        // KDE/XFCE also render IconPixmap correctly via the pre-rasterized data.
+        String::new()
     }
 
     fn icon_theme_path(&self) -> String {
         Self::icon_theme_paths()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        self.pixmaps
+            .get(self.current_icon())
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn tool_tip(&self) -> ToolTip {
