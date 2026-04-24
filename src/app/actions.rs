@@ -37,6 +37,28 @@ pub(crate) fn handle_tray_action(
                 }
             });
         }
+        TrayAction::Reconnect(session_path, config_path) => {
+            info!(
+                "Tray action: Reconnect {} via {}",
+                session_path, config_path
+            );
+            if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
+                set.insert(session_path.clone());
+            }
+            let dbus = dbus.clone();
+            let config_path = config_path.clone();
+            let tray = tray.clone();
+            let settings = settings.clone();
+            glib::spawn_future_local(async move {
+                if let Err(e) = connect_to_config(&dbus, &config_path, &tray, &settings).await {
+                    error!("Failed to reconnect: {}", e);
+                    crate::dialogs::show_error_notification(
+                        "Reconnect Failed",
+                        &format!("Could not reconnect to VPN: {}", e),
+                    );
+                }
+            });
+        }
         TrayAction::Disconnect(session_path) => {
             info!("Tray action: Disconnect {}", session_path);
             // Mark as user-initiated so the SessDestroyed handler skips the reconnect prompt

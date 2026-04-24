@@ -183,9 +183,7 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
             StandardItem {
                 label: "Reconnect".into(),
                 activate: Box::new(move |tray: &mut VpnTray| {
-                    // Disconnect the dead session first, then start fresh
-                    tray.send_action(TrayAction::Disconnect(sp.clone()));
-                    tray.send_action(TrayAction::Connect(cp.clone()));
+                    tray.send_action(TrayAction::Reconnect(sp.clone(), cp.clone()));
                 }),
                 ..Default::default()
             }
@@ -270,6 +268,8 @@ mod tests {
                 minor,
             },
             connected_at: None,
+            bytes_in: 0,
+            bytes_out: 0,
         }
     }
 

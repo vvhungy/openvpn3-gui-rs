@@ -86,6 +86,7 @@ pub(crate) async fn request_challenge(
             super::session_ops::disconnect_with_message(
                 &dbus,
                 &sp,
+                &cn,
                 "Connection Cancelled",
                 &format!(
                     "Authentication cancelled for '{}'. Session disconnected.",

@@ -70,6 +70,8 @@ pub(crate) async fn connect_to_config(
                 config_name: cn,
                 status: SessionStatus::new(0, 0, "Connecting".to_string()),
                 connected_at: None,
+                bytes_in: 0,
+                bytes_out: 0,
             },
         );
     });
@@ -129,12 +131,13 @@ pub(crate) async fn session_action(
 pub(crate) async fn disconnect_with_message(
     dbus: &zbus::Connection,
     session_path: &str,
+    config_name: &str,
     title: &str,
     message: &str,
 ) {
     // Clear attempt counter
     if let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock() {
-        attempts.remove(session_path);
+        attempts.remove(config_name);
     }
     // Mark as user-initiated to suppress the SessDestroyed reconnect notification
     USER_DISCONNECTED

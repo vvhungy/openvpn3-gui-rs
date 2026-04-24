@@ -12,12 +12,13 @@ use tracing::error;
 /// Action to dispatch from tray menu clicks back to the GTK app
 #[derive(Debug, Clone)]
 pub enum TrayAction {
-    Connect(String),      // config D-Bus path
-    Disconnect(String),   // session D-Bus path
-    Pause(String),        // session D-Bus path
-    Resume(String),       // session D-Bus path
-    Restart(String),      // session D-Bus path
-    RemoveConfig(String), // config D-Bus path
+    Connect(String),           // config D-Bus path
+    Disconnect(String),        // session D-Bus path
+    Pause(String),             // session D-Bus path
+    Resume(String),            // session D-Bus path
+    Restart(String),           // session D-Bus path
+    Reconnect(String, String), // (session_path, config_path) for disconnected/error sessions
+    RemoveConfig(String),      // config D-Bus path
     ImportConfig,
     About,
     Quit,
@@ -41,12 +42,24 @@ pub struct SessionInfo {
     pub config_name: String,
     pub status: SessionStatus,
     pub connected_at: Option<std::time::Instant>,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
 }
 
 impl SessionInfo {
     pub fn status_label(&self) -> String {
         let desc = get_status_description(self.status.major, self.status.minor);
-        format!("{}: {}", self.config_name, desc)
+        if self.status.is_connected() && (self.bytes_in > 0 || self.bytes_out > 0) {
+            format!(
+                "{}: {} ↓ {} ↑ {}",
+                self.config_name,
+                desc,
+                format_bytes(self.bytes_in),
+                format_bytes(self.bytes_out)
+            )
+        } else {
+            format!("{}: {}", self.config_name, desc)
+        }
     }
 
     fn tooltip_line(&self) -> String {
@@ -62,9 +75,30 @@ impl SessionInfo {
             } else {
                 format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
             };
-            return format!("{} — {} ({})", self.config_name, desc, duration);
+            let stats = if self.bytes_in > 0 || self.bytes_out > 0 {
+                format!(
+                    " | {} | {}",
+                    format_bytes(self.bytes_in),
+                    format_bytes(self.bytes_out)
+                )
+            } else {
+                String::new()
+            };
+            return format!("{} — {} ({}{})", self.config_name, desc, duration, stats);
         }
         format!("{} — {}", self.config_name, desc)
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 
@@ -208,6 +242,8 @@ mod tests {
             config_name: name.into(),
             status: SessionStatus { major, minor },
             connected_at: None,
+            bytes_in: 0,
+            bytes_out: 0,
         }
     }
 
@@ -215,6 +251,14 @@ mod tests {
     fn test_status_label_format() {
         let s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
         assert_eq!(s.status_label(), "MyVPN: Connected");
+    }
+
+    #[test]
+    fn test_status_label_with_stats() {
+        let mut s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
+        s.bytes_in = 1024 * 1024 * 42; // 42 MB
+        s.bytes_out = 1024 * 1024 * 33; // 33 MB
+        assert_eq!(s.status_label(), "MyVPN: Connected ↓ 42.0 MB ↑ 33.0 MB");
     }
 
     #[test]

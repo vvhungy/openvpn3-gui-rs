@@ -107,6 +107,14 @@ pub trait Session {
     /// Get the config path associated with this session
     #[zbus(property, name = "config_path")]
     fn config_path(&self) -> zbus::Result<OwnedObjectPath>;
+
+    /// Get connection statistics (BYTES_IN, BYTES_OUT, etc.)
+    #[zbus(property, name = "statistics")]
+    fn statistics(&self) -> zbus::Result<std::collections::HashMap<String, i64>>;
+
+    /// Get connected-to info: (protocol, address, port)
+    #[zbus(property, name = "connected_to")]
+    fn connected_to(&self) -> zbus::Result<(String, String, u32)>;
 }
 
 /// Backend signals interface (received from net.openvpn.v3.log)
