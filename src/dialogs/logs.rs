@@ -120,11 +120,14 @@ pub fn show_log_viewer(
     // Tabs keyed by config_name
     let tabs: Rc<RefCell<HashMap<String, TabState>>> = Rc::new(RefCell::new(HashMap::new()));
 
+    let placeholder_page: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+
     if all_names.is_empty() {
         let label = gtk4::Label::new(Some("No VPN sessions to show logs for."));
         label.set_margin_top(24);
         label.set_margin_bottom(24);
-        notebook.append_page(&label, Some(&gtk4::Label::new(Some("No Sessions"))));
+        let page_num = notebook.append_page(&label, Some(&gtk4::Label::new(Some("No Sessions"))));
+        *placeholder_page.borrow_mut() = Some(page_num);
     } else {
         for config_name in &all_names {
             let tab = create_tab_for_config(config_name);
@@ -187,6 +190,7 @@ pub fn show_log_viewer(
     // Live-tail subscription
     let dbus = dbus.clone();
     let tray = tray.clone();
+    let placeholder_page = placeholder_page.clone();
     let notebook_rc = notebook;
     glib::spawn_future_local(async move {
         let match_rule = "type='signal',interface='net.openvpn.v3.backends',member='Log'";
@@ -270,6 +274,9 @@ pub fn show_log_viewer(
                         // Find or create tab by config_name
                         let mut tabs_map = tabs.borrow_mut();
                         if !tabs_map.contains_key(&config_name) {
+                            if let Some(page_num) = placeholder_page.borrow_mut().take() {
+                                notebook_rc.remove_page(Some(page_num));
+                            }
                             let tab = create_tab_for_config(&config_name);
                             notebook_rc.append_page(
                                 &tab.scrolled,
