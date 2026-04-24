@@ -60,5 +60,15 @@
         connection is still pending. Range: 5–300.
       </description>
     </key>
+
+    <key name="health-check-stall-seconds" type="u">
+      <default>60</default>
+      <summary>Stall detection threshold (seconds)</summary>
+      <description>
+        How long (in seconds) a connected session must show zero traffic
+        before being flagged as idle in the tray menu. Set to 0 to disable.
+        Range: 0–600.
+      </description>
+    </key>
   </schema>
 </schemalist>

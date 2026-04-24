@@ -152,6 +152,24 @@ impl Settings {
         }
     }
 
+    /// Get the stall detection threshold in seconds (default 60; 0 = disabled)
+    pub fn health_check_stall_seconds(&self) -> u32 {
+        self.settings
+            .as_ref()
+            .map(|s| s.uint("health-check-stall-seconds"))
+            .unwrap_or(60)
+            .clamp(0, 600)
+    }
+
+    /// Set the stall detection threshold in seconds
+    pub fn set_health_check_stall_seconds(&self, secs: u32) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_uint("health-check-stall-seconds", secs.clamp(0, 600))
+        {
+            error!("Failed to set health-check-stall-seconds: {}", e);
+        }
+    }
+
     /// Check if notifications are enabled
     pub fn show_notifications(&self) -> bool {
         self.settings
@@ -246,5 +264,15 @@ mod tests {
     #[test]
     fn test_set_connection_timeout_no_panic() {
         Settings::new_empty().set_connection_timeout(60);
+    }
+
+    #[test]
+    fn test_health_check_stall_seconds_default() {
+        assert_eq!(Settings::new_empty().health_check_stall_seconds(), 60);
+    }
+
+    #[test]
+    fn test_set_health_check_stall_seconds_no_panic() {
+        Settings::new_empty().set_health_check_stall_seconds(120);
     }
 }

@@ -72,6 +72,9 @@ pub(crate) async fn connect_to_config(
                 connected_at: None,
                 bytes_in: 0,
                 bytes_out: 0,
+                last_bytes_in: 0,
+                last_bytes_out: 0,
+                idle_since: None,
             },
         );
     });

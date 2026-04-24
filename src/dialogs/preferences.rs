@@ -125,6 +125,19 @@ pub fn show_preferences_dialog(
     timeout_row.append(&timeout_spin);
     content.append(&timeout_row);
 
+    // --- Stall detection threshold ---
+    let stall_row = GtkBox::new(Orientation::Horizontal, 8);
+    let stall_label = Label::builder()
+        .label("Stall detection threshold (seconds):")
+        .halign(gtk4::Align::Start)
+        .hexpand(true)
+        .build();
+    let stall_spin = SpinButton::with_range(0.0, 600.0, 10.0);
+    stall_spin.set_value(settings.health_check_stall_seconds() as f64);
+    stall_row.append(&stall_label);
+    stall_row.append(&stall_spin);
+    content.append(&stall_row);
+
     // --- Security ---
     content.append(&Separator::new(Orientation::Horizontal));
 
@@ -180,6 +193,7 @@ pub fn show_preferences_dialog(
                 settings_clone.set_show_notifications(notif_check.is_active());
                 settings_clone.set_tooltip_refresh_interval(interval_spin.value() as u32);
                 settings_clone.set_connection_timeout(timeout_spin.value() as u32);
+                settings_clone.set_health_check_stall_seconds(stall_spin.value() as u32);
                 window.close();
             }
         },
