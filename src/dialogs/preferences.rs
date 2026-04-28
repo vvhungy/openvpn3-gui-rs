@@ -148,6 +148,12 @@ pub fn show_preferences_dialog(
         .build();
     content.append(&security_label);
 
+    let warn_disconnect_check = CheckButton::builder()
+        .label("Warn on unexpected disconnect")
+        .active(settings.warn_on_unexpected_disconnect())
+        .build();
+    content.append(&warn_disconnect_check);
+
     let clear_btn = Button::builder()
         .label("Clear Saved Credentials...")
         .halign(gtk4::Align::Start)
@@ -194,6 +200,7 @@ pub fn show_preferences_dialog(
                 settings_clone.set_tooltip_refresh_interval(interval_spin.value() as u32);
                 settings_clone.set_connection_timeout(timeout_spin.value() as u32);
                 settings_clone.set_health_check_stall_seconds(stall_spin.value() as u32);
+                settings_clone.set_warn_on_unexpected_disconnect(warn_disconnect_check.is_active());
                 window.close();
             }
         },

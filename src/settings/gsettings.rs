@@ -170,6 +170,23 @@ impl Settings {
         }
     }
 
+    /// Check if the unexpected-disconnect warning is enabled (default true)
+    pub fn warn_on_unexpected_disconnect(&self) -> bool {
+        self.settings
+            .as_ref()
+            .map(|s| s.boolean("warn-on-unexpected-disconnect"))
+            .unwrap_or(true)
+    }
+
+    /// Set whether the unexpected-disconnect warning is enabled
+    pub fn set_warn_on_unexpected_disconnect(&self, enabled: bool) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_boolean("warn-on-unexpected-disconnect", enabled)
+        {
+            error!("Failed to set warn-on-unexpected-disconnect: {}", e);
+        }
+    }
+
     /// Check if notifications are enabled
     pub fn show_notifications(&self) -> bool {
         self.settings
@@ -274,5 +291,15 @@ mod tests {
     #[test]
     fn test_set_health_check_stall_seconds_no_panic() {
         Settings::new_empty().set_health_check_stall_seconds(120);
+    }
+
+    #[test]
+    fn test_warn_on_unexpected_disconnect_default() {
+        assert!(Settings::new_empty().warn_on_unexpected_disconnect());
+    }
+
+    #[test]
+    fn test_set_warn_on_unexpected_disconnect_no_panic() {
+        Settings::new_empty().set_warn_on_unexpected_disconnect(false);
     }
 }
