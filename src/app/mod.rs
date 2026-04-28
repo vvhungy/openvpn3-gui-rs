@@ -22,6 +22,7 @@ pub(crate) fn dialog_parent() -> Option<gtk4::ApplicationWindow> {
 mod actions;
 mod application;
 mod auth_dispatch;
+mod auth_handlers;
 mod challenge_handler;
 mod config_ops;
 mod credential_handler;
@@ -29,6 +30,8 @@ mod dbus_init;
 pub(crate) mod log_buffer;
 mod session_ops;
 mod signal_handlers;
+mod stats_poller;
 mod status_handler;
+mod timeout_watcher;
 
 pub use application::{AppArgs, Application};

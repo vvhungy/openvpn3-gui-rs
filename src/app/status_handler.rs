@@ -39,8 +39,6 @@ pub(super) async fn setup_status_handler(
         let mut stream = MessageStream::from(&conn);
         let mut last_signal: std::collections::HashMap<String, (u32, u32)> =
             std::collections::HashMap::new();
-        let timeout_gen: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, u64>>> =
-            std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
 
         while let Some(msg_result) = stream.next().await {
             let msg = match msg_result {
@@ -110,120 +108,14 @@ pub(super) async fn setup_status_handler(
                         });
                     }
 
-                    // Server needs user input (CfgRequireUser) — may be credentials
-                    // or dynamic challenge. Query the input queue to determine which.
-                    if status.needs_user_input() {
-                        info!("Server requires user input for {}", path);
-                        let session_path = path.clone();
-                        let dbus_conn = conn.clone();
-                        let config_name = tray_for_status
-                            .update(|t| {
-                                t.sessions.get(&session_path).map(|s| s.config_name.clone())
-                            })
-                            .flatten()
-                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
-                        glib::spawn_future_local(async move {
-                            match super::auth_dispatch::dispatch_for_session(
-                                &dbus_conn,
-                                &session_path,
-                            )
-                            .await
-                            {
-                                Some(super::auth_dispatch::AuthDispatch::Credentials) => {
-                                    super::credential_handler::request_credentials(
-                                        &dbus_conn,
-                                        &session_path,
-                                        &config_name,
-                                        Default::default(),
-                                    )
-                                    .await;
-                                }
-                                Some(super::auth_dispatch::AuthDispatch::Challenge) => {
-                                    super::challenge_handler::request_challenge(
-                                        &dbus_conn,
-                                        &session_path,
-                                        &config_name,
-                                    )
-                                    .await;
-                                }
-                                None => {
-                                    warn!("No input slots found for {}", session_path);
-                                }
-                            }
-                        });
-                        continue;
-                    }
-
-                    // Credentials required (legacy signal from session manager)
-                    if status.needs_credentials() {
-                        info!("Session requires credentials (username/password)");
-                        let session_path = path.clone();
-                        let dbus_conn = conn.clone();
-                        let config_name = tray_for_status
-                            .update(|t| {
-                                t.sessions.get(&session_path).map(|s| s.config_name.clone())
-                            })
-                            .flatten()
-                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
-                        glib::spawn_future_local(async move {
-                            super::credential_handler::request_credentials(
-                                &dbus_conn,
-                                &session_path,
-                                &config_name,
-                                Default::default(),
-                            )
-                            .await;
-                        });
-                        continue;
-                    }
-
-                    // URL / browser authentication required
-                    if status.needs_url_auth() {
-                        info!("Session requires browser authentication");
-                        let url = message.to_string();
-                        let config_name = tray_for_status
-                            .update(|t| t.sessions.get(&path).map(|s| s.config_name.clone()))
-                            .flatten()
-                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
-                        let notif_body = if url.is_empty() {
-                            "Please complete authentication in your browser.".to_string()
-                        } else {
-                            format!("Opening browser for authentication:\n{}", url)
-                        };
-                        crate::dialogs::show_info_notification(
-                            &format!("{}: Browser Authentication Required", config_name),
-                            &notif_body,
-                        );
-                        if !url.is_empty()
-                            && let Err(e) = gio::AppInfo::launch_default_for_uri(
-                                &url,
-                                None::<&gio::AppLaunchContext>,
-                            )
-                        {
-                            warn!("Failed to open auth URL in browser: {}", e);
-                        }
-                        continue;
-                    }
-
-                    // Challenge / OTP required
-                    if status.needs_challenge() {
-                        info!("Session requires challenge/OTP response");
-                        let session_path = path.clone();
-                        let dbus_conn = conn.clone();
-                        let config_name = tray_for_status
-                            .update(|t| {
-                                t.sessions.get(&session_path).map(|s| s.config_name.clone())
-                            })
-                            .flatten()
-                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
-                        glib::spawn_future_local(async move {
-                            super::challenge_handler::request_challenge(
-                                &dbus_conn,
-                                &session_path,
-                                &config_name,
-                            )
-                            .await;
-                        });
+                    // Auth / input dispatch — credentials, URL, challenge, or dynamic.
+                    if super::auth_handlers::try_handle_auth(
+                        &conn,
+                        &tray_for_status,
+                        &status,
+                        &path,
+                        message,
+                    ) {
                         continue;
                     }
 
@@ -430,6 +322,9 @@ pub(super) async fn setup_status_handler(
                                     connected_at: None,
                                     bytes_in: 0,
                                     bytes_out: 0,
+                                    last_bytes_in: 0,
+                                    last_bytes_out: 0,
+                                    idle_since: None,
                                 },
                             );
                         }
@@ -449,57 +344,12 @@ pub(super) async fn setup_status_handler(
                         });
                     }
 
-                    // Connection timeout watcher — notify if still connecting after
-                    // the user-configured timeout (default 30s). Uses a generation
-                    // counter so only the latest watcher per session can fire.
-                    let is_now_connecting = status.is_connecting();
-                    if is_now_connecting {
-                        let expected_gen = {
-                            let mut tg = timeout_gen.borrow_mut();
-                            let entry = tg.entry(path_for_timeout.clone()).or_insert(0);
-                            *entry += 1;
-                            *entry
-                        };
-                        let tray_for_timeout = tray_for_status.clone();
-                        let timeout_secs = crate::settings::Settings::new().connection_timeout();
-                        let tg_check = timeout_gen.clone();
-                        glib::spawn_future_local(async move {
-                            glib::timeout_future_seconds(timeout_secs).await;
-                            // Stale watcher — a newer one was spawned for this session
-                            if tg_check.borrow().get(&path_for_timeout) != Some(&expected_gen) {
-                                return;
-                            }
-                            let still_connecting = tray_for_timeout
-                                .update(|t| {
-                                    t.sessions
-                                        .get(&path_for_timeout)
-                                        .map(|s| s.status.is_connecting())
-                                })
-                                .flatten()
-                                .unwrap_or(false);
-                            if still_connecting {
-                                let config_name = tray_for_timeout
-                                    .update(|t| {
-                                        t.sessions
-                                            .get(&path_for_timeout)
-                                            .map(|s| s.config_name.clone())
-                                    })
-                                    .flatten()
-                                    .unwrap_or_else(|| "VPN".to_string());
-                                info!(
-                                    "Connection timeout watcher: '{}' still connecting after {}s",
-                                    config_name, timeout_secs
-                                );
-                                crate::dialogs::show_error_notification(
-                                    &format!("{}: Still Connecting", config_name),
-                                    &format!(
-                                        "Connection to '{}' is taking longer than expected. \
-                                         You can disconnect and try again.",
-                                        config_name
-                                    ),
-                                );
-                            }
-                        });
+                    // Connection timeout watcher — see `timeout_watcher` module.
+                    if status.is_connecting() {
+                        super::timeout_watcher::spawn_timeout_watcher(
+                            &tray_for_status,
+                            path_for_timeout,
+                        );
                     }
 
                     // Desktop notification for status change

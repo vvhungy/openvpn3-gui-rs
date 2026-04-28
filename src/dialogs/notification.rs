@@ -102,11 +102,16 @@ pub fn show_connection_notification(config_name: &str, status: &str) {
 
 /// Show a notification with a "Reconnect" action button for unexpected disconnects.
 /// When the user clicks Reconnect, dispatches `TrayAction::Connect(config_path)`.
+/// Gated behind `warn-on-unexpected-disconnect` setting.
+/// Uses `replaces_id` to prevent stacking on rapid crash/restart cycles.
 pub fn show_reconnect_notification(
     config_path: String,
     config_name: String,
     action_tx: crate::tray::ActionSender,
 ) {
+    if !Settings::new().warn_on_unexpected_disconnect() {
+        return;
+    }
     glib::spawn_future_local(async move {
         if let Err(e) = do_reconnect_notification(config_path, config_name, action_tx).await {
             warn!("Reconnect notification error: {}", e);
@@ -140,6 +145,12 @@ async fn do_reconnect_notification(
         HashMap::from([("urgency", zbus::zvariant::Value::U8(2u8))]);
     let body = format!("'{}' disconnected unexpectedly.", config_name);
 
+    let key = config_name.clone();
+    let replaces_id = NOTIFICATION_IDS
+        .lock()
+        .map(|m| *m.get(&key).unwrap_or(&0))
+        .unwrap_or(0);
+
     let reply = conn
         .call_method(
             Some("org.freedesktop.Notifications"),
@@ -148,18 +159,21 @@ async fn do_reconnect_notification(
             "Notify",
             &(
                 "openvpn3-gui-rs",
-                0u32,
+                replaces_id,
                 "network-vpn",
                 "VPN Disconnected",
                 body.as_str(),
                 &["reconnect", "Reconnect"] as &[&str],
                 hints,
-                30_000i32, // dismiss after 30 s if no action taken
+                0i32, // never auto-dismiss — user must acknowledge
             ),
         )
         .await?;
 
     let notification_id: u32 = reply.body().deserialize()?;
+    if let Ok(mut map) = NOTIFICATION_IDS.lock() {
+        map.insert(key, notification_id);
+    }
 
     let mut stream = zbus::MessageStream::from(&conn);
     while let Some(Ok(msg)) = stream.next().await {

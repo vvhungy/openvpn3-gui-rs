@@ -44,22 +44,38 @@ pub struct SessionInfo {
     pub connected_at: Option<std::time::Instant>,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    /// Previous poll cycle byte counts — used for stall detection
+    pub last_bytes_in: u64,
+    pub last_bytes_out: u64,
+    /// When the session was first detected as idle (zero delta).
+    /// `None` means traffic was seen on the last poll or session is not connected.
+    pub idle_since: Option<std::time::Instant>,
 }
 
 impl SessionInfo {
     pub fn status_label(&self) -> String {
         let desc = get_status_description(self.status.major, self.status.minor);
-        if self.status.is_connected() && (self.bytes_in > 0 || self.bytes_out > 0) {
-            format!(
-                "{}: {} ↓ {} ↑ {}",
-                self.config_name,
-                desc,
-                format_bytes(self.bytes_in),
-                format_bytes(self.bytes_out)
-            )
-        } else {
-            format!("{}: {}", self.config_name, desc)
+        if self.status.is_connected() {
+            if let Some(since) = self.idle_since {
+                let secs = since.elapsed().as_secs();
+                return format!(
+                    "{}: {} (idle {})",
+                    self.config_name,
+                    desc,
+                    format_duration(secs)
+                );
+            }
+            if self.bytes_in > 0 || self.bytes_out > 0 {
+                return format!(
+                    "{}: {} ↓ {} ↑ {}",
+                    self.config_name,
+                    desc,
+                    format_bytes(self.bytes_in),
+                    format_bytes(self.bytes_out)
+                );
+            }
         }
+        format!("{}: {}", self.config_name, desc)
     }
 
     fn tooltip_line(&self) -> String {
@@ -67,14 +83,11 @@ impl SessionInfo {
         if self.status.is_connected()
             && let Some(at) = self.connected_at
         {
-            let secs = at.elapsed().as_secs();
-            let duration = if secs < 60 {
-                format!("{}s", secs)
-            } else if secs < 3600 {
-                format!("{}m {}s", secs / 60, secs % 60)
-            } else {
-                format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-            };
+            let duration = format_duration(at.elapsed().as_secs());
+            let idle = self
+                .idle_since
+                .map(|s| format!(", idle {}", format_duration(s.elapsed().as_secs())))
+                .unwrap_or_default();
             let stats = if self.bytes_in > 0 || self.bytes_out > 0 {
                 format!(
                     " | {} | {}",
@@ -84,7 +97,10 @@ impl SessionInfo {
             } else {
                 String::new()
             };
-            return format!("{} — {} ({}{})", self.config_name, desc, duration, stats);
+            return format!(
+                "{} — {} ({}{}{})",
+                self.config_name, desc, duration, idle, stats
+            );
         }
         format!("{} — {}", self.config_name, desc)
     }
@@ -102,6 +118,16 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// Channel sender for dispatching tray actions to the GTK main loop
 pub type ActionSender = UnboundedSender<TrayAction>;
 
@@ -113,6 +139,8 @@ pub struct VpnTray {
     pub sessions: HashMap<String, SessionInfo>,
     /// Channel to send actions to the GTK main loop
     pub action_tx: ActionSender,
+    /// Pre-rendered ARGB32 pixmaps for each status icon (GNOME compat)
+    pixmaps: HashMap<&'static str, Vec<ksni::Icon>>,
 }
 
 impl VpnTray {
@@ -120,6 +148,7 @@ impl VpnTray {
         Self {
             configs: Vec::new(),
             sessions: HashMap::new(),
+            pixmaps: super::pixmaps::build_pixmap_cache(),
             action_tx,
         }
     }
@@ -148,13 +177,18 @@ impl VpnTray {
             return "openvpn3-gui-rs-idle";
         }
 
-        // Priority: error > loading > active > paused > idle
+        // Priority: error > loading/idle-warn > active > paused > idle
         let mut has_error = false;
         let mut has_loading = false;
         let mut has_active = false;
         let mut has_paused = false;
 
         for session in self.sessions.values() {
+            // Idle-but-connected sessions show the warning (loading) icon
+            if session.idle_since.is_some() {
+                has_loading = true;
+                continue;
+            }
             let icon = get_status_icon(session.status.major, session.status.minor);
             match icon {
                 "openvpn3-gui-rs-idle-error" => has_error = true,
@@ -200,11 +234,21 @@ impl ksni::Tray for VpnTray {
     }
 
     fn icon_name(&self) -> String {
-        self.current_icon().into()
+        // Return empty so GNOME's AppIndicator extension falls through to
+        // icon_pixmap() instead of creating an unresolvable Gio.ThemedIcon.
+        // KDE/XFCE also render IconPixmap correctly via the pre-rasterized data.
+        String::new()
     }
 
     fn icon_theme_path(&self) -> String {
         Self::icon_theme_paths()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        self.pixmaps
+            .get(self.current_icon())
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn tool_tip(&self) -> ToolTip {
@@ -244,6 +288,9 @@ mod tests {
             connected_at: None,
             bytes_in: 0,
             bytes_out: 0,
+            last_bytes_in: 0,
+            last_bytes_out: 0,
+            idle_since: None,
         }
     }
 

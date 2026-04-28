@@ -60,5 +60,25 @@
         connection is still pending. Range: 5–300.
       </description>
     </key>
+
+    <key name="health-check-stall-seconds" type="u">
+      <default>60</default>
+      <summary>Stall detection threshold (seconds)</summary>
+      <description>
+        How long (in seconds) a connected session must show zero traffic
+        before being flagged as idle in the tray menu. Set to 0 to disable.
+        Range: 0–600.
+      </description>
+    </key>
+
+    <key name="warn-on-unexpected-disconnect" type="b">
+      <default>true</default>
+      <summary>Warn on unexpected disconnect</summary>
+      <description>
+        Whether to show a persistent critical notification when a VPN
+        session is lost unexpectedly (service crash, network loss, backend
+        process killed). The notification includes a Reconnect action.
+      </description>
+    </key>
   </schema>
 </schemalist>
