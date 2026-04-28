@@ -11,7 +11,7 @@ METAINFO_DIR = $(PREFIX)/share/metainfo
 .PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug setup-hooks check
 
 all:
-	cargo build --release
+	cargo build --release --workspace
 
 install: install-icons install-schema install-desktop install-metainfo
 	install -Dm755 target/release/$(BINARY) $(PREFIX)/bin/$(BINARY)
@@ -66,10 +66,10 @@ clean:
 
 # Distribution packages
 deb: all
-	cargo deb --no-build
+	cargo deb -p openvpn3-gui-rs --no-build
 
 rpm: all
-	cargo generate-rpm
+	cargo generate-rpm --manifest-path gui/Cargo.toml
 
 # Development targets
 run:

@@ -17,23 +17,25 @@ const SIZES: &[i32] = &[22, 32];
 const SVGS: &[(&str, &[u8])] = &[
     (
         "openvpn3-gui-rs-idle",
-        include_bytes!("../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle.svg"),
+        include_bytes!("../../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle.svg"),
     ),
     (
         "openvpn3-gui-rs-active",
-        include_bytes!("../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-active.svg"),
+        include_bytes!("../../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-active.svg"),
     ),
     (
         "openvpn3-gui-rs-loading",
-        include_bytes!("../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-loading.svg"),
+        include_bytes!("../../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-loading.svg"),
     ),
     (
         "openvpn3-gui-rs-paused",
-        include_bytes!("../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-paused.svg"),
+        include_bytes!("../../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-paused.svg"),
     ),
     (
         "openvpn3-gui-rs-idle-error",
-        include_bytes!("../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle-error.svg"),
+        include_bytes!(
+            "../../../data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle-error.svg"
+        ),
     ),
 ];
 

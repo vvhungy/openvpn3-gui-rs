@@ -1486,6 +1486,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "openvpn3-killswitch-helper"
+version = "0.1.0"
+
+[[package]]
 name = "ordered-stream"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

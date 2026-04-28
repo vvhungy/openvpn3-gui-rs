@@ -1,0 +1,7 @@
+[package]
+name = "openvpn3-killswitch-helper"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["HungVV <vvhung@yahoo.com>"]
+description = "Kill-switch helper for openvpn3-gui-rs"
