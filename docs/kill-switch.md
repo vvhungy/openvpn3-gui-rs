@@ -167,6 +167,63 @@ nftables rules on behalf of the GUI:
   interface X" and "remove rules for interface X". No arbitrary command
   execution.
 
+### Rule set (locked Sprint 16 design)
+
+A dedicated `inet` table — `openvpn3_killswitch` — holds all rules.
+This isolates them from ufw/firewalld and means cleanup is a single
+`nft delete table` command.
+
+**`AddRules(interface, vpn_server_ips)` emits:**
+
+```nft
+table inet openvpn3_killswitch {
+    chain output {
+        type filter hook output priority 0; policy drop;
+        oifname "lo" accept
+        ct state established,related accept
+        ip  daddr { <ipv4 server ips> } accept
+        ip6 daddr { <ipv6 server ips> } accept    # only if list non-empty
+        ip  daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } accept    # if kill-switch-allow-lan
+        oifname "<interface>" accept
+    }
+}
+```
+
+**`RemoveRules()` emits:**
+
+```nft
+delete table inet openvpn3_killswitch
+```
+
+(idempotent — helper swallows "no such table" errors)
+
+#### Why each base rule
+
+| Rule | Reason |
+|------|--------|
+| `oifname lo accept` | Local resolver stubs, dbus, X11 — break without this |
+| `ct state established,related accept` | Keeps the existing tunnel flow alive across rule apply; otherwise we kill the connection we're protecting |
+| `ip daddr { server_ips }` | Lets reconnect attempts reach the gateway after a drop |
+| `oifname "<interface>"` | The actual tunneled traffic |
+
+#### Locked decisions
+
+**Q1 — LAN access:** configurable via GSettings `kill-switch-allow-lan`
+(default `true`). When true, RFC1918 ranges are added to the accept
+list. Most commercial kill-switches default permissive — users need
+their printer/NAS to keep working. Trade-off: a malicious LAN host can
+still receive metadata; document as a known limitation.
+
+**Q2 — IPv6:** match `vpn_server_ips` against both `ip` and `ip6` daddr
+and trust the tunnel config. For IPv4-only tunnels, `policy drop` on
+the `inet` output chain naturally catches IPv6 leaks (no `oifname
+"tun0"` IPv6 traffic flows). No blanket "drop all IPv6" rule needed.
+
+**Q3 — DNS during reconnect window:** helper takes pre-resolved IPs.
+The GUI resolves the config's `<remote>` hostname before calling
+`AddRules`. Resolution happens *before* rules are applied, so no DNS
+allowance is needed in the ruleset.
+
 ### Distro constraints
 
 | Distro | Firewall backend | Notes |

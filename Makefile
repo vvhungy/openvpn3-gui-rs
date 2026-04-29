@@ -76,7 +76,7 @@ run:
 	cargo run
 
 test:
-	cargo test
+	cargo test --workspace
 
 smoke-test:
 	bash tests/smoke_test.sh
@@ -85,7 +85,7 @@ fmt:
 	cargo fmt
 
 lint:
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 debug:
 	RUST_LOG=debug cargo run
@@ -99,8 +99,8 @@ setup-hooks:
 # Run full local check suite (same as CI)
 check:
 	cargo fmt --check
-	cargo clippy --all-targets -- -D warnings
-	cargo test
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo test --workspace
 	bash tests/smoke_test.sh
 	@echo "All checks passed."
 

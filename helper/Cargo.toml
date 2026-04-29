@@ -5,3 +5,20 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["HungVV <vvhung@yahoo.com>"]
 description = "Kill-switch helper for openvpn3-gui-rs"
+
+[dependencies]
+# Async runtime — service loop, signal handling, nft subprocess
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-util", "process"] }
+
+# D-Bus — system bus service + NameOwnerChanged subscription
+zbus = { version = "5", features = ["tokio"] }
+
+# Stream extensions for receiving D-Bus signals
+futures = "0.3"
+
+# Error handling
+anyhow = "1"
+
+# Logging (production code rule: no eprintln!/println!)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
