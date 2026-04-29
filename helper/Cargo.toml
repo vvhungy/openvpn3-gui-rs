@@ -22,3 +22,38 @@ anyhow = "1"
 # Logging (production code rule: no eprintln!/println!)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ─── DEB packaging (cargo-deb) ───────────────────────────────────────────────
+[package.metadata.deb]
+maintainer = "HungVV <vvhung@yahoo.com>"
+copyright = "2026, HungVV"
+license-file = ["../LICENSE", "0"]
+depends = "$auto, nftables"
+section = "net"
+priority = "optional"
+assets = [
+  ["target/release/openvpn3-killswitch-helper", "usr/bin/", "755"],
+  ["../data/net.openvpn.v3.killswitch.service", "usr/share/dbus-1/system-services/", "644"],
+  ["../data/net.openvpn.v3.killswitch.conf", "etc/dbus-1/system.d/", "644"],
+]
+
+# ─── RPM packaging (cargo-generate-rpm) ──────────────────────────────────────
+[package.metadata.generate-rpm]
+summary = "Kill-switch helper for openvpn3-gui-rs"
+license = "GPL-3.0-or-later"
+requires = { nftables = "*" }
+
+[[package.metadata.generate-rpm.assets]]
+source = "../target/release/openvpn3-killswitch-helper"
+dest = "/usr/bin/openvpn3-killswitch-helper"
+mode = "755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../data/net.openvpn.v3.killswitch.service"
+dest = "/usr/share/dbus-1/system-services/net.openvpn.v3.killswitch.service"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../data/net.openvpn.v3.killswitch.conf"
+dest = "/etc/dbus-1/system.d/net.openvpn.v3.killswitch.conf"
+mode = "644"

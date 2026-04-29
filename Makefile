@@ -69,7 +69,13 @@ deb: all
 	cargo deb -p openvpn3-gui-rs --no-build
 
 rpm: all
-	cargo generate-rpm --manifest-path gui/Cargo.toml
+	cargo generate-rpm -p openvpn3-gui-rs
+
+deb-helper: all
+	cargo deb -p openvpn3-killswitch-helper --no-build
+
+rpm-helper: all
+	cd helper && cargo generate-rpm
 
 # Development targets
 run:

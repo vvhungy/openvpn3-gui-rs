@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=net.openvpn.v3.killswitch
+Exec=/usr/bin/openvpn3-killswitch-helper
+User=root
