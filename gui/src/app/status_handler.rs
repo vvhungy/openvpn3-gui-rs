@@ -396,7 +396,7 @@ pub(super) async fn setup_status_handler(
 /// rules that block all non-tunnel traffic. Returns `Err` only on real
 /// D-Bus or proxy failures; missing helper / empty fields are warned about
 /// inside and reported as `Ok(())`.
-pub(super) async fn apply_kill_switch(
+pub(crate) async fn apply_kill_switch(
     conn: &zbus::Connection,
     session_path: &str,
     allow_lan: bool,

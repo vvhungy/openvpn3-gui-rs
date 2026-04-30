@@ -187,7 +187,13 @@ pub(crate) fn handle_tray_action(
         TrayAction::Preferences => {
             info!("Tray action: Preferences");
             let configs = tray.update(|t| t.configs.clone()).unwrap_or_default();
-            crate::dialogs::show_preferences_dialog(Some(parent.upcast_ref()), settings, configs);
+            crate::dialogs::show_preferences_dialog(
+                Some(parent.upcast_ref()),
+                settings,
+                configs,
+                tray.clone(),
+                dbus.clone(),
+            );
         }
         TrayAction::ViewLogs => {
             info!("Tray action: View Logs");

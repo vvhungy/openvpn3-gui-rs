@@ -17,6 +17,8 @@ pub fn show_preferences_dialog(
     parent: Option<&gtk4::Window>,
     settings: &Settings,
     configs: Vec<ConfigInfo>,
+    tray: ksni::blocking::Handle<crate::tray::VpnTray>,
+    dbus: zbus::Connection,
 ) {
     let window = gtk4::Window::builder()
         .title("Preferences")
@@ -208,6 +210,8 @@ pub fn show_preferences_dialog(
 
     // --- Button row ---
     let settings_clone = settings.clone();
+    let tray_for_save = tray.clone();
+    let dbus_for_save = dbus.clone();
     outer.append(&make_button_row(
         "Cancel",
         "Save",
@@ -241,11 +245,33 @@ pub fn show_preferences_dialog(
                 settings_clone.set_warn_on_unexpected_disconnect(warn_disconnect_check.is_active());
                 settings_clone.set_enable_kill_switch(enable_killswitch_check.is_active());
                 settings_clone.set_kill_switch_allow_lan(allow_lan_check.is_active());
-                // Release kill-switch rules when the user disables the feature.
-                // This is the escape hatch when the reconnect notification was
-                // suppressed by the desktop environment (e.g. GNOME Shell focus
-                // rules) and the user needs to regain internet access.
-                if was_killswitch_on && !enable_killswitch_check.is_active() {
+                // Kill-switch toggle: apply or remove rules immediately.
+                let killswitch_now_on = !was_killswitch_on && enable_killswitch_check.is_active();
+                let killswitch_now_off = was_killswitch_on && !enable_killswitch_check.is_active();
+                if killswitch_now_on {
+                    let allow_lan = allow_lan_check.is_active();
+                    let dbus = dbus_for_save.clone();
+                    let paths: Vec<String> = tray_for_save
+                        .update(|t| {
+                            t.sessions
+                                .iter()
+                                .filter(|(_, s)| s.status.is_connected())
+                                .map(|(p, _)| p.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !paths.is_empty() {
+                        glib::spawn_future_local(async move {
+                            for path in paths {
+                                if let Err(e) =
+                                    crate::app::apply_kill_switch(&dbus, &path, allow_lan).await
+                                {
+                                    tracing::warn!("kill-switch mid-session apply failed: {}", e);
+                                }
+                            }
+                        });
+                    }
+                } else if killswitch_now_off {
                     glib::spawn_future_local(async {
                         crate::dbus::killswitch::remove_rules().await;
                     });
