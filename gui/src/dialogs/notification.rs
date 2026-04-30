@@ -19,6 +19,8 @@ static NOTIFICATION_IDS: LazyLock<Mutex<HashMap<String, u32>>> =
 
 /// Send a notification, optionally replacing an existing one.
 /// Returns the notification ID assigned by the daemon.
+/// If `replaces_id` is stale (notification already reaped), falls back to
+/// a fresh notification silently.
 async fn send_dbus_notification(
     summary: &str,
     body: &str,
@@ -28,26 +30,36 @@ async fn send_dbus_notification(
     let conn = zbus::Connection::session().await?;
     let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
         HashMap::from([("urgency", zbus::zvariant::Value::U8(urgency))]);
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.Notifications"),
-            "/org/freedesktop/Notifications",
-            Some("org.freedesktop.Notifications"),
-            "Notify",
-            &(
-                "openvpn3-gui-rs", // app_name
-                replaces_id,       // replaces_id (0 = new notification)
-                "network-vpn",     // app_icon
-                summary,           // summary
-                body,              // body
-                &[] as &[&str],    // actions
-                hints,             // hints
-                -1i32,             // expire_timeout (-1 = default)
-            ),
-        )
-        .await?;
-    let id: u32 = reply.body().deserialize()?;
-    Ok(id)
+    let mut rid = replaces_id;
+    loop {
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.Notifications"),
+                "/org/freedesktop/Notifications",
+                Some("org.freedesktop.Notifications"),
+                "Notify",
+                &(
+                    "openvpn3-gui-rs",
+                    rid,
+                    "network-vpn",
+                    summary,
+                    body,
+                    &[] as &[&str],
+                    &hints,
+                    -1i32,
+                ),
+            )
+            .await;
+        match reply {
+            Ok(r) => return Ok(r.body().deserialize()?),
+            Err(_) if rid != 0 => {
+                // Stale replaces_id — retry as a fresh notification.
+                rid = 0;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 /// Fire-and-forget notification with replaces_id=0 (always a fresh toast).
@@ -145,11 +157,11 @@ async fn do_reconnect_notification(
         HashMap::from([("urgency", zbus::zvariant::Value::U8(2u8))]);
     let body = format!("'{}' disconnected unexpectedly.", config_name);
 
+    // Always create a fresh notification — the reconnect notification is a
+    // persistent action-button dialog, not a status toast.  Reusing the ID
+    // from a previous connection toast fails when the daemon already reaped it.
     let key = config_name.clone();
-    let replaces_id = NOTIFICATION_IDS
-        .lock()
-        .map(|m| *m.get(&key).unwrap_or(&0))
-        .unwrap_or(0);
+    let replaces_id: u32 = 0;
 
     let reply = conn
         .call_method(
@@ -163,7 +175,7 @@ async fn do_reconnect_notification(
                 "network-vpn",
                 "VPN Disconnected",
                 body.as_str(),
-                &["reconnect", "Reconnect"] as &[&str],
+                &["reconnect", "Reconnect", "dismiss", "Dismiss"] as &[&str],
                 hints,
                 0i32, // never auto-dismiss — user must acknowledge
             ),
@@ -188,16 +200,34 @@ async fn do_reconnect_notification(
             Some("ActionInvoked") => {
                 if let Ok((id, key)) = msg.body().deserialize::<(u32, &str)>()
                     && id == notification_id
-                    && key == "reconnect"
                 {
-                    let _ = action_tx.unbounded_send(crate::tray::TrayAction::Connect(config_path));
-                    break;
+                    match key {
+                        "reconnect" => {
+                            // Don't remove rules — the new tunnel's connect path
+                            // re-applies them (helper has replace semantics).
+                            let _ = action_tx
+                                .unbounded_send(crate::tray::TrayAction::Connect(config_path));
+                            break;
+                        }
+                        "dismiss" => {
+                            crate::dbus::killswitch::remove_rules().await;
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
             }
             Some("NotificationClosed") => {
                 if let Ok((id, _reason)) = msg.body().deserialize::<(u32, u32)>()
                     && id == notification_id
                 {
+                    // The daemon closed the notification (timeout, suppression by
+                    // GNOME Shell focus rules, or user dismissed via desktop env).
+                    // Do NOT release kill-switch rules here — the daemon may close
+                    // the notification without user intent (e.g. focus suppression).
+                    // The user can release rules via the notification's Dismiss
+                    // action, by reconnecting, or by disabling kill-switch in
+                    // Preferences.
                     break;
                 }
             }

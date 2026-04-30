@@ -11,7 +11,7 @@ METAINFO_DIR = $(PREFIX)/share/metainfo
 .PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug setup-hooks check
 
 all:
-	cargo build --release
+	cargo build --release --workspace
 
 install: install-icons install-schema install-desktop install-metainfo
 	install -Dm755 target/release/$(BINARY) $(PREFIX)/bin/$(BINARY)
@@ -66,17 +66,23 @@ clean:
 
 # Distribution packages
 deb: all
-	cargo deb --no-build
+	cargo deb -p openvpn3-gui-rs --no-build
 
 rpm: all
-	cargo generate-rpm
+	cargo generate-rpm -p openvpn3-gui-rs
+
+deb-helper: all
+	cargo deb -p openvpn3-killswitch-helper --no-build
+
+rpm-helper: all
+	cd helper && cargo generate-rpm
 
 # Development targets
 run:
 	cargo run
 
 test:
-	cargo test
+	cargo test --workspace
 
 smoke-test:
 	bash tests/smoke_test.sh
@@ -85,7 +91,7 @@ fmt:
 	cargo fmt
 
 lint:
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 debug:
 	RUST_LOG=debug cargo run
@@ -99,8 +105,8 @@ setup-hooks:
 # Run full local check suite (same as CI)
 check:
 	cargo fmt --check
-	cargo clippy --all-targets -- -D warnings
-	cargo test
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo test --workspace
 	bash tests/smoke_test.sh
 	@echo "All checks passed."
 

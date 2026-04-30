@@ -1,5 +1,6 @@
 # Build output
 /target/
+helper/target/
 
 # Compiled GSettings schemas
 data/gschemas.compiled

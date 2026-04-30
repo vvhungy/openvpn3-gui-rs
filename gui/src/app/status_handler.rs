@@ -296,6 +296,22 @@ pub(super) async fn setup_status_handler(
                         {
                             attempts.remove(&cn);
                         }
+
+                        // Kill-switch: apply firewall rules now that the tunnel is up.
+                        // Helper has replace semantics, so re-firing on Reconnect is safe.
+                        let settings = crate::settings::Settings::new();
+                        if settings.enable_kill_switch() {
+                            let allow_lan = settings.kill_switch_allow_lan();
+                            let path_for_ks = path.clone();
+                            let conn_for_ks = conn.clone();
+                            glib::spawn_future_local(async move {
+                                if let Err(e) =
+                                    apply_kill_switch(&conn_for_ks, &path_for_ks, allow_lan).await
+                                {
+                                    warn!("kill-switch: apply failed: {}", e);
+                                }
+                            });
+                        }
                     }
 
                     // Update tray session state (connected_at, new sessions, removal)
@@ -372,5 +388,37 @@ pub(super) async fn setup_status_handler(
         }
     });
 
+    Ok(())
+}
+
+/// Build a SessionProxy for `path`, read the tun interface name and the
+/// currently connected server IP, and ask the kill-switch helper to install
+/// rules that block all non-tunnel traffic. Returns `Err` only on real
+/// D-Bus or proxy failures; missing helper / empty fields are warned about
+/// inside and reported as `Ok(())`.
+pub(super) async fn apply_kill_switch(
+    conn: &zbus::Connection,
+    session_path: &str,
+    allow_lan: bool,
+) -> anyhow::Result<()> {
+    let proxy = crate::dbus::session::SessionProxy::builder(conn)
+        .path(session_path)?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await?;
+
+    let device_name = proxy.device_name().await?;
+    if device_name.is_empty() {
+        warn!("kill-switch: device_name empty on connected session — rules NOT applied");
+        return Ok(());
+    }
+
+    let (_proto, server_ip, _port) = proxy.connected_to().await?;
+    if server_ip.is_empty() {
+        warn!("kill-switch: connected_to address empty — rules NOT applied");
+        return Ok(());
+    }
+
+    crate::dbus::killswitch::add_rules(&device_name, vec![server_ip], allow_lan).await;
     Ok(())
 }

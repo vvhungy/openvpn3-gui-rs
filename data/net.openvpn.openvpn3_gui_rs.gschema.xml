@@ -43,12 +43,13 @@
       </description>
     </key>
 
-    <key name="tooltip-refresh-interval" type="u">
+    <key name="stats-refresh-interval" type="u">
       <default>30</default>
-      <summary>Tooltip refresh interval (seconds)</summary>
+      <summary>Stats refresh interval (seconds)</summary>
       <description>
-        How often (in seconds) the tray tooltip is refreshed to update
-        the connected-duration display. Range: 10–300.
+        How often (in seconds) the tray menu and stall detection are
+        refreshed to update byte-count display and idle-warn state.
+        Range: 10–300.
       </description>
     </key>
 
@@ -78,6 +79,30 @@
         Whether to show a persistent critical notification when a VPN
         session is lost unexpectedly (service crash, network loss, backend
         process killed). The notification includes a Reconnect action.
+      </description>
+    </key>
+
+    <key name="enable-kill-switch" type="b">
+      <default>false</default>
+      <summary>Enable kill-switch firewall enforcement</summary>
+      <description>
+        When enabled, applies nftables rules via the privileged helper
+        (openvpn3-killswitch-helper) every time a tunnel reaches the
+        connected state. Rules block all non-tunnel traffic except the
+        VPN server itself, loopback, and (optionally) the local LAN.
+        Requires the helper package to be installed; otherwise this
+        setting is a no-op and a warning is logged.
+      </description>
+    </key>
+
+    <key name="kill-switch-allow-lan" type="b">
+      <default>true</default>
+      <summary>Allow LAN access while kill-switch is active</summary>
+      <description>
+        When the kill-switch is engaged, also permit traffic to RFC1918
+        private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) so
+        local devices like printers and NAS keep working. Disable for
+        strictest isolation.
       </description>
     </key>
   </schema>

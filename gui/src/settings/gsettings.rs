@@ -116,21 +116,21 @@ impl Settings {
         }
     }
 
-    /// Get the tooltip refresh interval in seconds (default 30)
-    pub fn tooltip_refresh_interval(&self) -> u32 {
+    /// Get the stats refresh interval in seconds (default 30)
+    pub fn stats_refresh_interval(&self) -> u32 {
         self.settings
             .as_ref()
-            .map(|s| s.uint("tooltip-refresh-interval"))
+            .map(|s| s.uint("stats-refresh-interval"))
             .unwrap_or(30)
             .clamp(10, 300)
     }
 
-    /// Set the tooltip refresh interval in seconds
-    pub fn set_tooltip_refresh_interval(&self, secs: u32) {
+    /// Set the stats refresh interval in seconds
+    pub fn set_stats_refresh_interval(&self, secs: u32) {
         if let Some(settings) = &self.settings
-            && let Err(e) = settings.set_uint("tooltip-refresh-interval", secs.clamp(10, 300))
+            && let Err(e) = settings.set_uint("stats-refresh-interval", secs.clamp(10, 300))
         {
-            error!("Failed to set tooltip-refresh-interval: {}", e);
+            error!("Failed to set stats-refresh-interval: {}", e);
         }
     }
 
@@ -203,6 +203,40 @@ impl Settings {
             error!("Failed to set show-notifications: {}", e);
         }
     }
+
+    /// Check if the kill-switch is enabled (default false)
+    pub fn enable_kill_switch(&self) -> bool {
+        self.settings
+            .as_ref()
+            .map(|s| s.boolean("enable-kill-switch"))
+            .unwrap_or(false)
+    }
+
+    /// Set whether the kill-switch is enabled
+    pub fn set_enable_kill_switch(&self, enabled: bool) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_boolean("enable-kill-switch", enabled)
+        {
+            error!("Failed to set enable-kill-switch: {}", e);
+        }
+    }
+
+    /// Check if LAN traffic is allowed under the kill-switch (default true)
+    pub fn kill_switch_allow_lan(&self) -> bool {
+        self.settings
+            .as_ref()
+            .map(|s| s.boolean("kill-switch-allow-lan"))
+            .unwrap_or(true)
+    }
+
+    /// Set whether LAN traffic is allowed under the kill-switch
+    pub fn set_kill_switch_allow_lan(&self, enabled: bool) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_boolean("kill-switch-allow-lan", enabled)
+        {
+            error!("Failed to set kill-switch-allow-lan: {}", e);
+        }
+    }
 }
 
 impl Default for Settings {
@@ -264,13 +298,13 @@ mod tests {
     }
 
     #[test]
-    fn test_tooltip_refresh_interval_default() {
-        assert_eq!(Settings::new_empty().tooltip_refresh_interval(), 30);
+    fn test_stats_refresh_interval_default() {
+        assert_eq!(Settings::new_empty().stats_refresh_interval(), 30);
     }
 
     #[test]
-    fn test_set_tooltip_refresh_interval_no_panic() {
-        Settings::new_empty().set_tooltip_refresh_interval(60);
+    fn test_set_stats_refresh_interval_no_panic() {
+        Settings::new_empty().set_stats_refresh_interval(60);
     }
 
     #[test]
@@ -301,5 +335,25 @@ mod tests {
     #[test]
     fn test_set_warn_on_unexpected_disconnect_no_panic() {
         Settings::new_empty().set_warn_on_unexpected_disconnect(false);
+    }
+
+    #[test]
+    fn test_enable_kill_switch_default_false() {
+        assert!(!Settings::new_empty().enable_kill_switch());
+    }
+
+    #[test]
+    fn test_set_enable_kill_switch_no_panic() {
+        Settings::new_empty().set_enable_kill_switch(true);
+    }
+
+    #[test]
+    fn test_kill_switch_allow_lan_default_true() {
+        assert!(Settings::new_empty().kill_switch_allow_lan());
+    }
+
+    #[test]
+    fn test_set_kill_switch_allow_lan_no_panic() {
+        Settings::new_empty().set_kill_switch_allow_lan(false);
     }
 }

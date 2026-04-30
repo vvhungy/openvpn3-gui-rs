@@ -1,8 +1,7 @@
 //! Periodic session statistics poller.
 //!
 //! Polls `BYTES_IN/OUT` from each connected session's D-Bus `statistics`
-//! property and updates the tray. Doubles as the tooltip-refresh tick — the
-//! ksni tray re-reads tooltip text whenever we call `tray.update(|_| {})`.
+//! property and updates the tray menu labels and icon state.
 //!
 //! Also runs stall detection: if a connected session shows zero byte delta
 //! for longer than the configured threshold, it is flagged as idle and the
@@ -21,7 +20,7 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
     glib::spawn_future_local(async move {
         loop {
             let settings = Settings::new();
-            let secs = settings.tooltip_refresh_interval();
+            let secs = settings.stats_refresh_interval();
             let stall_threshold = settings.health_check_stall_seconds();
             glib::timeout_future_seconds(secs).await;
 
