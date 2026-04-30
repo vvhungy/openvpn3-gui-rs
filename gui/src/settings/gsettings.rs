@@ -116,21 +116,21 @@ impl Settings {
         }
     }
 
-    /// Get the tooltip refresh interval in seconds (default 30)
-    pub fn tooltip_refresh_interval(&self) -> u32 {
+    /// Get the stats refresh interval in seconds (default 30)
+    pub fn stats_refresh_interval(&self) -> u32 {
         self.settings
             .as_ref()
-            .map(|s| s.uint("tooltip-refresh-interval"))
+            .map(|s| s.uint("stats-refresh-interval"))
             .unwrap_or(30)
             .clamp(10, 300)
     }
 
-    /// Set the tooltip refresh interval in seconds
-    pub fn set_tooltip_refresh_interval(&self, secs: u32) {
+    /// Set the stats refresh interval in seconds
+    pub fn set_stats_refresh_interval(&self, secs: u32) {
         if let Some(settings) = &self.settings
-            && let Err(e) = settings.set_uint("tooltip-refresh-interval", secs.clamp(10, 300))
+            && let Err(e) = settings.set_uint("stats-refresh-interval", secs.clamp(10, 300))
         {
-            error!("Failed to set tooltip-refresh-interval: {}", e);
+            error!("Failed to set stats-refresh-interval: {}", e);
         }
     }
 
@@ -298,13 +298,13 @@ mod tests {
     }
 
     #[test]
-    fn test_tooltip_refresh_interval_default() {
-        assert_eq!(Settings::new_empty().tooltip_refresh_interval(), 30);
+    fn test_stats_refresh_interval_default() {
+        assert_eq!(Settings::new_empty().stats_refresh_interval(), 30);
     }
 
     #[test]
-    fn test_set_tooltip_refresh_interval_no_panic() {
-        Settings::new_empty().set_tooltip_refresh_interval(60);
+    fn test_set_stats_refresh_interval_no_panic() {
+        Settings::new_empty().set_stats_refresh_interval(60);
     }
 
     #[test]

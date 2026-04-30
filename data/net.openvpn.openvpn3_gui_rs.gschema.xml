@@ -43,12 +43,13 @@
       </description>
     </key>
 
-    <key name="tooltip-refresh-interval" type="u">
+    <key name="stats-refresh-interval" type="u">
       <default>30</default>
-      <summary>Tooltip refresh interval (seconds)</summary>
+      <summary>Stats refresh interval (seconds)</summary>
       <description>
-        How often (in seconds) the tray tooltip is refreshed to update
-        the connected-duration display. Range: 10–300.
+        How often (in seconds) the tray menu and stall detection are
+        refreshed to update byte-count display and idle-warn state.
+        Range: 10–300.
       </description>
     </key>
 

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use futures::channel::mpsc::UnboundedSender;
-use ksni::{self, MenuItem, ToolTip};
+use ksni::{self, MenuItem};
 
 use crate::dbus::types::SessionStatus;
 use crate::status::{get_status_description, get_status_icon};
@@ -76,33 +76,6 @@ impl SessionInfo {
             }
         }
         format!("{}: {}", self.config_name, desc)
-    }
-
-    fn tooltip_line(&self) -> String {
-        let desc = get_status_description(self.status.major, self.status.minor);
-        if self.status.is_connected()
-            && let Some(at) = self.connected_at
-        {
-            let duration = format_duration(at.elapsed().as_secs());
-            let idle = self
-                .idle_since
-                .map(|s| format!(", idle {}", format_duration(s.elapsed().as_secs())))
-                .unwrap_or_default();
-            let stats = if self.bytes_in > 0 || self.bytes_out > 0 {
-                format!(
-                    " | {} | {}",
-                    format_bytes(self.bytes_in),
-                    format_bytes(self.bytes_out)
-                )
-            } else {
-                String::new()
-            };
-            return format!(
-                "{} — {} ({}{}{})",
-                self.config_name, desc, duration, idle, stats
-            );
-        }
-        format!("{} — {}", self.config_name, desc)
     }
 }
 
@@ -251,20 +224,14 @@ impl ksni::Tray for VpnTray {
             .unwrap_or_default()
     }
 
-    fn tool_tip(&self) -> ToolTip {
-        let description = if self.sessions.is_empty() {
-            "No active connections".to_string()
-        } else {
-            self.sessions
-                .values()
-                .map(|s| s.tooltip_line())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-
-        ToolTip {
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
             title: "OpenVPN3 GUI".into(),
-            description,
+            description: if self.sessions.is_empty() {
+                "No active connections".into()
+            } else {
+                "VPN active".into()
+            },
             ..Default::default()
         }
     }
@@ -316,37 +283,5 @@ mod tests {
             "Work VPN",
         );
         assert_eq!(s.status_label(), "Work VPN: Disconnected");
-    }
-
-    #[test]
-    fn test_tooltip_line_not_connected() {
-        let s = make_session(
-            StatusMajor::Connection,
-            StatusMinor::ConnConnecting,
-            "MyVPN",
-        );
-        assert_eq!(s.tooltip_line(), "MyVPN — Connecting");
-    }
-
-    #[test]
-    fn test_tooltip_line_connected_no_timer() {
-        // Connected but no connected_at set — no duration shown
-        let s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
-        assert_eq!(s.tooltip_line(), "MyVPN — Connected");
-    }
-
-    #[test]
-    fn test_tooltip_line_connected_with_timer() {
-        let mut s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
-        s.connected_at = Some(std::time::Instant::now());
-        let line = s.tooltip_line();
-        // Should contain duration suffix in parentheses
-        assert!(line.starts_with("MyVPN — Connected ("), "got: {}", line);
-    }
-
-    #[test]
-    fn test_tooltip_line_unset() {
-        let s = make_session(StatusMajor::Unset, StatusMinor::Unset, "MyVPN");
-        assert_eq!(s.tooltip_line(), "MyVPN — Unknown");
     }
 }

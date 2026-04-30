@@ -99,15 +99,15 @@ pub fn show_preferences_dialog(
         .build();
     content.append(&notif_check);
 
-    // --- Tooltip refresh interval ---
+    // --- Stats refresh interval ---
     let interval_row = GtkBox::new(Orientation::Horizontal, 8);
     let interval_label = Label::builder()
-        .label("Tooltip refresh interval (seconds):")
+        .label("Stats refresh interval (seconds):")
         .halign(gtk4::Align::Start)
         .hexpand(true)
         .build();
     let interval_spin = SpinButton::with_range(10.0, 300.0, 10.0);
-    interval_spin.set_value(settings.tooltip_refresh_interval() as f64);
+    interval_spin.set_value(settings.stats_refresh_interval() as f64);
     interval_row.append(&interval_label);
     interval_row.append(&interval_spin);
     content.append(&interval_row);
@@ -235,7 +235,7 @@ pub fn show_preferences_dialog(
                 };
                 settings_clone.set_startup_action(action);
                 settings_clone.set_show_notifications(notif_check.is_active());
-                settings_clone.set_tooltip_refresh_interval(interval_spin.value() as u32);
+                settings_clone.set_stats_refresh_interval(interval_spin.value() as u32);
                 settings_clone.set_connection_timeout(timeout_spin.value() as u32);
                 settings_clone.set_health_check_stall_seconds(stall_spin.value() as u32);
                 settings_clone.set_warn_on_unexpected_disconnect(warn_disconnect_check.is_active());

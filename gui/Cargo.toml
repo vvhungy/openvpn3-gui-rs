@@ -11,7 +11,7 @@ categories = ["gui", "network-programming"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 
 # GTK4
 gtk4 = "0.9"
