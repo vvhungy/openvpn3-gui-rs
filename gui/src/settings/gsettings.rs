@@ -237,6 +237,21 @@ impl Settings {
             error!("Failed to set kill-switch-allow-lan: {}", e);
         }
     }
+
+    pub fn kill_switch_block_during_pause(&self) -> bool {
+        self.settings
+            .as_ref()
+            .map(|s| s.boolean("kill-switch-block-during-pause"))
+            .unwrap_or(false)
+    }
+
+    pub fn set_kill_switch_block_during_pause(&self, enabled: bool) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_boolean("kill-switch-block-during-pause", enabled)
+        {
+            error!("Failed to set kill-switch-block-during-pause: {}", e);
+        }
+    }
 }
 
 impl Default for Settings {
@@ -355,5 +370,15 @@ mod tests {
     #[test]
     fn test_set_kill_switch_allow_lan_no_panic() {
         Settings::new_empty().set_kill_switch_allow_lan(false);
+    }
+
+    #[test]
+    fn test_kill_switch_block_during_pause_default_false() {
+        assert!(!Settings::new_empty().kill_switch_block_during_pause());
+    }
+
+    #[test]
+    fn test_set_kill_switch_block_during_pause_no_panic() {
+        Settings::new_empty().set_kill_switch_block_during_pause(true);
     }
 }

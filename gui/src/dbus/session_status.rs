@@ -77,10 +77,7 @@ impl SessionStatus {
                 StatusMinor::ConnInit | StatusMinor::ConnConnecting | StatusMinor::ConnReconnecting
             )
     }
-}
 
-#[cfg(test)]
-impl SessionStatus {
     pub fn is_paused(&self) -> bool {
         self.major == StatusMajor::Connection && self.minor == StatusMinor::ConnPaused
     }

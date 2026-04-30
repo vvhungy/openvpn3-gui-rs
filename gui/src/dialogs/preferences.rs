@@ -170,6 +170,14 @@ pub fn show_preferences_dialog(
         .build();
     content.append(&allow_lan_check);
 
+    let block_during_pause_check = CheckButton::builder()
+        .label("Block traffic when VPN is paused")
+        .active(settings.kill_switch_block_during_pause())
+        .margin_start(24)
+        .sensitive(settings.enable_kill_switch())
+        .build();
+    content.append(&block_during_pause_check);
+
     // When kill-switch is on, force the warn-on-disconnect checkbox on and
     // disable it: without that warning the user has no UI to release rules
     // after an unexpected drop.
@@ -179,10 +187,12 @@ pub fn show_preferences_dialog(
     }
     {
         let allow_lan_check = allow_lan_check.clone();
+        let block_during_pause_check = block_during_pause_check.clone();
         let warn_disconnect_check = warn_disconnect_check.clone();
         enable_killswitch_check.connect_toggled(move |btn| {
             let on = btn.is_active();
             allow_lan_check.set_sensitive(on);
+            block_during_pause_check.set_sensitive(on);
             if on {
                 warn_disconnect_check.set_active(true);
                 warn_disconnect_check.set_sensitive(false);
@@ -245,6 +255,8 @@ pub fn show_preferences_dialog(
                 settings_clone.set_warn_on_unexpected_disconnect(warn_disconnect_check.is_active());
                 settings_clone.set_enable_kill_switch(enable_killswitch_check.is_active());
                 settings_clone.set_kill_switch_allow_lan(allow_lan_check.is_active());
+                settings_clone
+                    .set_kill_switch_block_during_pause(block_during_pause_check.is_active());
                 // Kill-switch toggle: apply or remove rules immediately.
                 let killswitch_now_on = !was_killswitch_on && enable_killswitch_check.is_active();
                 let killswitch_now_off = was_killswitch_on && !enable_killswitch_check.is_active();

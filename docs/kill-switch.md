@@ -86,7 +86,7 @@ delete table inet openvpn3_killswitch
 |-----|------|---------|---------|
 | `enable-kill-switch` | bool | `false` | Master toggle. When true, firewall rules are applied on connect. |
 | `kill-switch-allow-lan` | bool | `true` | Allow RFC1918 LAN traffic through the firewall. |
-| `kill-switch-block-during-pause` | bool | `false` | Whether firewall rules persist during Pause. Sprint 17. |
+| `kill-switch-block-during-pause` | bool | `false` | Keep rules applied during Pause. `false` = remove on pause, re-apply on resume. |
 | `warn-on-unexpected-disconnect` | bool | `true` | Show persistent notification on unexpected tunnel drop. |
 
 Enabling the kill-switch forces `warn-on-unexpected-disconnect=true` and
@@ -101,7 +101,7 @@ Security
 ☑ Warn on unexpected disconnect       (greyed out if kill-switch on)
 ☑ Enable kill-switch
    ☐ Allow LAN connections during VPN
-   ☐ Block traffic when VPN is paused   (Sprint 17)
+   ☐ Block traffic when VPN is paused
 [Clear Saved Credentials...]
 ```
 
@@ -128,6 +128,31 @@ When `enable-kill-switch=true` and a session transitions to `ConnConnected`:
 3. **Reconnect** — new tunnel establishes, `add_rules` re-fires on connect,
    helper replaces existing rules.
 4. **Dismiss** — calls `killswitch::remove_rules()`, internet restored.
+
+### On pause
+
+Controlled by `kill-switch-block-during-pause`:
+
+- **`false` (default — user-friendly):** Rules are removed on Pause.
+  Internet works normally while the VPN is paused. This creates a
+  deliberate leak window during the pause — the user's traffic is not
+  tunnelled and not blocked. Resume re-applies rules.
+- **`true` (strict):** Rules stay applied during Pause. Internet remains
+  blocked. The user must resume the VPN to restore connectivity.
+
+### On resume
+
+No explicit code needed. Resume transitions the session back to
+`ConnConnected`, which triggers the existing `is_connected` branch in
+`status_handler.rs` → `apply_kill_switch` re-fires. Helper's replace
+semantics make this idempotent.
+
+### Mid-session toggle
+
+Flipping the kill-switch checkbox in Preferences takes immediate effect:
+
+- **ON** → rules applied for all currently-connected sessions.
+- **OFF** → rules removed immediately.
 
 ### Cold start
 
