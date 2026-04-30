@@ -115,6 +115,11 @@ pub trait Session {
     /// Get connected-to info: (protocol, address, port)
     #[zbus(property, name = "connected_to")]
     fn connected_to(&self) -> zbus::Result<(String, String, u32)>;
+
+    /// Virtual network interface name used by this session (e.g. "tun0").
+    /// Read after the session reaches the connected state.
+    #[zbus(property, name = "device_name")]
+    fn device_name(&self) -> zbus::Result<String>;
 }
 
 /// Backend signals interface (received from net.openvpn.v3.log)

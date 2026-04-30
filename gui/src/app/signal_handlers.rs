@@ -139,10 +139,19 @@ pub(crate) async fn setup_signal_handlers(
                                 false
                             };
 
-                        if !user_initiated
-                            && let Some((config_path, config_name)) = session_info
+                        if user_initiated {
+                            // Expected disconnect — release any kill-switch rules so
+                            // the user's internet keeps working. No-op when helper
+                            // not installed or kill-switch was never engaged.
+                            glib::spawn_future_local(async move {
+                                crate::dbus::killswitch::remove_rules().await;
+                            });
+                        } else if let Some((config_path, config_name)) = session_info
                             && !config_path.is_empty()
                         {
+                            // Unexpected drop — keep rules in place; the
+                            // notification's Reconnect/Dismiss handlers manage
+                            // their lifecycle from here.
                             info!(
                                 "Unexpected session drop for '{}', showing reconnect notification",
                                 config_name

@@ -154,6 +154,44 @@ pub fn show_preferences_dialog(
         .build();
     content.append(&warn_disconnect_check);
 
+    let enable_killswitch_check = CheckButton::builder()
+        .label("Enable kill-switch (block traffic outside VPN)")
+        .active(settings.enable_kill_switch())
+        .build();
+    content.append(&enable_killswitch_check);
+
+    let allow_lan_check = CheckButton::builder()
+        .label("Allow LAN access (printer, NAS, local devices)")
+        .active(settings.kill_switch_allow_lan())
+        .margin_start(24)
+        .sensitive(settings.enable_kill_switch())
+        .build();
+    content.append(&allow_lan_check);
+
+    // When kill-switch is on, force the warn-on-disconnect checkbox on and
+    // disable it: without that warning the user has no UI to release rules
+    // after an unexpected drop.
+    if settings.enable_kill_switch() {
+        warn_disconnect_check.set_active(true);
+        warn_disconnect_check.set_sensitive(false);
+    }
+    {
+        let allow_lan_check = allow_lan_check.clone();
+        let warn_disconnect_check = warn_disconnect_check.clone();
+        enable_killswitch_check.connect_toggled(move |btn| {
+            let on = btn.is_active();
+            allow_lan_check.set_sensitive(on);
+            if on {
+                warn_disconnect_check.set_active(true);
+                warn_disconnect_check.set_sensitive(false);
+            } else {
+                warn_disconnect_check.set_sensitive(true);
+            }
+        });
+    }
+
+    let was_killswitch_on = settings.enable_kill_switch();
+
     let clear_btn = Button::builder()
         .label("Clear Saved Credentials...")
         .halign(gtk4::Align::Start)
@@ -201,6 +239,17 @@ pub fn show_preferences_dialog(
                 settings_clone.set_connection_timeout(timeout_spin.value() as u32);
                 settings_clone.set_health_check_stall_seconds(stall_spin.value() as u32);
                 settings_clone.set_warn_on_unexpected_disconnect(warn_disconnect_check.is_active());
+                settings_clone.set_enable_kill_switch(enable_killswitch_check.is_active());
+                settings_clone.set_kill_switch_allow_lan(allow_lan_check.is_active());
+                // Release kill-switch rules when the user disables the feature.
+                // This is the escape hatch when the reconnect notification was
+                // suppressed by the desktop environment (e.g. GNOME Shell focus
+                // rules) and the user needs to regain internet access.
+                if was_killswitch_on && !enable_killswitch_check.is_active() {
+                    glib::spawn_future_local(async {
+                        crate::dbus::killswitch::remove_rules().await;
+                    });
+                }
                 window.close();
             }
         },

@@ -92,6 +92,7 @@ pub(crate) async fn init_dbus(
     info!("Found {} sessions", session_paths.len());
 
     let mut sessions = HashMap::new();
+    let mut connected_paths: Vec<String> = Vec::new();
     for path in &session_paths {
         match SessionProxy::builder(dbus)
             .path(path.clone())?
@@ -121,13 +122,17 @@ pub(crate) async fn init_dbus(
                     debug!("LogForward for {}: {}", path, e);
                 }
 
+                let status = SessionStatus::new(major, minor, message);
+                if status.is_connected() {
+                    connected_paths.push(path.as_str().to_string());
+                }
                 sessions.insert(
                     path.as_str().to_string(),
                     SessionInfo {
                         session_path: path.as_str().to_string(),
                         config_path,
                         config_name,
-                        status: SessionStatus::new(major, minor, message),
+                        status,
                         connected_at: None,
                         bytes_in: 0,
                         bytes_out: 0,
@@ -151,6 +156,23 @@ pub(crate) async fn init_dbus(
         "Tray updated with {} configs, initial state set",
         config_paths.len()
     );
+
+    // Re-apply kill-switch rules for sessions that were already connected
+    // before this GUI instance started (e.g., after a GUI restart).
+    // The helper's watcher cleaned the rules when the previous instance exited.
+    if settings.enable_kill_switch() && !connected_paths.is_empty() {
+        let allow_lan = settings.kill_switch_allow_lan();
+        let dbus_clone = dbus.clone();
+        glib::spawn_future_local(async move {
+            for path in connected_paths {
+                if let Err(e) =
+                    super::status_handler::apply_kill_switch(&dbus_clone, &path, allow_lan).await
+                {
+                    warn!("kill-switch: startup re-apply failed for {}: {}", path, e);
+                }
+            }
+        });
+    }
 
     // Auto-connect on startup based on GSettings preference
     handle_startup_connect(settings, dbus, tray).await;
