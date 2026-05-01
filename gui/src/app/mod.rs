@@ -32,6 +32,7 @@ mod session_ops;
 mod signal_handlers;
 mod stats_poller;
 mod status_handler;
+pub(crate) use status_handler::apply_kill_switch;
 mod timeout_watcher;
 
 pub use application::{AppArgs, Application};

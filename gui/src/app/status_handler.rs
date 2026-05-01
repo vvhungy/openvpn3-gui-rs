@@ -314,6 +314,20 @@ pub(super) async fn setup_status_handler(
                         }
                     }
 
+                    // Kill-switch: remove rules on Pause unless user chose
+                    // block-during-pause.  Resume needs no explicit code —
+                    // the ConnConnected transition re-fires apply_kill_switch.
+                    if status.is_paused() {
+                        let ks_settings = crate::settings::Settings::new();
+                        if ks_settings.enable_kill_switch()
+                            && !ks_settings.kill_switch_block_during_pause()
+                        {
+                            glib::spawn_future_local(async {
+                                crate::dbus::killswitch::remove_rules().await;
+                            });
+                        }
+                    }
+
                     // Update tray session state (connected_at, new sessions, removal)
                     let path_for_timeout = path.clone();
                     let path_for_removal = path.clone(); // moved into delayed removal closure
@@ -396,7 +410,7 @@ pub(super) async fn setup_status_handler(
 /// rules that block all non-tunnel traffic. Returns `Err` only on real
 /// D-Bus or proxy failures; missing helper / empty fields are warned about
 /// inside and reported as `Ok(())`.
-pub(super) async fn apply_kill_switch(
+pub(crate) async fn apply_kill_switch(
     conn: &zbus::Connection,
     session_path: &str,
     allow_lan: bool,

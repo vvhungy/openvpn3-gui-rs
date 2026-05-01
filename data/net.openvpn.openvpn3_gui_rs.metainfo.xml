@@ -23,8 +23,10 @@
       <li>Reconnect prompt on unexpected session drop</li>
       <li>Username/password, challenge/OTP, and browser-redirect authentication</li>
       <li>Tabbed session log viewer with live log streaming</li>
-      <li>Preferences dialog (startup, notifications, timeout, credentials)</li>
+      <li>Preferences dialog (startup, notifications, intervals, timeout, stall detection, kill-switch, credentials)</li>
       <li>Configurable connection timeout with notification</li>
+      <li>Connection stall detection — flags an idle tunnel in tray menu and icon</li>
+      <li>Kill-switch — block all non-VPN traffic via nftables when a tunnel drops (requires the privileged helper package)</li>
       <li>Automatic recovery when the OpenVPN3 service restarts</li>
       <li>Multiple VPN configuration support</li>
     </ul>

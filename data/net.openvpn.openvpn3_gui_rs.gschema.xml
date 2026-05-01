@@ -105,5 +105,16 @@
         strictest isolation.
       </description>
     </key>
+
+    <key name="kill-switch-block-during-pause" type="b">
+      <default>false</default>
+      <summary>Block traffic when VPN is paused</summary>
+      <description>
+        When true and the kill-switch is active, firewall rules remain in
+        place during a paused VPN session (traffic stays blocked). When
+        false, rules are removed on pause and re-applied on resume,
+        allowing normal internet access while paused.
+      </description>
+    </key>
   </schema>
 </schemalist>
