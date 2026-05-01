@@ -12,10 +12,12 @@ A system tray GUI for [OpenVPN3 Linux](https://github.com/OpenVPN/openvpn3-linux
 - Auto-connect on startup: most-recent session, a specific profile, or disabled
 - Desktop notifications on status changes (grouped per connection, deduplicated)
 - Auto-reconnect prompt when a session drops unexpectedly
+- Connection-stall detection — flags an idle tunnel in the tray menu and icon when traffic stops flowing
+- Kill-switch — block all non-VPN traffic via nftables when a tunnel drops (requires the `openvpn3-killswitch-helper` package)
 - Automatic recovery when the OpenVPN3 service restarts
 - Tabbed session log viewer — live tail of OpenVPN3 backend log messages, one tab per profile
-- Preferences dialog: startup behaviour, notification toggle, tooltip interval, connection timeout, credential management
-- DEB, RPM, and AUR packaging
+- Preferences dialog: startup behaviour, notifications, stats refresh interval, connection timeout, stall threshold, kill-switch, credential management
+- DEB, RPM, and AUR packaging (separate `openvpn3-killswitch-helper` package for the privileged firewall helper)
 
 ## Requirements
 
@@ -83,7 +85,7 @@ menu.
 
 - **View Logs** — tabbed log viewer, one tab per VPN profile (always visible)
 - **Import Config...** — pick a `.ovpn` file to import into OpenVPN3
-- **Preferences...** — startup behaviour, notifications, tooltip interval, connection timeout, credential storage
+- **Preferences...** — startup behaviour, notifications, stats refresh interval, connection timeout, stall detection, kill-switch, credential storage
 - **About** / **Quit**
 
 ## Command-line options
