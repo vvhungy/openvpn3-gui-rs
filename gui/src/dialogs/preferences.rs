@@ -101,6 +101,13 @@ pub fn show_preferences_dialog(
         .build();
     content.append(&notif_check);
 
+    let first_run_check = CheckButton::builder()
+        .label("Show first-run service help")
+        .active(settings.show_first_run_help())
+        .margin_start(INDENT)
+        .build();
+    content.append(&first_run_check);
+
     // --- Stats refresh interval ---
     let interval_row = GtkBox::new(Orientation::Horizontal, 8);
     let interval_label = Label::builder()
@@ -249,6 +256,7 @@ pub fn show_preferences_dialog(
                 };
                 settings_clone.set_startup_action(action);
                 settings_clone.set_show_notifications(notif_check.is_active());
+                settings_clone.set_show_first_run_help(first_run_check.is_active());
                 settings_clone.set_stats_refresh_interval(interval_spin.value() as u32);
                 settings_clone.set_connection_timeout(timeout_spin.value() as u32);
                 settings_clone.set_health_check_stall_seconds(stall_spin.value() as u32);

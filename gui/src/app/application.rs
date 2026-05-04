@@ -127,6 +127,7 @@ impl Application {
                 }
                 if !initialized {
                     error!("Failed to connect to OpenVPN3 D-Bus service after 10 attempts");
+                    crate::dialogs::show_first_run_help_notification(action_tx.clone());
                 }
 
                 match setup_signal_handlers(&dbus, tray.clone(), action_tx).await {

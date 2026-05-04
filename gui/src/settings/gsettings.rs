@@ -238,6 +238,23 @@ impl Settings {
         }
     }
 
+    /// Check if first-run help notification is enabled (default true)
+    pub fn show_first_run_help(&self) -> bool {
+        self.settings
+            .as_ref()
+            .map(|s| s.boolean("show-first-run-help"))
+            .unwrap_or(true)
+    }
+
+    /// Set whether first-run help notification is enabled
+    pub fn set_show_first_run_help(&self, enabled: bool) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_boolean("show-first-run-help", enabled)
+        {
+            error!("Failed to set show-first-run-help: {}", e);
+        }
+    }
+
     pub fn kill_switch_block_during_pause(&self) -> bool {
         self.settings
             .as_ref()
@@ -370,6 +387,16 @@ mod tests {
     #[test]
     fn test_set_kill_switch_allow_lan_no_panic() {
         Settings::new_empty().set_kill_switch_allow_lan(false);
+    }
+
+    #[test]
+    fn test_show_first_run_help_default_true() {
+        assert!(Settings::new_empty().show_first_run_help());
+    }
+
+    #[test]
+    fn test_set_show_first_run_help_no_panic() {
+        Settings::new_empty().set_show_first_run_help(false);
     }
 
     #[test]
