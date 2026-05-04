@@ -185,6 +185,15 @@ pub fn show_preferences_dialog(
         .build();
     content.append(&block_during_pause_check);
 
+    let helper_hint = Label::builder()
+        .label("⚠ Helper not installed — install openvpn3-killswitch-helper")
+        .margin_start(24)
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    helper_hint.add_css_class("dim-label");
+    content.append(&helper_hint);
+
     // When kill-switch is on, force the warn-on-disconnect checkbox on and
     // disable it: without that warning the user has no UI to release rules
     // after an unexpected drop.
@@ -196,6 +205,7 @@ pub fn show_preferences_dialog(
         let allow_lan_check = allow_lan_check.clone();
         let block_during_pause_check = block_during_pause_check.clone();
         let warn_disconnect_check = warn_disconnect_check.clone();
+        let helper_hint = helper_hint.clone();
         enable_killswitch_check.connect_toggled(move |btn| {
             let on = btn.is_active();
             allow_lan_check.set_sensitive(on);
@@ -205,6 +215,22 @@ pub fn show_preferences_dialog(
                 warn_disconnect_check.set_sensitive(false);
             } else {
                 warn_disconnect_check.set_sensitive(true);
+                helper_hint.set_visible(false);
+            }
+        });
+    }
+
+    // Probe helper presence and show hint if kill-switch enabled but helper missing
+    if settings.enable_kill_switch() {
+        let helper_hint = helper_hint.clone();
+        glib::spawn_future_local(async move {
+            let system_bus = zbus::Connection::system().await.ok();
+            let present = match system_bus {
+                Some(ref conn) => crate::dbus::killswitch::helper_present(conn).await,
+                None => false,
+            };
+            if !present {
+                helper_hint.set_visible(true);
             }
         });
     }

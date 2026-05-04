@@ -369,6 +369,19 @@ pub fn withdraw_first_run_help_notification() {
     });
 }
 
+/// Show a one-shot info notification when the kill-switch helper package is
+/// not installed. Gated by `show-notifications` (same gate as connection events).
+pub fn show_helper_missing_notification() {
+    if !Settings::new().show_notifications() {
+        return;
+    }
+    send_notification(
+        "Kill-Switch Helper Not Installed",
+        "Install the openvpn3-killswitch-helper package for firewall enforcement.",
+        1,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
