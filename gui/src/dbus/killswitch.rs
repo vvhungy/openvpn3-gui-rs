@@ -69,7 +69,7 @@ async fn build_proxy(conn: &zbus::Connection) -> zbus::Result<KillSwitchProxy<'_
 /// `.service` file is installed for `BUS_NAME`. We deliberately use
 /// `ListActivatableNames` rather than `NameHasOwner` because the helper
 /// is auto-activated on demand and is not running before the first call.
-async fn helper_present(conn: &zbus::Connection) -> bool {
+pub async fn helper_present(conn: &zbus::Connection) -> bool {
     let Ok(dbus) = fdo::DBusProxy::new(conn).await else {
         return false;
     };
@@ -82,9 +82,13 @@ async fn helper_present(conn: &zbus::Connection) -> bool {
 /// Ask the helper to apply kill-switch rules for the given tunnel interface
 /// and the resolved VPN server IP(s). Idempotent — the helper replaces any
 /// existing rules from a previous invocation.
-pub async fn add_rules(interface: &str, vpn_server_ips: Vec<String>, allow_lan: bool) {
+///
+/// Returns `false` when the helper package is not installed (bus name not
+/// activatable). Returns `true` in all other cases (rules applied, or a
+/// D-Bus call was attempted and the outcome is logged).
+pub async fn add_rules(interface: &str, vpn_server_ips: Vec<String>, allow_lan: bool) -> bool {
     let Some(conn) = system_bus().await else {
-        return;
+        return true;
     };
     if !helper_present(conn).await {
         warn!(
@@ -93,19 +97,20 @@ pub async fn add_rules(interface: &str, vpn_server_ips: Vec<String>, allow_lan: 
              has been run) — rules NOT applied",
             BUS_NAME
         );
-        return;
+        return false;
     }
     let proxy = match build_proxy(conn).await {
         Ok(p) => p,
         Err(e) => {
             warn!("kill-switch: proxy build failed: {}", e);
-            return;
+            return true;
         }
     };
     match proxy.AddRules(interface, vpn_server_ips, allow_lan).await {
         Ok(()) => info!(interface = %interface, "kill-switch: rules applied"),
         Err(e) => warn!("kill-switch: AddRules failed: {}", e),
     }
+    true
 }
 
 /// Ask the helper to tear down kill-switch rules. Idempotent — safe to call

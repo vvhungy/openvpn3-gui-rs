@@ -1,4 +1,8 @@
 //! Username / password credential request flow
+//!
+//! No testable pure surface here — pure logic (label mapping, storability)
+//! lives in `crate::credentials::policy` with its own unit tests. This file
+//! is async D-Bus dispatch + retry orchestration.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -7,6 +11,7 @@ use glib::object::Cast;
 use tracing::{error, info, warn};
 use zbus::zvariant::OwnedObjectPath;
 
+use crate::credentials::policy::{display_label_for, is_storable_field};
 use crate::dbus::session::SessionProxy;
 use crate::dbus::types::ClientAttentionType;
 
@@ -23,24 +28,6 @@ pub(crate) struct AuthAttempt {
 pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<String, AuthAttempt>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-
-/// Whether a credential field should be persisted to the keyring.
-pub(crate) fn is_storable_field(label: &str, mask: bool) -> bool {
-    let lower = label.to_lowercase();
-    lower.contains("username") || lower.contains("password") || mask
-}
-
-/// Map a D-Bus slot label to a user-facing display label.
-pub(crate) fn display_label_for(label: &str) -> String {
-    let lower = label.to_lowercase();
-    if lower.contains("username") {
-        "Auth Username".to_string()
-    } else if lower.contains("password") {
-        "Auth Password".to_string()
-    } else {
-        "Authentication Code".to_string()
-    }
-}
 
 /// Fetch credential input slots from D-Bus and show the credentials dialog.
 ///
@@ -362,55 +349,5 @@ async fn submit_credentials(
             );
             Ok(true)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // --- is_storable_field ---
-
-    #[test]
-    fn test_storable_username() {
-        assert!(is_storable_field("Username", false));
-        assert!(is_storable_field("username", false));
-    }
-
-    #[test]
-    fn test_storable_password() {
-        assert!(is_storable_field("Password", false));
-        assert!(is_storable_field("password", false));
-    }
-
-    #[test]
-    fn test_storable_masked_field() {
-        assert!(is_storable_field("One-Time Code", true));
-    }
-
-    #[test]
-    fn test_not_storable_unmasked_other() {
-        assert!(!is_storable_field("One-Time Code", false));
-        assert!(!is_storable_field("challenge", false));
-    }
-
-    // --- display_label_for ---
-
-    #[test]
-    fn test_display_label_username() {
-        assert_eq!(display_label_for("Username"), "Auth Username");
-        assert_eq!(display_label_for("Enter username"), "Auth Username");
-    }
-
-    #[test]
-    fn test_display_label_password() {
-        assert_eq!(display_label_for("Password"), "Auth Password");
-        assert_eq!(display_label_for("Your password"), "Auth Password");
-    }
-
-    #[test]
-    fn test_display_label_fallback() {
-        assert_eq!(display_label_for("One-Time Code"), "Authentication Code");
-        assert_eq!(display_label_for("challenge"), "Authentication Code");
     }
 }

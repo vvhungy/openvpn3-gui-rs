@@ -290,6 +290,7 @@ pub(crate) async fn watch_service_restart(
                 continue;
             }
             info!("OpenVPN3 service restarted, clearing tray and re-initializing");
+            crate::dialogs::withdraw_first_run_help_notification();
             tray.update(|t| {
                 t.sessions.clear();
                 t.configs.clear();

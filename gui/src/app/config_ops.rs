@@ -1,4 +1,6 @@
 //! Configuration D-Bus operations
+//!
+//! No testable pure surface — async D-Bus wrappers only.
 
 use tracing::{error, info, warn};
 use zbus::proxy::CacheProperties;

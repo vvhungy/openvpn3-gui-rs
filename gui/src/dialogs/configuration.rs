@@ -1,4 +1,6 @@
 //! Configuration dialogs
+//!
+//! No testable pure surface — GTK widget builders.
 
 use gtk4::prelude::*;
 use gtk4::{Entry, FileChooserAction, FileChooserDialog, Grid, Label, ResponseType};

@@ -106,6 +106,17 @@
       </description>
     </key>
 
+    <key name="show-first-run-help" type="b">
+      <default>true</default>
+      <summary>Show first-run help when backend is missing</summary>
+      <description>
+        Whether to show a one-shot informational notification when the
+        OpenVPN3 D-Bus service cannot be reached after startup. The
+        notification provides an Open Preferences action and a
+        Don't Show Again action to silence future prompts.
+      </description>
+    </key>
+
     <key name="kill-switch-block-during-pause" type="b">
       <default>false</default>
       <summary>Block traffic when VPN is paused</summary>

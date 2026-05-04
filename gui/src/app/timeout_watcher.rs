@@ -5,6 +5,10 @@
 //! user-configured timeout. A per-session generation counter ensures only the
 //! latest watcher can fire — older watchers compare their stored generation
 //! to the current value and bail out when superseded.
+//!
+//! No testable pure surface — `glib::spawn_future_local` + thread-local
+//! generation map mutation. Generation-counter behaviour is covered by the
+//! integration smoke test.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -1,4 +1,6 @@
 //! Application module
+//!
+//! No testable pure surface — thread-local parent-window slot + module re-exports.
 
 use std::cell::RefCell;
 

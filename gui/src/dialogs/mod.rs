@@ -15,7 +15,8 @@ pub use configuration::{
 pub use credentials::{CredentialField, show_challenge_dialog, show_credentials_dialog};
 pub use logs::show_log_viewer;
 pub use notification::{
-    show_connection_notification, show_error_notification, show_info_notification,
-    show_reconnect_notification,
+    show_connection_notification, show_error_notification, show_first_run_help_notification,
+    show_helper_missing_notification, show_info_notification, show_reconnect_notification,
+    withdraw_first_run_help_notification,
 };
 pub use preferences::show_preferences_dialog;

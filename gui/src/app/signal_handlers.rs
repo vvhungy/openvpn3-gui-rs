@@ -2,6 +2,8 @@
 //!
 //! Owns the `SessionManagerEvent` loop that reacts to sessions being
 //! created and destroyed.  StatusChange is handled in `status_handler`.
+//!
+//! No testable pure surface — async D-Bus signal loop + side effects.
 
 use futures::StreamExt;
 use tracing::{info, warn};

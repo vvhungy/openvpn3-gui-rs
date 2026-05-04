@@ -1,4 +1,6 @@
 //! Preferences dialog
+//!
+//! No testable pure surface — GTK widget builder.
 
 use gtk4::prelude::*;
 use gtk4::{
@@ -101,6 +103,13 @@ pub fn show_preferences_dialog(
         .build();
     content.append(&notif_check);
 
+    let first_run_check = CheckButton::builder()
+        .label("Show first-run service help")
+        .active(settings.show_first_run_help())
+        .margin_start(INDENT)
+        .build();
+    content.append(&first_run_check);
+
     // --- Stats refresh interval ---
     let interval_row = GtkBox::new(Orientation::Horizontal, 8);
     let interval_label = Label::builder()
@@ -178,6 +187,15 @@ pub fn show_preferences_dialog(
         .build();
     content.append(&block_during_pause_check);
 
+    let helper_hint = Label::builder()
+        .label("⚠ Helper not installed — install openvpn3-killswitch-helper")
+        .margin_start(24)
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    helper_hint.add_css_class("dim-label");
+    content.append(&helper_hint);
+
     // When kill-switch is on, force the warn-on-disconnect checkbox on and
     // disable it: without that warning the user has no UI to release rules
     // after an unexpected drop.
@@ -189,6 +207,7 @@ pub fn show_preferences_dialog(
         let allow_lan_check = allow_lan_check.clone();
         let block_during_pause_check = block_during_pause_check.clone();
         let warn_disconnect_check = warn_disconnect_check.clone();
+        let helper_hint = helper_hint.clone();
         enable_killswitch_check.connect_toggled(move |btn| {
             let on = btn.is_active();
             allow_lan_check.set_sensitive(on);
@@ -198,6 +217,22 @@ pub fn show_preferences_dialog(
                 warn_disconnect_check.set_sensitive(false);
             } else {
                 warn_disconnect_check.set_sensitive(true);
+                helper_hint.set_visible(false);
+            }
+        });
+    }
+
+    // Probe helper presence and show hint if kill-switch enabled but helper missing
+    if settings.enable_kill_switch() {
+        let helper_hint = helper_hint.clone();
+        glib::spawn_future_local(async move {
+            let system_bus = zbus::Connection::system().await.ok();
+            let present = match system_bus {
+                Some(ref conn) => crate::dbus::killswitch::helper_present(conn).await,
+                None => false,
+            };
+            if !present {
+                helper_hint.set_visible(true);
             }
         });
     }
@@ -249,6 +284,7 @@ pub fn show_preferences_dialog(
                 };
                 settings_clone.set_startup_action(action);
                 settings_clone.set_show_notifications(notif_check.is_active());
+                settings_clone.set_show_first_run_help(first_run_check.is_active());
                 settings_clone.set_stats_refresh_interval(interval_spin.value() as u32);
                 settings_clone.set_connection_timeout(timeout_spin.value() as u32);
                 settings_clone.set_health_check_stall_seconds(stall_spin.value() as u32);

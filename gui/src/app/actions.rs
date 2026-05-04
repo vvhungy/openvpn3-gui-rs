@@ -1,4 +1,6 @@
 //! Tray action dispatch
+//!
+//! No testable pure surface — dispatch into async helpers; covered by smoke tests.
 
 use tracing::{error, info};
 

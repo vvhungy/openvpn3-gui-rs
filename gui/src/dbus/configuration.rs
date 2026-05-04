@@ -1,4 +1,6 @@
 //! D-Bus proxies for OpenVPN3 Configuration Manager
+//!
+//! No testable pure surface — declarative `#[zbus::proxy]` traits.
 
 use zbus::proxy;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};

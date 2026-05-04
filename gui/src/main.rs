@@ -1,6 +1,10 @@
 //! OpenVPN3 Indicator - A system tray application for managing OpenVPN3 tunnels
 //!
 //! This is a Rust/GTK4 rewrite of the original Python/GTK3 implementation.
+//!
+//! No testable pure surface — CLI parsing + GTK application bootstrap.
+//! Log-level selector is a 4-branch if/else embedded in entry-point glue;
+//! extracting it would be more code than it saves.
 
 mod app;
 mod config;

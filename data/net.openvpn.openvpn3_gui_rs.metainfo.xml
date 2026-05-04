@@ -26,7 +26,8 @@
       <li>Preferences dialog (startup, notifications, intervals, timeout, stall detection, kill-switch, credentials)</li>
       <li>Configurable connection timeout with notification</li>
       <li>Connection stall detection — flags an idle tunnel in tray menu and icon</li>
-      <li>Kill-switch — block all non-VPN traffic via nftables when a tunnel drops (requires the privileged helper package)</li>
+      <li>Kill-switch — block all non-VPN traffic via nftables when a tunnel drops (requires the privileged helper package); helper-missing notification and Preferences hint</li>
+      <li>First-run help notification when the OpenVPN3 backend is not installed or reachable</li>
       <li>Automatic recovery when the OpenVPN3 service restarts</li>
       <li>Multiple VPN configuration support</li>
     </ul>
