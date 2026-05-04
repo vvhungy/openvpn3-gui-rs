@@ -1,4 +1,6 @@
 //! Shared dialog layout constants and helpers.
+//!
+//! No testable pure surface — GTK constants + a thin builder helper.
 
 use gtk4::prelude::*;
 use gtk4::{Box as GtkBox, Orientation};

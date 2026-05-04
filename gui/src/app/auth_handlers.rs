@@ -4,6 +4,8 @@
 //! query, credentials, URL/browser auth, challenge/OTP) so the main status
 //! stream stays readable. Each branch looks up the config name from the
 //! tray, then spawns the corresponding handler.
+//!
+//! No testable pure surface — async dispatch with no branching logic to unit test.
 
 use tracing::{info, warn};
 

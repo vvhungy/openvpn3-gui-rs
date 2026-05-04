@@ -3,6 +3,10 @@
 //! All knowledge about *when* to apply or remove firewall rules in response
 //! to per-session connection-state transitions lives here, so the main loop
 //! stays focused on connection-lifecycle dispatch + auth fan-out.
+//!
+//! No testable pure surface — async D-Bus glue + side effects (notifications,
+//! firewall calls). One-shot semantics covered indirectly by the status_handler
+//! integration smoke test.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;

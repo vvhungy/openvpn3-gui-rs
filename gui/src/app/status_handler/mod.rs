@@ -2,6 +2,10 @@
 //!
 //! Subscribes to per-session `StatusChange` signals from OpenVPN3 backends
 //! and dispatches each status transition to the appropriate handler.
+//!
+//! No testable pure surface — async D-Bus event loop. Pure transition logic
+//! (e.g. stall detection) lives in `crate::status::stats_poller` with its own
+//! unit tests.
 
 use futures::StreamExt;
 use tracing::{info, warn};

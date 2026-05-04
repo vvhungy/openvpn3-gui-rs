@@ -1,4 +1,8 @@
 //! Username / password credential request flow
+//!
+//! No testable pure surface here — pure logic (label mapping, storability)
+//! lives in `crate::credentials::policy` with its own unit tests. This file
+//! is async D-Bus dispatch + retry orchestration.
 
 use std::collections::HashMap;
 use std::rc::Rc;

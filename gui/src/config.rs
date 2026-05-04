@@ -1,4 +1,6 @@
 //! Application constants and metadata
+//!
+//! No testable pure surface — string constants only.
 
 /// Application name (internal identifier)
 pub const APPLICATION_NAME: &str = "openvpn3-gui-rs";

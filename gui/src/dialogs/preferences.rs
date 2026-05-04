@@ -1,4 +1,6 @@
 //! Preferences dialog
+//!
+//! No testable pure surface — GTK widget builder.
 
 use gtk4::prelude::*;
 use gtk4::{

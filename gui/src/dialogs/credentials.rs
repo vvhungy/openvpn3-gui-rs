@@ -2,6 +2,8 @@
 //!
 //! Dynamic dialog for collecting VPN credentials from the user.
 //! Supports any combination of fields: username, password, OTP, etc.
+//!
+//! No testable pure surface — GTK widget builder.
 
 use std::cell::Cell;
 use std::rc::Rc;

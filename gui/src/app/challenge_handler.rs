@@ -1,4 +1,6 @@
 //! Challenge / OTP request flow
+//!
+//! No testable pure surface — async D-Bus calls + GTK dialog spawn.
 
 use glib::object::Cast;
 use tracing::{error, info, warn};

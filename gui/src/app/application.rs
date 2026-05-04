@@ -1,4 +1,6 @@
 //! GTK Application — entry point and GTK signal wiring
+//!
+//! No testable pure surface — GTK Application bootstrap and signal wiring.
 
 use futures::StreamExt;
 use gio::ApplicationFlags;

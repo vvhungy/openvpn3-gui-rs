@@ -4,6 +4,10 @@
 //! Multiple session attempts for the same profile all feed into the same tab.
 //! Logs are populated from the global `LogBuffer` (history) and then live-
 //! tailed via a D-Bus `Log` signal subscription.
+//!
+//! No testable pure surface here — pure formatting (`format_log_line`) lives
+//! in the `format` submodule with its own unit tests. This file is GTK widget
+//! builder + async D-Bus stream wiring.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
