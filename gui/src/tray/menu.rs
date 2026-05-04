@@ -14,6 +14,17 @@ use super::indicator::{ConfigInfo, SessionInfo, TrayAction, VpnTray};
 pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
     let mut items: Vec<MenuItem<VpnTray>> = Vec::new();
 
+    if tray.configs.is_empty() && tray.sessions.is_empty() {
+        items.push(
+            StandardItem {
+                label: "No profiles imported".into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+        );
+    }
+
     // --- Active sessions ---
     for session in tray.sessions.values() {
         items.push(
@@ -283,6 +294,8 @@ mod tests {
         assert_eq!(
             labels,
             [
+                "No profiles imported",
+                "---",
                 "Import Config...",
                 "---",
                 "View Logs",
@@ -291,6 +304,17 @@ mod tests {
                 "Quit"
             ]
         );
+    }
+
+    #[test]
+    fn test_no_hint_when_session_present() {
+        let mut tray = make_tray();
+        tray.sessions.insert(
+            "/sess/1".into(),
+            make_session("/sess/1", "", "VPN", StatusMinor::ConnConnected),
+        );
+        let labels = menu_labels(&build_menu(&tray));
+        assert!(!labels.contains(&"No profiles imported".into()));
     }
 
     #[test]
