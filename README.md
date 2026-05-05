@@ -13,11 +13,11 @@ A system tray GUI for [OpenVPN3 Linux](https://github.com/OpenVPN/openvpn3-linux
 - Desktop notifications on status changes (grouped per connection, deduplicated)
 - Auto-reconnect prompt when a session drops unexpectedly
 - Connection-stall detection — flags an idle tunnel in the tray menu and icon when traffic stops flowing
-- Kill-switch — block all non-VPN traffic via nftables when a tunnel drops (requires the `openvpn3-killswitch-helper` package); shows a notification and Preferences hint when the helper is not installed
+- Kill-switch — block all non-VPN traffic via nftables when a tunnel drops (requires the `openvpn3-killswitch-helper` package); shows a lock indicator (🔒) in the session menu label when active; notification and Preferences hint when the helper is not installed; quit confirmation warns before removing rules
 - First-run help notification when the OpenVPN3 backend cannot be reached
 - Automatic recovery when the OpenVPN3 service restarts
 - Tabbed session log viewer — live tail of OpenVPN3 backend log messages, one tab per profile
-- Preferences dialog: startup behaviour, notifications, stats refresh interval, connection timeout, stall threshold, kill-switch, credential management
+- Tabbed Preferences dialog (General / Security): startup behaviour, notifications, menu update interval, connection timeout, stall threshold, kill-switch with nested warn-on-disconnect, credential management
 - DEB, RPM, and AUR packaging (separate `openvpn3-killswitch-helper` package for the privileged firewall helper)
 
 ## Requirements
@@ -86,7 +86,7 @@ menu.
 
 - **View Logs** — tabbed log viewer, one tab per VPN profile (always visible)
 - **Import Config...** — pick a `.ovpn` file to import into OpenVPN3
-- **Preferences...** — startup behaviour, notifications, stats refresh interval, connection timeout, stall detection, kill-switch, credential storage
+- **Preferences...** — tabbed dialog (General: startup, notifications, intervals, stall detection; Security: kill-switch, warn-on-disconnect, credentials)
 - **About** / **Quit**
 
 ## Command-line options
