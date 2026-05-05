@@ -136,18 +136,35 @@ pub fn show_preferences_dialog(
     timeout_row.append(&timeout_spin);
     content.append(&timeout_row);
 
-    // --- Stall detection threshold ---
+    // --- Stall detection ---
+    let current_stall = settings.health_check_stall_seconds();
+    let stall_check = CheckButton::builder()
+        .label("Detect stalled connections")
+        .active(current_stall > 0)
+        .build();
+    content.append(&stall_check);
+
     let stall_row = GtkBox::new(Orientation::Horizontal, 8);
+    stall_row.set_margin_start(INDENT);
     let stall_label = Label::builder()
-        .label("Stall detection threshold (seconds):")
+        .label("Stall threshold (seconds):")
         .halign(gtk4::Align::Start)
         .hexpand(true)
         .build();
-    let stall_spin = SpinButton::with_range(0.0, 600.0, 10.0);
-    stall_spin.set_value(settings.health_check_stall_seconds() as f64);
+    let stall_spin = SpinButton::with_range(10.0, 600.0, 10.0);
+    let initial_stall = if current_stall > 0 { current_stall } else { 60 };
+    stall_spin.set_value(initial_stall as f64);
+    stall_spin.set_sensitive(current_stall > 0);
     stall_row.append(&stall_label);
     stall_row.append(&stall_spin);
     content.append(&stall_row);
+
+    {
+        let stall_spin = stall_spin.clone();
+        stall_check.connect_toggled(move |btn| {
+            stall_spin.set_sensitive(btn.is_active());
+        });
+    }
 
     // --- Security ---
     content.append(&Separator::new(Orientation::Horizontal));
@@ -287,7 +304,11 @@ pub fn show_preferences_dialog(
                 settings_clone.set_show_first_run_help(first_run_check.is_active());
                 settings_clone.set_stats_refresh_interval(interval_spin.value() as u32);
                 settings_clone.set_connection_timeout(timeout_spin.value() as u32);
-                settings_clone.set_health_check_stall_seconds(stall_spin.value() as u32);
+                settings_clone.set_health_check_stall_seconds(if stall_check.is_active() {
+                    stall_spin.value() as u32
+                } else {
+                    0
+                });
                 settings_clone.set_warn_on_unexpected_disconnect(warn_disconnect_check.is_active());
                 settings_clone.set_enable_kill_switch(enable_killswitch_check.is_active());
                 settings_clone.set_kill_switch_allow_lan(allow_lan_check.is_active());
