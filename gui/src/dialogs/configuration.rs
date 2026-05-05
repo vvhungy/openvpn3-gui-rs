@@ -3,6 +3,8 @@
 //! No testable pure surface — GTK widget builders.
 
 use gtk4::prelude::*;
+use gtk4::{Application as GtkApplication, IconSize, Image};
+use gtk4::{Box as GtkBox, Orientation, Separator};
 use gtk4::{Entry, FileChooserAction, FileChooserDialog, Grid, Label, ResponseType};
 use tracing::info;
 
@@ -182,5 +184,59 @@ where
     ));
 
     window.set_child(Some(&vbox));
+    window.present();
+}
+
+/// Show quit-while-kill-switch-active confirmation dialog.
+pub fn show_quit_confirmation_dialog(parent: Option<&gtk4::Window>, gtk_app: GtkApplication) {
+    let window = gtk4::Window::builder()
+        .title("Quit with kill-switch active?")
+        .modal(true)
+        .resizable(false)
+        .build();
+
+    if let Some(p) = parent {
+        window.set_transient_for(Some(p));
+    }
+
+    let outer = GtkBox::new(Orientation::Vertical, 0);
+    let hbox = GtkBox::new(Orientation::Horizontal, 16);
+    hbox.set_margin_top(CONTENT_MARGIN);
+    hbox.set_margin_bottom(CONTENT_MARGIN);
+    hbox.set_margin_start(CONTENT_MARGIN);
+    hbox.set_margin_end(CONTENT_MARGIN);
+
+    let icon = Image::from_icon_name("dialog-warning");
+    icon.set_icon_size(IconSize::Large);
+    icon.set_pixel_size(48);
+    hbox.append(&icon);
+
+    let body = Label::builder()
+        .label("Quitting will remove the kill-switch firewall rules.\nYour VPN session will stay connected, but traffic will\nno longer be blocked if the tunnel drops.")
+        .halign(gtk4::Align::Start)
+        .valign(gtk4::Align::Center)
+        .wrap(true)
+        .build();
+    hbox.append(&body);
+
+    outer.append(&hbox);
+    outer.append(&Separator::new(Orientation::Horizontal));
+    outer.append(&make_button_row(
+        "Cancel",
+        "Quit anyway",
+        {
+            let window = window.clone();
+            move || window.close()
+        },
+        {
+            let window = window.clone();
+            move || {
+                window.close();
+                gtk_app.quit();
+            }
+        },
+    ));
+
+    window.set_child(Some(&outer));
     window.present();
 }

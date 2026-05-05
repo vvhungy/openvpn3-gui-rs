@@ -128,6 +128,7 @@ mod tests {
             last_bytes_in: 1000,
             last_bytes_out: 500,
             idle_since: None,
+            kill_switch_active: false,
         }
     }
 

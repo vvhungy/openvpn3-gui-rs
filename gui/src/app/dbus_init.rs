@@ -139,6 +139,7 @@ pub(crate) async fn init_dbus(
                         last_bytes_in: 0,
                         last_bytes_out: 0,
                         idle_since: None,
+                        kill_switch_active: false,
                     },
                 );
             }
@@ -163,12 +164,21 @@ pub(crate) async fn init_dbus(
     if settings.enable_kill_switch() && !connected_paths.is_empty() {
         let allow_lan = settings.kill_switch_allow_lan();
         let dbus_clone = dbus.clone();
+        let tray_clone = tray.clone();
         glib::spawn_future_local(async move {
             for path in connected_paths {
-                if let Err(e) =
-                    super::status_handler::apply_kill_switch(&dbus_clone, &path, allow_lan).await
+                match super::status_handler::apply_kill_switch(&dbus_clone, &path, allow_lan).await
                 {
-                    warn!("kill-switch: startup re-apply failed for {}: {}", path, e);
+                    Ok(true) => {
+                        let p = path.clone();
+                        tray_clone.update(move |t| {
+                            if let Some(s) = t.sessions.get_mut(&p) {
+                                s.kill_switch_active = true;
+                            }
+                        });
+                    }
+                    Ok(false) => {}
+                    Err(e) => warn!("kill-switch: startup re-apply failed for {}: {}", path, e),
                 }
             }
         });

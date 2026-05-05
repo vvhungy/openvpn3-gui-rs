@@ -50,32 +50,37 @@ pub struct SessionInfo {
     /// When the session was first detected as idle (zero delta).
     /// `None` means traffic was seen on the last poll or session is not connected.
     pub idle_since: Option<std::time::Instant>,
+    /// Kill-switch firewall rules are active for this session.
+    pub kill_switch_active: bool,
 }
 
 impl SessionInfo {
     pub fn status_label(&self) -> String {
         let desc = get_status_description(self.status.major, self.status.minor);
+        let ks = if self.kill_switch_active { " 🔒" } else { "" };
         if self.status.is_connected() {
             if let Some(since) = self.idle_since {
                 let secs = since.elapsed().as_secs();
                 return format!(
-                    "{}: {} (idle {})",
+                    "{}: {}{} (idle {})",
                     self.config_name,
                     desc,
+                    ks,
                     format_duration(secs)
                 );
             }
             if self.bytes_in > 0 || self.bytes_out > 0 {
                 return format!(
-                    "{}: {} ↓ {} ↑ {}",
+                    "{}: {}{} ↓ {} ↑ {}",
                     self.config_name,
                     desc,
+                    ks,
                     format_bytes(self.bytes_in),
                     format_bytes(self.bytes_out)
                 );
             }
         }
-        format!("{}: {}", self.config_name, desc)
+        format!("{}: {}{}", self.config_name, desc, ks)
     }
 }
 
@@ -258,6 +263,7 @@ mod tests {
             last_bytes_in: 0,
             last_bytes_out: 0,
             idle_since: None,
+            kill_switch_active: false,
         }
     }
 
@@ -283,5 +289,34 @@ mod tests {
             "Work VPN",
         );
         assert_eq!(s.status_label(), "Work VPN: Disconnected");
+    }
+
+    #[test]
+    fn test_status_label_kill_switch_marker_connected() {
+        let mut s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
+        s.kill_switch_active = true;
+        assert_eq!(s.status_label(), "MyVPN: Connected 🔒");
+    }
+
+    #[test]
+    fn test_status_label_kill_switch_marker_with_stats() {
+        let mut s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
+        s.kill_switch_active = true;
+        s.bytes_in = 1024 * 1024;
+        s.bytes_out = 2 * 1024 * 1024;
+        assert_eq!(s.status_label(), "MyVPN: Connected 🔒 ↓ 1.0 MB ↑ 2.0 MB");
+    }
+
+    #[test]
+    fn test_status_label_kill_switch_marker_paused() {
+        let mut s = make_session(StatusMajor::Connection, StatusMinor::ConnPaused, "MyVPN");
+        s.kill_switch_active = true;
+        assert_eq!(s.status_label(), "MyVPN: Paused 🔒");
+    }
+
+    #[test]
+    fn test_status_label_no_marker_when_inactive() {
+        let s = make_session(StatusMajor::Connection, StatusMinor::ConnConnected, "MyVPN");
+        assert!(!s.status_label().contains('🔒'));
     }
 }

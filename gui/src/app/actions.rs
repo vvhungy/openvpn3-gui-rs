@@ -207,7 +207,16 @@ pub(crate) fn handle_tray_action(
         }
         TrayAction::Quit => {
             info!("Tray action: Quit");
-            gtk_app.quit();
+            let has_connected = tray
+                .update(|t| t.sessions.values().any(|s| s.status.is_connected()))
+                .unwrap_or(false);
+            if has_connected && settings.enable_kill_switch() {
+                let parent = parent.clone();
+                let gtk_app = gtk_app.clone();
+                crate::dialogs::show_quit_confirmation_dialog(Some(parent.upcast_ref()), gtk_app);
+            } else {
+                gtk_app.quit();
+            }
         }
     }
 }

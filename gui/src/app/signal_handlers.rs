@@ -66,6 +66,7 @@ async fn handle_session_created(
                 last_bytes_in: 0,
                 last_bytes_out: 0,
                 idle_since: None,
+                kill_switch_active: false,
             });
     });
 
@@ -145,8 +146,14 @@ pub(crate) async fn setup_signal_handlers(
                             // Expected disconnect — release any kill-switch rules so
                             // the user's internet keeps working. No-op when helper
                             // not installed or kill-switch was never engaged.
+                            let tray_clear = tray_for_session.clone();
                             glib::spawn_future_local(async move {
                                 crate::dbus::killswitch::remove_rules().await;
+                                tray_clear.update(|t| {
+                                    for s in t.sessions.values_mut() {
+                                        s.kill_switch_active = false;
+                                    }
+                                });
                             });
                         } else if let Some((config_path, config_name)) = session_info
                             && !config_path.is_empty()
