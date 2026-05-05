@@ -11,6 +11,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
+use crate::tray::VpnTray;
+
 /// One-shot flag — fire the "helper missing" notification at most once per
 /// app session. The Preferences hint label persists as the visual reminder.
 static HELPER_MISSING_NOTIFIED: AtomicBool = AtomicBool::new(false);
@@ -47,7 +49,11 @@ pub(crate) async fn apply_kill_switch(
     Ok(helper_installed)
 }
 
-pub(super) fn on_connected(conn: &zbus::Connection, session_path: &str) {
+pub(super) fn on_connected(
+    conn: &zbus::Connection,
+    session_path: &str,
+    tray: &ksni::blocking::Handle<VpnTray>,
+) {
     let settings = crate::settings::Settings::new();
     if !settings.enable_kill_switch() {
         return;
@@ -55,8 +61,17 @@ pub(super) fn on_connected(conn: &zbus::Connection, session_path: &str) {
     let allow_lan = settings.kill_switch_allow_lan();
     let path = session_path.to_string();
     let conn = conn.clone();
+    let tray = tray.clone();
     glib::spawn_future_local(async move {
         match apply_kill_switch(&conn, &path, allow_lan).await {
+            Ok(true) => {
+                let p = path.clone();
+                tray.update(move |t| {
+                    if let Some(s) = t.sessions.get_mut(&p) {
+                        s.kill_switch_active = true;
+                    }
+                });
+            }
             Ok(false) if !HELPER_MISSING_NOTIFIED.swap(true, Ordering::Relaxed) => {
                 crate::dialogs::show_helper_missing_notification();
             }
@@ -66,12 +81,18 @@ pub(super) fn on_connected(conn: &zbus::Connection, session_path: &str) {
     });
 }
 
-pub(super) fn on_paused() {
+pub(super) fn on_paused(tray: &ksni::blocking::Handle<VpnTray>) {
     let settings = crate::settings::Settings::new();
     if !settings.enable_kill_switch() || settings.kill_switch_block_during_pause() {
         return;
     }
-    glib::spawn_future_local(async {
+    let tray = tray.clone();
+    glib::spawn_future_local(async move {
         crate::dbus::killswitch::remove_rules().await;
+        tray.update(|t| {
+            for s in t.sessions.values_mut() {
+                s.kill_switch_active = false;
+            }
+        });
     });
 }

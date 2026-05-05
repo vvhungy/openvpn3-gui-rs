@@ -330,19 +330,36 @@ pub fn show_preferences_dialog(
                         })
                         .unwrap_or_default();
                     if !paths.is_empty() {
+                        let tray_apply = tray_for_save.clone();
                         glib::spawn_future_local(async move {
                             for path in paths {
-                                if let Err(e) =
-                                    crate::app::apply_kill_switch(&dbus, &path, allow_lan).await
-                                {
-                                    tracing::warn!("kill-switch mid-session apply failed: {}", e);
+                                match crate::app::apply_kill_switch(&dbus, &path, allow_lan).await {
+                                    Ok(true) => {
+                                        let p = path.clone();
+                                        tray_apply.update(move |t| {
+                                            if let Some(s) = t.sessions.get_mut(&p) {
+                                                s.kill_switch_active = true;
+                                            }
+                                        });
+                                    }
+                                    Ok(false) => {}
+                                    Err(e) => tracing::warn!(
+                                        "kill-switch mid-session apply failed: {}",
+                                        e
+                                    ),
                                 }
                             }
                         });
                     }
                 } else if killswitch_now_off {
-                    glib::spawn_future_local(async {
+                    let tray_clear = tray_for_save.clone();
+                    glib::spawn_future_local(async move {
                         crate::dbus::killswitch::remove_rules().await;
+                        tray_clear.update(|t| {
+                            for s in t.sessions.values_mut() {
+                                s.kill_switch_active = false;
+                            }
+                        });
                     });
                 }
                 window.close();

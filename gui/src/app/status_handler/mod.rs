@@ -307,14 +307,14 @@ pub(super) async fn setup_status_handler(
 
                         // Kill-switch: apply firewall rules now that the tunnel is up.
                         // Helper has replace semantics, so re-firing on Reconnect is safe.
-                        killswitch_glue::on_connected(&conn, &path);
+                        killswitch_glue::on_connected(&conn, &path, &tray_for_status);
                     }
 
                     // Kill-switch: remove rules on Pause unless user chose
                     // block-during-pause.  Resume needs no explicit code —
                     // the ConnConnected transition re-fires apply_kill_switch.
                     if status.is_paused() {
-                        killswitch_glue::on_paused();
+                        killswitch_glue::on_paused(&tray_for_status);
                     }
 
                     // Update tray session state (connected_at, new sessions, removal)
@@ -344,6 +344,7 @@ pub(super) async fn setup_status_handler(
                                     last_bytes_in: 0,
                                     last_bytes_out: 0,
                                     idle_since: None,
+                                    kill_switch_active: false,
                                 },
                             );
                         }
