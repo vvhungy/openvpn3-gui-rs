@@ -116,6 +116,10 @@ impl Application {
                     match init_dbus(&dbus, &settings, &tray).await {
                         Ok(_) => {
                             info!("D-Bus initialization complete");
+                            let ks = settings.enable_kill_switch();
+                            tray.update(move |t| {
+                                t.kill_switch_enabled = ks;
+                            });
                             initialized = true;
                             break;
                         }

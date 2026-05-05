@@ -89,6 +89,10 @@ pub fn show_preferences_dialog(
                 settings_clone.set_kill_switch_allow_lan(sw.allow_lan_check.is_active());
                 settings_clone
                     .set_kill_switch_block_during_pause(sw.block_during_pause_check.is_active());
+                let ks_on = sw.enable_killswitch_check.is_active();
+                tray_for_save.update(move |t| {
+                    t.kill_switch_enabled = ks_on;
+                });
                 let killswitch_now_on =
                     !was_killswitch_on && sw.enable_killswitch_check.is_active();
                 let killswitch_now_off =
