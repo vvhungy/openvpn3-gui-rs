@@ -16,7 +16,8 @@ use crate::tray::{TrayAction, VpnTray};
 
 use super::actions::handle_tray_action;
 use super::config_ops::{import_config, refresh_configs};
-use super::dbus_init::{init_dbus, watch_service_restart};
+use super::dbus_init::init_dbus;
+use super::service_watcher::watch_service_restart;
 use super::signal_handlers::setup_signal_handlers;
 
 /// Command-line arguments consumed by the application
