@@ -115,7 +115,17 @@ pub(super) async fn setup_status_handler(
                         let msg = message.to_string();
                         tray_for_status.update(move |t| {
                             if let Some(session) = t.sessions.get_mut(&p) {
+                                let was_connected = session.status.is_connected();
                                 session.status = SessionStatus::new(major, minor, msg);
+                                // Reset stats baseline when (re)entering Connected so the
+                                // next poll sees a non-zero delta. Frozen counters from
+                                // before Pause would otherwise trigger idle_since on the
+                                // first poll after Resume and flip the icon to "loading".
+                                if !was_connected && session.status.is_connected() {
+                                    session.last_bytes_in = 0;
+                                    session.last_bytes_out = 0;
+                                    session.idle_since = None;
+                                }
                             }
                         });
                     }
