@@ -84,7 +84,11 @@ pub(super) async fn setup_status_handler(
 
                     // Dedup: skip duplicate (path, major, minor) signals caused by
                     // LogForward + AddMatch both delivering the same signal.
-                    if last_signal.get(&path) == Some(&(major, minor)) {
+                    // Auth requests are exempted — a re-emitted credential challenge
+                    // after Resume on an invalidated session must still reach the
+                    // dispatcher even if the same (major, minor) was seen earlier.
+                    let is_auth = status.is_auth_request();
+                    if !is_auth && last_signal.get(&path) == Some(&(major, minor)) {
                         continue;
                     }
                     last_signal.insert(path.clone(), (major, minor));
