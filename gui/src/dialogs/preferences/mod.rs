@@ -121,6 +121,7 @@ pub fn show_preferences_dialog(
                                                 s.kill_switch_active = true;
                                             }
                                         });
+                                        crate::dialogs::show_killswitch_active_notification();
                                     }
                                     Ok(false) => {}
                                     Err(e) => tracing::warn!(
@@ -140,6 +141,7 @@ pub fn show_preferences_dialog(
                                 s.kill_switch_active = false;
                             }
                         });
+                        crate::dialogs::show_killswitch_inactive_notification();
                     });
                 }
                 window.close();

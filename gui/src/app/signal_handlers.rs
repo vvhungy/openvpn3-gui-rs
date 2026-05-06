@@ -154,6 +154,7 @@ pub(crate) async fn setup_signal_handlers(
                                         s.kill_switch_active = false;
                                     }
                                 });
+                                crate::dialogs::show_killswitch_inactive_notification();
                             });
                         } else if let Some((config_path, config_name)) = session_info
                             && !config_path.is_empty()

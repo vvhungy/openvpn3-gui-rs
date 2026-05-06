@@ -130,6 +130,43 @@ pub(crate) async fn session_action(
     Ok(())
 }
 
+/// Resume a paused session, re-requesting credentials if the server
+/// invalidated the session while paused (e.g. session timeout).
+pub(crate) async fn resume_session(
+    dbus: &zbus::Connection,
+    session_path_str: &str,
+    tray: &ksni::blocking::Handle<VpnTray>,
+) -> anyhow::Result<()> {
+    let session_path = OwnedObjectPath::try_from(session_path_str)?;
+    let session = SessionProxy::builder(dbus)
+        .path(session_path)?
+        .build()
+        .await?;
+
+    session.Resume().await?;
+    info!("Session resumed: {}", session_path_str);
+
+    match session.Ready().await {
+        Ok(()) => {}
+        Err(e) => {
+            info!("Session not ready after resume (needs credentials): {}", e);
+            let config_name = tray
+                .update(|t| {
+                    t.sessions
+                        .get(session_path_str)
+                        .map(|s| s.config_name.clone())
+                })
+                .flatten()
+                .unwrap_or_else(|| "VPN".to_string());
+            let sp = session_path_str.to_string();
+            super::credential_handler::request_credentials(dbus, &sp, &config_name, HashMap::new())
+                .await;
+        }
+    }
+
+    Ok(())
+}
+
 /// Disconnect a session and show an error notification.
 /// Marks the session as user-initiated so SessDestroyed won't show a redundant reconnect prompt.
 pub(crate) async fn disconnect_with_message(

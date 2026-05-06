@@ -90,8 +90,11 @@ pub(crate) fn handle_tray_action(
             info!("Tray action: Resume {}", session_path);
             let dbus = dbus.clone();
             let session_path = session_path.clone();
+            let tray = tray.clone();
             glib::spawn_future_local(async move {
-                if let Err(e) = session_action(&dbus, &session_path, "resume").await {
+                if let Err(e) =
+                    super::session_ops::resume_session(&dbus, &session_path, &tray).await
+                {
                     error!("Failed to resume: {}", e);
                 }
             });

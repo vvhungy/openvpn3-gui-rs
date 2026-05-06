@@ -71,6 +71,7 @@ pub(super) fn on_connected(
                         s.kill_switch_active = true;
                     }
                 });
+                crate::dialogs::show_killswitch_active_notification();
             }
             Ok(false) if !HELPER_MISSING_NOTIFIED.swap(true, Ordering::Relaxed) => {
                 crate::dialogs::show_helper_missing_notification();
@@ -94,5 +95,6 @@ pub(super) fn on_paused(tray: &ksni::blocking::Handle<VpnTray>) {
                 s.kill_switch_active = false;
             }
         });
+        crate::dialogs::show_killswitch_inactive_notification();
     });
 }

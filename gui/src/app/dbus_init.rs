@@ -172,6 +172,7 @@ pub(crate) async fn init_dbus(
                                 s.kill_switch_active = true;
                             }
                         });
+                        crate::dialogs::show_killswitch_active_notification();
                     }
                     Ok(false) => {}
                     Err(e) => warn!("kill-switch: startup re-apply failed for {}: {}", path, e),

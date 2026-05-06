@@ -67,6 +67,13 @@ impl SessionStatus {
     pub fn needs_url_auth(&self) -> bool {
         self.major == StatusMajor::Session && self.minor == StatusMinor::SessAuthUrl
     }
+
+    pub fn is_auth_request(&self) -> bool {
+        self.needs_user_input()
+            || self.needs_credentials()
+            || self.needs_url_auth()
+            || self.needs_challenge()
+    }
 }
 
 impl SessionStatus {

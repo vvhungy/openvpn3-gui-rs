@@ -84,7 +84,11 @@ pub(super) async fn setup_status_handler(
 
                     // Dedup: skip duplicate (path, major, minor) signals caused by
                     // LogForward + AddMatch both delivering the same signal.
-                    if last_signal.get(&path) == Some(&(major, minor)) {
+                    // Auth requests are exempted — a re-emitted credential challenge
+                    // after Resume on an invalidated session must still reach the
+                    // dispatcher even if the same (major, minor) was seen earlier.
+                    let is_auth = status.is_auth_request();
+                    if !is_auth && last_signal.get(&path) == Some(&(major, minor)) {
                         continue;
                     }
                     last_signal.insert(path.clone(), (major, minor));
@@ -111,7 +115,17 @@ pub(super) async fn setup_status_handler(
                         let msg = message.to_string();
                         tray_for_status.update(move |t| {
                             if let Some(session) = t.sessions.get_mut(&p) {
+                                let was_connected = session.status.is_connected();
                                 session.status = SessionStatus::new(major, minor, msg);
+                                // Reset stats baseline when (re)entering Connected so the
+                                // next poll sees a non-zero delta. Frozen counters from
+                                // before Pause would otherwise trigger idle_since on the
+                                // first poll after Resume and flip the icon to "loading".
+                                if !was_connected && session.status.is_connected() {
+                                    session.last_bytes_in = 0;
+                                    session.last_bytes_out = 0;
+                                    session.idle_since = None;
+                                }
                             }
                         });
                     }
