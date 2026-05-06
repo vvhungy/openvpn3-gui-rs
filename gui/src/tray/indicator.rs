@@ -119,6 +119,8 @@ pub struct VpnTray {
     pub action_tx: ActionSender,
     /// Pre-rendered ARGB32 pixmaps for each status icon (GNOME compat)
     pixmaps: HashMap<&'static str, Vec<ksni::Icon>>,
+    /// Whether kill-switch is enabled in settings (shown in menu row)
+    pub kill_switch_enabled: bool,
 }
 
 impl VpnTray {
@@ -128,6 +130,7 @@ impl VpnTray {
             sessions: HashMap::new(),
             pixmaps: super::pixmaps::build_pixmap_cache(),
             action_tx,
+            kill_switch_enabled: false,
         }
     }
 

@@ -30,6 +30,7 @@ mod config_ops;
 mod credential_handler;
 mod dbus_init;
 pub(crate) mod log_buffer;
+mod service_watcher;
 mod session_ops;
 mod signal_handlers;
 mod stats_poller;

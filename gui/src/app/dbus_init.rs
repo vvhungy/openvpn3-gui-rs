@@ -6,11 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use zbus::proxy::CacheProperties;
 
-use futures::StreamExt;
-use zbus::MessageStream;
-use zbus::message::Type as MessageType;
-
-use crate::config::{MANAGER_VERSION_MINIMUM, MANAGER_VERSION_RECOMMENDED, OPENVPN3_SERVICE};
+use crate::config::{MANAGER_VERSION_MINIMUM, MANAGER_VERSION_RECOMMENDED};
 use crate::dbus::{
     configuration::{ConfigurationManagerProxy, ConfigurationProxy},
     session::{SessionManagerProxy, SessionProxy},
@@ -255,72 +251,6 @@ async fn startup_connect(
     }
 }
 
-/// Watch for the OpenVPN3 D-Bus service to restart and re-initialize the tray.
-///
-/// Subscribes to `NameOwnerChanged` for `net.openvpn.v3.configuration`. When
-/// that service reappears after a restart (old_owner="" → new_owner=":1.N"),
-/// clears stale tray state and re-runs `init_dbus` with up to 5 retries.
-pub(crate) async fn watch_service_restart(
-    dbus: &zbus::Connection,
-    settings: &Settings,
-    tray: &ksni::blocking::Handle<crate::tray::VpnTray>,
-) {
-    let match_rule = format!(
-        "type='signal',sender='org.freedesktop.DBus',\
-         interface='org.freedesktop.DBus',member='NameOwnerChanged',\
-         arg0='{}'",
-        OPENVPN3_SERVICE
-    );
-    if let Err(e) = dbus
-        .call_method(
-            Some("org.freedesktop.DBus"),
-            "/org/freedesktop/DBus",
-            Some("org.freedesktop.DBus"),
-            "AddMatch",
-            &match_rule,
-        )
-        .await
-    {
-        warn!("Failed to subscribe to NameOwnerChanged: {}", e);
-        return;
-    }
-
-    let mut stream = MessageStream::from(dbus);
-    while let Some(Ok(msg)) = stream.next().await {
-        if msg.message_type() != MessageType::Signal {
-            continue;
-        }
-        if msg.header().member().map(|m| m.as_str()) != Some("NameOwnerChanged") {
-            continue;
-        }
-        if let Ok((name, old_owner, new_owner)) =
-            msg.body().deserialize::<(String, String, String)>()
-        {
-            if !is_service_appeared(&name, &old_owner, &new_owner) {
-                continue;
-            }
-            info!("OpenVPN3 service restarted, clearing tray and re-initializing");
-            crate::dialogs::withdraw_first_run_help_notification();
-            tray.update(|t| {
-                t.sessions.clear();
-                t.configs.clear();
-            });
-            for attempt in 1..=5u32 {
-                match init_dbus(dbus, settings, tray).await {
-                    Ok(_) => {
-                        info!("Re-initialization after service restart complete");
-                        break;
-                    }
-                    Err(e) => {
-                        debug!("Re-init attempt {}/5: {}", attempt, e);
-                        glib::timeout_future(std::time::Duration::from_secs(2)).await;
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Parse the OpenVPN3 manager version string into a comparable number.
 ///
 /// - `"git:..."` → 9999 (dev build, assume latest)
@@ -343,16 +273,9 @@ fn parse_manager_version(version: Option<String>) -> u32 {
     }
 }
 
-/// True when the OpenVPN3 service just appeared on the bus (was absent before).
-fn is_service_appeared(name: &str, old_owner: &str, new_owner: &str) -> bool {
-    name == OPENVPN3_SERVICE && old_owner.is_empty() && !new_owner.is_empty()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- parse_manager_version ---
 
     #[test]
     fn test_parse_version_none() {
@@ -382,40 +305,5 @@ mod tests {
     #[test]
     fn test_parse_version_empty_string() {
         assert_eq!(parse_manager_version(Some(String::new())), 0);
-    }
-
-    // --- is_service_appeared ---
-
-    #[test]
-    fn test_service_appeared_valid() {
-        assert!(is_service_appeared(
-            "net.openvpn.v3.configuration",
-            "",
-            ":1.42"
-        ));
-    }
-
-    #[test]
-    fn test_service_appeared_wrong_name() {
-        assert!(!is_service_appeared("com.example.Other", "", ":1.42"));
-    }
-
-    #[test]
-    fn test_service_appeared_old_owner_not_empty() {
-        assert!(!is_service_appeared(
-            "net.openvpn.v3.configuration",
-            ":1.10",
-            ":1.42"
-        ));
-    }
-
-    #[test]
-    fn test_service_appeared_new_owner_empty() {
-        assert!(!is_service_appeared("net.openvpn.v3.configuration", "", ""));
-    }
-
-    #[test]
-    fn test_service_appeared_both_owners_empty() {
-        assert!(!is_service_appeared("net.openvpn.v3.configuration", "", ""));
     }
 }

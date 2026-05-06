@@ -14,6 +14,21 @@ use super::indicator::{ConfigInfo, SessionInfo, TrayAction, VpnTray};
 pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
     let mut items: Vec<MenuItem<VpnTray>> = Vec::new();
 
+    let label = if tray.kill_switch_enabled {
+        "🔒 Kill-switch: On".to_string()
+    } else {
+        "🔓 Kill-switch: Off".to_string()
+    };
+    items.push(
+        StandardItem {
+            label,
+            enabled: false,
+            ..Default::default()
+        }
+        .into(),
+    );
+    items.push(MenuItem::Separator);
+
     if tray.configs.is_empty() && tray.sessions.is_empty() {
         items.push(
             StandardItem {
@@ -295,6 +310,8 @@ mod tests {
         assert_eq!(
             labels,
             [
+                "🔓 Kill-switch: Off",
+                "---",
                 "No profiles imported",
                 "---",
                 "Import Config...",
@@ -326,8 +343,18 @@ mod tests {
             name: "Work VPN".into(),
         });
         let labels = menu_labels(&build_menu(&tray));
-        assert_eq!(labels[0], "[Work VPN]");
+        assert_eq!(labels[0], "🔓 Kill-switch: Off");
         assert_eq!(labels[1], "---");
+        assert_eq!(labels[2], "[Work VPN]");
+        assert_eq!(labels[3], "---");
+    }
+
+    #[test]
+    fn test_kill_switch_enabled_row() {
+        let mut tray = make_tray();
+        tray.kill_switch_enabled = true;
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(labels[0], "🔒 Kill-switch: On");
     }
 
     #[test]
@@ -342,7 +369,7 @@ mod tests {
             make_session("/sess/1", "/cfg/1", "Work VPN", StatusMinor::ConnConnected),
         );
         let labels = menu_labels(&build_menu(&tray));
-        assert!(labels[0].starts_with("[Work VPN:"));
+        assert!(labels[2].starts_with("[Work VPN:"));
         assert!(!labels.contains(&"[Work VPN]".into()));
     }
 

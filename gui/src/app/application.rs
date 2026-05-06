@@ -16,7 +16,8 @@ use crate::tray::{TrayAction, VpnTray};
 
 use super::actions::handle_tray_action;
 use super::config_ops::{import_config, refresh_configs};
-use super::dbus_init::{init_dbus, watch_service_restart};
+use super::dbus_init::init_dbus;
+use super::service_watcher::watch_service_restart;
 use super::signal_handlers::setup_signal_handlers;
 
 /// Command-line arguments consumed by the application
@@ -115,6 +116,10 @@ impl Application {
                     match init_dbus(&dbus, &settings, &tray).await {
                         Ok(_) => {
                             info!("D-Bus initialization complete");
+                            let ks = settings.enable_kill_switch();
+                            tray.update(move |t| {
+                                t.kill_switch_enabled = ks;
+                            });
                             initialized = true;
                             break;
                         }

@@ -65,6 +65,8 @@ assets = [
   ["../data/icons/hicolor/scalable/status/openvpn3-gui-rs-active.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
   ["../data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
   ["../data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle-error.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["../data/icons/hicolor/scalable/status/openvpn3-gui-rs-killswitch-off.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
+  ["../data/icons/hicolor/scalable/status/openvpn3-gui-rs-killswitch-on.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
   ["../data/icons/hicolor/scalable/status/openvpn3-gui-rs-loading.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
   ["../data/icons/hicolor/scalable/status/openvpn3-gui-rs-paused.svg", "usr/share/icons/hicolor/scalable/status/", "644"],
   ["../data/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg", "usr/share/icons/hicolor/scalable/mimetypes/", "644"],
