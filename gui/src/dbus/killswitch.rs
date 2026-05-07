@@ -54,6 +54,9 @@ pub trait KillSwitch {
     ) -> zbus::Result<()>;
 
     fn RemoveRules(&self) -> zbus::Result<()>;
+
+    #[zbus(property)]
+    fn version(&self) -> zbus::Result<String>;
 }
 
 async fn build_proxy(conn: &zbus::Connection) -> zbus::Result<KillSwitchProxy<'_>> {
@@ -111,6 +114,18 @@ pub async fn add_rules(interface: &str, vpn_server_ips: Vec<String>, allow_lan: 
         Err(e) => warn!("kill-switch: AddRules failed: {}", e),
     }
     true
+}
+
+/// Probe the helper's `Version` property. Returns `None` when the helper
+/// is not installed (bus name not activatable) or the property fetch
+/// fails. Informational — never blocks GUI startup.
+pub async fn probe_version() -> Option<String> {
+    let conn = system_bus().await?;
+    if !helper_present(conn).await {
+        return None;
+    }
+    let proxy = build_proxy(conn).await.ok()?;
+    proxy.version().await.ok()
 }
 
 /// Ask the helper to tear down kill-switch rules. Idempotent — safe to call

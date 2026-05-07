@@ -23,6 +23,11 @@ pub const MANAGER_VERSION_MINIMUM: u32 = 20;
 /// Recommended OpenVPN3 manager version
 pub const MANAGER_VERSION_RECOMMENDED: u32 = 21;
 
+/// Minimum supported kill-switch helper version (semver).
+/// Bumped when the GUI starts depending on a property/method introduced
+/// in a later helper release.
+pub const MIN_HELPER_VERSION: &str = "0.1.0";
+
 /// Default icon name
 pub const DEFAULT_ICON: &str = "openvpn3-gui-rs-idle";
 

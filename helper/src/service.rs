@@ -36,6 +36,14 @@ pub struct KillSwitch {
 
 #[interface(name = "net.openvpn.v3.killswitch")]
 impl KillSwitch {
+    /// Helper crate version, exposed as the `Version` D-Bus property.
+    /// GUI reads this on cold-start to log a compat warning if the
+    /// installed helper predates the GUI's minimum supported version.
+    #[zbus(property)]
+    async fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     /// Apply kill-switch nftables rules. Replace semantics — any existing
     /// rules from a previous client are torn down first.
     async fn add_rules(
