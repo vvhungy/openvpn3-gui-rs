@@ -147,3 +147,247 @@ slots — comparable to the original kill-switch implementation
 If (1) reveals priority conflicts, Sprint 22 schedules a second spike
 with a kernel-side workaround (e.g. fwmark-based instead of
 destination-based rule) before any user-facing work.
+
+# Sprint 22 / T4 — Interaction Assessment with Existing Kill-Switch
+
+Read-only deliverable. Extends the Option B recommendation (above) with the
+contract for how split-tunneling and the already-shipped kill-switch coexist.
+Gates Sprint 22 / T5 (PoCs).
+
+## D1 — Security model: full exemption (model b)
+
+Bypass CIDRs are exempt from both tunnel routing AND kill-switch firewall.
+The nft chain grows an explicit `daddr @bypass_set accept` before the
+catch-all drop. Bypass entries continue to flow even when the VPN drops.
+
+**Rationale:**
+- Consistency with existing `kill-switch-allow-lan` which is already full
+  exemption (LAN ranges allowed even with VPN down).
+- Matches the dominant use case: LAN printer / NAS / dev server should keep
+  working regardless of VPN state.
+- Single source of truth (`@bypass_set`) — both routing and firewall
+  reference the same CIDR list. Model (a) would split that into two layers
+  with different semantics, creating drift surface.
+
+**Risks accepted:** weakens kill-switch promise. Mitigated by:
+- Helper-side rejection of CIDRs that would shadow kill-switch entirely:
+  prefix length 0 (`0.0.0.0/0`, `::/0`), loopback (`127.0.0.0/8`, `::1/128`).
+- GUI-side warning text on Add CIDR dialog: *"Bypass networks are always
+  allowed, even when the VPN is disconnected."*
+- GUI-side warn (not block) for very broad CIDRs outside RFC1918.
+
+## D2 — Routing precedence: `ip rule` priority 100
+
+OpenVPN3's netcfg writes only to the `main` routing table (priority 32766);
+priority space `1..32765` is ours. Sprint 21 spike picked `100`; T4 confirms
+via priority-space analysis. Range **100–101** reserved for split-tunnel
+(one for v4, one for v6). Helper enforces — won't write outside this range.
+
+**PoC 1 must verify five failure modes:**
+
+1. **Tunnel route wins anyway.** OpenVPN3's `0.0.0.0/1` + `128.0.0.0/1` are
+   more specific than `0.0.0.0/0`, but our `ip rule` triggers a table lookup
+   before `main` is consulted. **Signal:** `mtr <bypass-CIDR>` shows tun0.
+2. **`bypass` routing table not registered.** Helper must create
+   `/etc/iproute2/rt_tables.d/openvpn3-bypass.conf` idempotently before
+   adding routes. **Signal:** `ip rule list` shows rule but
+   `ip route show table bypass` is empty.
+3. **Reverse-path filter (rp_filter).** *Most likely silent killer on Linux
+   split-tunneling.* Default `rp_filter=1` (strict) drops bypass replies
+   whose return path differs from arrival interface. Helper sets
+   `rp_filter=2` (loose) on physical bypass iface during apply, captures
+   original value, restores on remove. **Signal:** `nstat | grep -i martian`
+   rises; outbound visible in `mtr` but no reply.
+4. **Conntrack stale entries.** New rule applies to new flows only —
+   existing tun0-flows persist. Helper invokes `conntrack -D -d <cidr>`
+   after rule add. **Signal:** existing flows tun0, new flows physical.
+5. **Pre-VPN gateway becomes stale.** Roaming Wi-Fi invalidates captured
+   gateway. Out of scope for PoC 1; handled in D5.
+
+**PoC 1 pass criteria** (with kill-switch ON, bypass CIDR `8.8.8.8/32`):
+- `mtr 8.8.8.8` shows physical interface, no tun0
+- `mtr 1.1.1.1` (non-bypass) shows tun0
+- After `ip link set tun0 down`: `ping 8.8.8.8` still works (model-b proof)
+- No martian counter increase
+
+## D3 — nft bypass set: replace-all API, fail-closed transitions
+
+**Family:** `inet openvpn3_killswitch` (existing kill-switch table). New sets
+`bypass_set` (ipv4) and `bypass_set_v6` (ipv6) added, both with `flags
+interval` for CIDR matching. Chain gains `ip daddr @bypass_set accept` and
+the v6 equivalent, both before the catch-all drop.
+
+**Helper API:**
+```
+SetBypassCidrs(cidrs: Vec<String>) -> ()
+ClearBypassCidrs() -> ()
+```
+Replace-all, not delta. Single source of truth = GUI's GSettings list;
+helper is a stateless transformer.
+
+**Sync ordering** (both surfaces — routes + firewall — fail-closed during
+transition):
+
+| Op | Order | Transient state |
+|---|---|---|
+| Apply | (1) routes/rules → (2) `nft add element` | routed but firewall-blocked → no traffic |
+| Remove | (1) `nft flush set` → (2) routes torn down | routed but firewall-blocked → no traffic |
+
+**Atomicity:** nft batch is single-transaction. `ip` ops are individually
+atomic; helper rolls back partial route installs on failure before touching
+nft. Re-applying the same list is observable no-op (idempotent by design —
+flush-and-rewrite, not delta).
+
+**Drift prevention:** scoped to priority 100–101 + `bypass` table only.
+External admin rules at other priorities untouched.
+
+## D4 — Lifecycle ordering: 7 entry points, independent layers
+
+**Coupling decision:** bypass routing layer (ip rule + ip route) is gated on
+*tunnel up + bypass list non-empty*. Bypass firewall layer (nft `@bypass_set`)
+is gated on *that AND kill-switch on*. Independent layers, two apply paths.
+
+Rejected alternative: tight coupling (bypass exists only when KS on). Loses
+the "I want split-tunnel for routing reasons but not kill-switch firewall"
+use case. Cost of independence is one extra apply path; benefit is no
+surprising side-effects when KS toggles.
+
+**Lifecycle entry points:**
+
+| # | Site | Bypass action |
+|---|---|---|
+| 1 | `dbus_init.rs` cold-start | Apply KS (if on) + apply bypass (if list non-empty) |
+| 2 | `killswitch_glue::on_connected` | Same as #1 |
+| 3 | `killswitch_glue::on_paused` | Bypass follows `kill-switch-block-during-pause` (D5) |
+| 4 | `signal_handlers.rs` user disconnect | Tear down bypass + tear down KS table |
+| 5 | `notification/mod.rs` Dismiss reconnect | Same as #4 |
+| 6 | `preferences/mod.rs` KS ON/OFF toggle | KS→ON: re-apply KS + re-add bypass set. KS→OFF: remove KS table; bypass routes persist. |
+| 7 | `preferences/mod.rs` Bypass list Save (**new**) | `SetBypassCidrs(new_list)` — full replace |
+
+**State transitions** (KS × bypass — 4 cells, all defined):
+
+|  | bypass empty | bypass active |
+|---|---|---|
+| KS off | tunnel routes everything | bypass via physical; tunnel routes rest; no firewall |
+| KS on | KS firewall, tunnel routes everything | KS firewall + bypass routes + `@bypass_set` exemption |
+
+**No `bypass-during-pause` setting** in v1. Bypass-without-KS during pause
+is incoherent (KS defines the firewall context that makes bypass-exemption
+meaningful). Revisit S23+ only if user demand emerges.
+
+## D5 — Pause/Resume: re-capture gateway on every Resume
+
+Bypass inherits kill-switch's `kill-switch-block-during-pause` setting:
+- `true` → routes + nft set retained across pause; gateway re-captured on
+  Resume and routes replaced if changed (idempotent per D3).
+- `false` → both removed at Pause edge; full re-apply on Resume with fresh
+  gateway capture.
+
+**Stale-gateway hazard** (the keystone D5 issue): captured pre-VPN gateway
+can go stale across a pause via Wi-Fi roam or DHCP lease renewal. Failure
+mode is silent — packets dispatched to unreachable gateway, no log signal.
+
+**Mitigation:** every Resume invokes `SetBypassCidrs(current_list)`. Helper
+re-runs gateway capture, compares to stored value, replaces routes if
+changed. Cost: one `ip route show 0.0.0.0/0` per Resume (negligible).
+Implementation site: rising-edge-of-Connected handler in
+`status_handler/mod.rs` (same site that resets stats baseline).
+
+**Conntrack flush** belongs on every apply path (initial Connect AND
+Resume), not just initial Connect.
+
+**Notifications across pause** piggyback on existing `__killswitch_state__`
+dedup key. Single notification covers both states; text adapts:
+
+| State | Text |
+|---|---|
+| KS on, bypass empty | 🔒 Kill-switch active |
+| KS on, bypass non-empty | 🔒 Kill-switch active — N CIDRs bypassing VPN |
+| KS off, bypass non-empty | 🔀 Split-tunnel active — N CIDRs bypassing VPN |
+| KS off, bypass empty | (no notification) |
+
+**Cold-start on Paused session:** no-op for both KS and bypass. User must
+Resume to trigger apply. Matches existing KS behaviour.
+
+## D6 — UI/UX: Security tab grows "Bypass Networks" list
+
+**Layout choice:** Option 2 — two separately-labelled controls in the
+existing Security tab. Allow LAN stays as boolean checkbox; Bypass Networks
+is a new editable list below it. Rejected: unified list with type column
+(would require refactoring Allow LAN into per-CIDR list — scope creep) and
+nested sub-tab (over-engineering for v1).
+
+**Security tab structure:**
+
+```
+[✓] Enable kill-switch
+    [✓] Allow LAN traffic
+    [ ] Block during pause
+    [✓] Warn on unexpected disconnect (forced)
+
+    Bypass Networks ─────────────────────────
+    CIDRs always allowed, even when VPN drops
+    ┌─────────────────────────────────────┐
+    │ 192.168.1.0/24    home LAN          │
+    │ 10.0.0.0/8        office VPN range  │
+    │ 35.186.224.0/20   Spotify CDN       │
+    └─────────────────────────────────────┘
+    [Add CIDR…] [Remove Selected]
+```
+
+**Add CIDR modal:** CIDR field + optional comment + warning text. Inline
+validation rejects malformed input, `0.0.0.0/0`, `::/0`, and loopback;
+warns on broad CIDRs outside RFC1918.
+
+**Tray menu:** existing kill-switch state row (Sprint 20/T4) extends text
+when bypass list non-empty:
+- `🔒 Kill-switch: On (3 bypasses)` (KS on + bypass active)
+- `🔓 Kill-switch: Off (3 bypasses)` (KS off + bypass active — see open
+  cell #2 below)
+
+No per-session bypass indicator (bypass is global, not per-session). No
+status-dialog or tray-icon changes for v1.
+
+## State × Behaviour matrix (CLAUDE.md closing requirement)
+
+| Surface | bypass empty | bypass active | both-on (KS+bypass) | split-tunnel-only (KS off + bypass) |
+|---|---|---|---|---|
+| Tray icon | unchanged | unchanged | unchanged | unchanged |
+| Tray KS row | 🔒 / 🔓 with KS state | matches `bypass empty` | 🔒 KS: On (N bypasses) | 🔓 KS: Off (N bypasses) — **open cell #2** |
+| Per-session label | `Status` + 🔒 if KS applied | matches `bypass empty` | `Status` + 🔒 (no per-session bypass mark) | `Status` (no 🔒, no bypass mark) |
+| Status dialog | byte counts, idle | matches `bypass empty` — **open cell #3** | matches `bypass empty` | matches `bypass empty` |
+| Notify on Connect | 🔒 KS active (if KS on) | matches `bypass empty` | 🔒 KS active — N CIDRs | 🔀 Split-tunnel active — N CIDRs — **open cell #1** |
+| Notify on Disconnect | 🔓 KS inactive (if KS was on) | matches `bypass empty` | 🔓 KS inactive | "Split-tunnel inactive" — **open cell #1** |
+| Preferences | empty Bypass list + [Add CIDR] | N rows shown | N rows + KS on | N rows + KS off |
+
+## Sprint 23 candidate sub-tasks (open matrix cells)
+
+1. **Split-tunnel-only notification path.** Separate `__bypass_state__` (or
+   unified `__network_overlay_state__`) dedup key for the KS-off+bypass-on
+   case. Both apply ("🔀 Split-tunnel active") and remove ("Split-tunnel
+   inactive") notifications.
+2. **Tray row text for KS off + bypass on.** "🔓 Kill-switch: Off (3
+   bypasses)" mixes two concepts. Choose: second row "🔀 Split-tunnel: 3
+   CIDRs", or rephrase. Decide during S23 layout review.
+3. **Status dialog bypass visibility (optional, deferrable).** "Routes
+   bypassing VPN: 3 CIDRs" line. Low priority — Preferences is canonical.
+
+## Helper-side validation (consolidated)
+
+Reject in helper (privilege boundary):
+- Malformed CIDR (parse failure)
+- Prefix length 0 (`0.0.0.0/0`, `::/0`)
+- Loopback ranges (`127.0.0.0/8`, `::1/128`)
+- CIDRs outside priority-100–101 / `bypass`-table scope (helper writes only
+  in its reserved range)
+
+GUI-side validation mirrors helper; helper rejection is defence in depth.
+
+## T5 carry-forward
+
+`scripts/poc-split-tunnel.sh` must be amended before T5 runs:
+- Test with kill-switch ON (current script tests routing in isolation).
+- Verify all five D2 failure modes (tunnel-route override, table
+  registration, rp_filter, conntrack, stale gateway).
+- Verify model-b semantics: bypass CIDR remains reachable after tunnel
+  forced down.
