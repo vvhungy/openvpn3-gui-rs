@@ -391,3 +391,107 @@ GUI-side validation mirrors helper; helper rejection is defence in depth.
   registration, rp_filter, conntrack, stale gateway).
 - Verify model-b semantics: bypass CIDR remains reachable after tunnel
   forced down.
+
+# Sprint 22 / T5 — PoC Validation Results
+
+803-line validation suite (`scripts/poc-split-tunnel.sh`). Tested on two
+networks: iPhone Personal Hotspot and home WiFi. VPN via openvpn3-gui-rs
+with `redirect-gateway def1`.
+
+## Routing layer — VALIDATED
+
+Core T4/D2 claim confirmed on both networks:
+
+```
+$ ip route get 8.8.8.8          # bypass dest → exits via LAN
+8.8.8.8 via 172.20.10.1 dev wlp0s20f3 table 100
+
+$ ip route get 1.1.1.1          # control dest → exits via tunnel
+1.1.1.1 via 10.40.241.129 dev tun0
+```
+
+Priority 100 wins over OpenVPN3's `0.0.0.0/1` + `128.0.0.0/1` (main
+table, priority 32766). `ip rule` table lookup fires before main table
+consultation, exactly as designed.
+
+## check_rp_filter — PASS
+
+```
+rp_filter — loose (all=0, wlp0s20f3=2). Bypass-compatible.
+```
+
+Effective value = MAX(all=0, iface=2) = 2 (loose). Asymmetric routing
+works. T4/D2 prediction validated: strict mode (1) would silently drop
+bypass replies.
+
+## check_conntrack — NOT FIELD-TESTED (SKIP)
+
+Both test networks blocked outbound to 8.8.8.8 (ICMP + TCP/443). Script
+correctly SKIPs with diagnostic message instead of false-FAIL. Conntrack
+flow-trigger path exercised in code review (TCP/443 primary, ICMP
+fallback) but not under live traffic. **Sprint 23 action:** re-run on a
+network where bypass dest is reachable, or accept as unvalidated
+(KS-conntrack-flush-on-apply covers the production case).
+
+## check_mtu_pmtud — NOT FIELD-TESTED (SKIP)
+
+Same root cause as conntrack. MTU probes require working flow. Sprint 23
+production helper should still install TCP MSS clamping on bypass path as
+defence in depth, regardless of PoC validation.
+
+## check_dns — NOT CONCLUSIVE
+
+On iPhone hotspot: `dig @8.8.8.8` failed (unreachable). On home WiFi
+with `BYPASS_DEST=1.1.1.1/32`: DNS resolver still defaulted to 8.8.8.8
+(not overridden), producing a false "leak" verdict. Script should derive
+`TEST_DNS_RESOLVER` from `BYPASS_DEST` by default — recorded as known
+bug for next edit pass. Routing-layer DNS query path is correct (same
+`ip rule` governs all traffic to bypass dest, including port 53).
+
+## check_ipv6 — REAL FINDING
+
+**iPhone hotspot (v6 enabled with default route):**
+```
+FAIL: ipv6 — v6 traffic to 2001:4860:4860::8888 exits via wlp0s20f3
+      (NOT a tunnel iface). v6 leak — kill-switch v6 firewall needed.
+```
+
+**Home WiFi (v6 enabled but no default route):**
+```
+NOTE: ipv6 — enabled but no v6 default route. No v6 leak surface.
+```
+
+`redirect-gateway def1` is v4-only. When v6 connectivity exists (hotspot),
+bypassed hosts leak via LAN regardless of our v4 `ip rule`. **Validates
+T4/D2 failure mode #5 in strongest possible way.** Sprint 23 production
+code must install symmetric v6 rules (`ip -6 rule add ...`) or keep
+kill-switch v6 firewall active.
+
+## Script robustness fixes applied during T5
+
+1. **VPN detection heuristic.** Original script used `ip route show default`
+   — wrong with `redirect-gateway def1` (default route stays on LAN iface).
+   Replaced with `ip route get 1.1.1.1` checking for tunnel iface.
+
+2. **ip rule show /32 stripping.** `ip rule show` omits `/32` from v4 host
+   CIDRs, so regex matching by CIDR string silently failed, leaving stale
+   rules in place → `RTNETLINK answers: File exists` on re-install. Fixed
+   by matching on lookup table number instead.
+
+3. **Stale-capture detection.** `require_capture_fresh()` gates `cmd_test`
+   and `cmd_test_priority_sweep` — checks that captured gateway is still
+   on the captured iface's subnet. Prevents cryptic "Nexthop has invalid
+   gateway" when user switches networks between capture and test.
+
+4. **Unreachable-dest handling.** `probe_bypass_reachable()` (ICMP + TCP/443
+   fallback) gates flow-dependent checks to SKIP instead of printing
+   misleading FAIL + bogus remediation. Tested on both networks — correct
+   SKIP behaviour confirmed.
+
+## Sprint 23 readiness verdict
+
+**Proceed to implementation.** Core routing claim validated. Two checks
+(conntrack, MTU) not field-tested due to environmental reachability —
+neither blocks implementation; both are defensive measures that production
+code should include regardless. IPv6 leak finding adds one concrete
+requirement to S23 scope: symmetric v6 rules or persistent v6 firewall.
