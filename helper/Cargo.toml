@@ -23,6 +23,10 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# JSON parser for `ip -j route show default` — `ip` whitespace columns vary
+# with proto/metric/mtu presence; -j output is structurally stable.
+serde_json = "1"
+
 # ─── DEB packaging (cargo-deb) ───────────────────────────────────────────────
 [package.metadata.deb]
 maintainer = "HungVV <vvhung@yahoo.com>"

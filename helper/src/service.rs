@@ -18,7 +18,7 @@ use zbus::Connection;
 use zbus::fdo;
 use zbus::interface;
 
-use crate::{nft, watcher};
+use crate::{bypass, nft, watcher};
 
 const NFT_BIN: &str = "nft";
 const IFNAMSIZ_MAX: usize = 15; // Linux IFNAMSIZ - 1 (NUL terminator)
@@ -36,8 +36,15 @@ struct State {
     watcher: Option<JoinHandle<()>>,
     /// Canonicalized bypass CIDR list (replace-all semantics per T4 D3).
     /// Populated by `SetBypassCidrs`, cleared by `ClearBypassCidrs`.
-    /// T1 stores only — T2 will install rules.
     bypass_cidrs: Vec<String>,
+    /// T2: true between a successful `ApplyBypassRoutes` and the matching
+    /// `RemoveBypassRoutes` (or shutdown). Drives shutdown cleanup —
+    /// only tear down routing state we actually installed.
+    bypass_routes_applied: bool,
+    /// T2: (iface, original rp_filter value) captured at apply-time.
+    /// `RemoveBypassRoutes` takes this back so we can restore the iface's
+    /// rp_filter to its pre-apply value. `None` when routing not applied.
+    rp_filter_original: Option<(String, String)>,
 }
 
 #[derive(Default)]
@@ -70,7 +77,26 @@ impl KillSwitch {
             split_ips(&vpn_server_ips).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
         let v4_refs: Vec<&str> = v4.iter().map(String::as_str).collect();
         let v6_refs: Vec<&str> = v6.iter().map(String::as_str).collect();
-        let script = nft::add_rules_script(interface, &v4_refs, &v6_refs, allow_lan);
+
+        // Snapshot the bypass list outside the await window so we don't hold
+        // the std::sync::Mutex across tokio::process::Command::output().
+        let bypass_cidrs = {
+            let state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_cidrs.clone()
+        };
+        let (bypass_v4, bypass_v6) = bypass::split_by_family(&bypass_cidrs)
+            .map_err(|e| fdo::Error::Failed(format!("bypass split: {e}")))?;
+        let bypass_v4_refs: Vec<&str> = bypass_v4.iter().map(String::as_str).collect();
+        let bypass_v6_refs: Vec<&str> = bypass_v6.iter().map(String::as_str).collect();
+
+        let script = nft::add_rules_script(
+            interface,
+            &v4_refs,
+            &v6_refs,
+            allow_lan,
+            &bypass_v4_refs,
+            &bypass_v6_refs,
+        );
 
         // Replace any existing rules; ignore "no such table" on first run.
         let _ = run_nft(nft::remove_rules_script()).await;
@@ -171,12 +197,99 @@ impl KillSwitch {
         info!(removed = prior, "bypass CIDR list cleared");
         Ok(())
     }
+
+    /// Apply the routing-layer split-tunnel: priority-100 ip-rule per CIDR
+    /// (symmetric v4+v6), secondary table 100 pointing at the captured
+    /// pre-VPN gateway, rp_filter set to loose on the physical iface, and a
+    /// scoped conntrack flush per bypass CIDR. Independent of kill-switch
+    /// state per S22 D4. Replace-all semantics per D3 — any prior routing
+    /// state is torn down first. No-op success when bypass list is empty.
+    async fn apply_bypass_routes(&self) -> fdo::Result<()> {
+        let cidrs = {
+            let state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_cidrs.clone()
+        };
+        if cidrs.is_empty() {
+            // D3: clearing is via ClearBypassCidrs + RemoveBypassRoutes.
+            // Calling Apply with an empty list is a benign no-op.
+            info!("ApplyBypassRoutes: bypass list empty — no routing changes");
+            return Ok(());
+        }
+
+        // D3 replace-all: tear down any prior state first. Best-effort —
+        // a clean system returns errors we ignore inside teardown_routing.
+        bypass::teardown_routing()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("bypass teardown: {e}")))?;
+        bypass::ensure_rt_tables_entry()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("rt_tables register: {e}")))?;
+        // Re-capture at apply-time per CLAUDE.md "network-bound state has
+        // implicit TTL". Same call site handles D5 (Resume re-capture).
+        let net = bypass::capture_default_gateway()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("gateway capture: {e}")))?;
+        let original_rpf = bypass::set_rp_filter_loose(&net.iface)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("rp_filter set: {e}")))?;
+        bypass::install_rules(&cidrs)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("ip rule add: {e}")))?;
+        bypass::populate_table(&net)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("populate table: {e}")))?;
+        // conntrack flush is defence-in-depth — return value intentionally
+        // discarded (failure logged inside flush_conntrack_scoped).
+        bypass::flush_conntrack_scoped(&cidrs).await;
+
+        {
+            let mut state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_routes_applied = true;
+            state.rp_filter_original = Some((net.iface.clone(), original_rpf));
+        }
+        info!(
+            count = cidrs.len(),
+            iface = %net.iface,
+            "bypass routes applied"
+        );
+        Ok(())
+    }
+
+    /// Tear down the routing-layer split-tunnel: delete every ip-rule at our
+    /// priority (both families), flush table 100, restore rp_filter. Idempotent
+    /// — safe to call when nothing is applied. Does NOT touch nft state per
+    /// D4 (the firewall layer is the responsibility of `remove_rules`).
+    async fn remove_bypass_routes(&self) -> fdo::Result<()> {
+        let rpf = {
+            let mut state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_routes_applied = false;
+            state.rp_filter_original.take()
+        };
+        if let Some((iface, value)) = rpf {
+            // Best-effort restore — iface may have disappeared (e.g. user
+            // unplugged WiFi). Log and continue with rule/table teardown.
+            if let Err(e) = bypass::restore_rp_filter(&iface, &value).await {
+                warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
+            }
+        }
+        bypass::teardown_routing()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("bypass teardown: {e}")))?;
+        info!("bypass routes removed");
+        Ok(())
+    }
 }
 
-/// Best-effort rule cleanup, called from the SIGTERM/SIGINT handler in main.
+/// Best-effort cleanup of both firewall *and* routing state, called from
+/// the SIGTERM/SIGINT handler in main. Per D4 the watcher and explicit
+/// `remove_rules` deliberately do NOT touch routing — only shutdown clears
+/// everything (the helper is going away, no one will clean up otherwise).
 pub async fn cleanup_rules() {
     if let Err(e) = run_nft(nft::remove_rules_script()).await {
         warn!(err = ?e, "shutdown cleanup nft failed (often expected)");
+    }
+    if let Err(e) = bypass::teardown_routing().await {
+        warn!(err = ?e, "shutdown cleanup bypass routing failed");
     }
 }
 
