@@ -55,6 +55,10 @@ pub trait KillSwitch {
 
     fn RemoveRules(&self) -> zbus::Result<()>;
 
+    fn SetBypassCidrs(&self, cidrs: Vec<String>) -> zbus::Result<()>;
+
+    fn ClearBypassCidrs(&self) -> zbus::Result<()>;
+
     #[zbus(property)]
     fn version(&self) -> zbus::Result<String>;
 }
@@ -148,6 +152,70 @@ pub async fn remove_rules() {
     match proxy.RemoveRules().await {
         Ok(()) => info!("kill-switch: rules removed"),
         Err(e) => warn!("kill-switch: RemoveRules failed: {}", e),
+    }
+}
+
+/// Ask the helper to replace its bypass CIDR list with `cidrs` (replace-all
+/// semantics per S22 T4 D3). The helper canonicalises and validates each
+/// entry at the trust boundary — invalid entries cause the whole call to
+/// fail with `InvalidArgs` and the prior list is preserved.
+///
+/// Returns `false` when the helper package is not installed or the call
+/// fails; `true` when the helper accepted the list.
+//
+// Allow dead_code: T1 ships the proxy surface; first call site lands in
+// T3 (GSettings cold-start + apply) within the same sprint.
+#[allow(dead_code)]
+pub async fn set_bypass_cidrs(cidrs: Vec<String>) -> bool {
+    let Some(conn) = system_bus().await else {
+        return false;
+    };
+    if !helper_present(conn).await {
+        warn!("kill-switch: helper not installed — bypass CIDR list NOT applied");
+        return false;
+    }
+    let proxy = match build_proxy(conn).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("kill-switch: proxy build failed: {}", e);
+            return false;
+        }
+    };
+    match proxy.SetBypassCidrs(cidrs).await {
+        Ok(()) => {
+            info!("kill-switch: bypass CIDR list set");
+            true
+        }
+        Err(e) => {
+            warn!("kill-switch: SetBypassCidrs failed: {}", e);
+            false
+        }
+    }
+}
+
+/// Ask the helper to clear its bypass CIDR list. Idempotent — safe to call
+/// even if the list is already empty. No-op when the helper isn't installed.
+//
+// Allow dead_code: T1 ships the proxy surface; first call site lands in
+// T3 (GSettings cold-start + apply) within the same sprint.
+#[allow(dead_code)]
+pub async fn clear_bypass_cidrs() {
+    let Some(conn) = system_bus().await else {
+        return;
+    };
+    if !helper_present(conn).await {
+        return;
+    }
+    let proxy = match build_proxy(conn).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("kill-switch: proxy build failed: {}", e);
+            return;
+        }
+    };
+    match proxy.ClearBypassCidrs().await {
+        Ok(()) => info!("kill-switch: bypass CIDR list cleared"),
+        Err(e) => warn!("kill-switch: ClearBypassCidrs failed: {}", e),
     }
 }
 
