@@ -207,7 +207,13 @@ async fn do_reconnect_notification(
                             break;
                         }
                         "dismiss" => {
+                            // User gave up on reconnecting — tear down both
+                            // KS and bypass. Bypass gateway capture is
+                            // ephemeral, so leaving routes installed against
+                            // a possibly-stale gateway is a footgun on the
+                            // next manual connect.
                             crate::dbus::killswitch::remove_rules().await;
+                            crate::dbus::killswitch::remove_bypass_routes().await;
                             show_killswitch_inactive_notification();
                             break;
                         }

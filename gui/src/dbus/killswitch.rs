@@ -59,6 +59,10 @@ pub trait KillSwitch {
 
     fn ClearBypassCidrs(&self) -> zbus::Result<()>;
 
+    fn ApplyBypassRoutes(&self) -> zbus::Result<()>;
+
+    fn RemoveBypassRoutes(&self) -> zbus::Result<()>;
+
     #[zbus(property)]
     fn version(&self) -> zbus::Result<String>;
 }
@@ -162,10 +166,6 @@ pub async fn remove_rules() {
 ///
 /// Returns `false` when the helper package is not installed or the call
 /// fails; `true` when the helper accepted the list.
-//
-// Allow dead_code: T1 ships the proxy surface; first call site lands in
-// T3 (GSettings cold-start + apply) within the same sprint.
-#[allow(dead_code)]
 pub async fn set_bypass_cidrs(cidrs: Vec<String>) -> bool {
     let Some(conn) = system_bus().await else {
         return false;
@@ -195,10 +195,7 @@ pub async fn set_bypass_cidrs(cidrs: Vec<String>) -> bool {
 
 /// Ask the helper to clear its bypass CIDR list. Idempotent — safe to call
 /// even if the list is already empty. No-op when the helper isn't installed.
-//
-// Allow dead_code: T1 ships the proxy surface; first call site lands in
-// T3 (GSettings cold-start + apply) within the same sprint.
-#[allow(dead_code)]
+#[allow(dead_code)] // T3 ships plumbing; first call site lands in T4 (Preferences).
 pub async fn clear_bypass_cidrs() {
     let Some(conn) = system_bus().await else {
         return;
@@ -216,6 +213,62 @@ pub async fn clear_bypass_cidrs() {
     match proxy.ClearBypassCidrs().await {
         Ok(()) => info!("kill-switch: bypass CIDR list cleared"),
         Err(e) => warn!("kill-switch: ClearBypassCidrs failed: {}", e),
+    }
+}
+
+/// Ask the helper to install bypass routing (ip rules + secondary table +
+/// conntrack flush). The helper captures the pre-VPN gateway at apply-time
+/// (ephemeral, network-bound TTL). Must be preceded by `set_bypass_cidrs`
+/// so the helper has a CIDR list to route.
+///
+/// Returns `false` when the helper is absent or the call fails.
+pub async fn apply_bypass_routes() -> bool {
+    let Some(conn) = system_bus().await else {
+        return false;
+    };
+    if !helper_present(conn).await {
+        warn!("kill-switch: helper not installed — bypass routes NOT applied");
+        return false;
+    }
+    let proxy = match build_proxy(conn).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("kill-switch: proxy build failed: {}", e);
+            return false;
+        }
+    };
+    match proxy.ApplyBypassRoutes().await {
+        Ok(()) => {
+            info!("kill-switch: bypass routes applied");
+            true
+        }
+        Err(e) => {
+            warn!("kill-switch: ApplyBypassRoutes failed: {}", e);
+            false
+        }
+    }
+}
+
+/// Ask the helper to tear down bypass routing (ip rules + secondary table).
+/// Idempotent — safe to call even if no routes are installed. No-op when
+/// the helper isn't installed.
+pub async fn remove_bypass_routes() {
+    let Some(conn) = system_bus().await else {
+        return;
+    };
+    if !helper_present(conn).await {
+        return;
+    }
+    let proxy = match build_proxy(conn).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("kill-switch: proxy build failed: {}", e);
+            return;
+        }
+    };
+    match proxy.RemoveBypassRoutes().await {
+        Ok(()) => info!("kill-switch: bypass routes removed"),
+        Err(e) => warn!("kill-switch: RemoveBypassRoutes failed: {}", e),
     }
 }
 

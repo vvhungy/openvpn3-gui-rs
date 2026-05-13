@@ -172,28 +172,48 @@ pub(crate) async fn init_dbus(
         config_paths.len()
     );
 
-    // Re-apply kill-switch rules for sessions that were already connected
-    // before this GUI instance started (e.g., after a GUI restart).
+    // Re-apply bypass + kill-switch state for sessions that were already
+    // connected before this GUI instance started (e.g., after a GUI restart).
     // The helper's watcher cleaned the rules when the previous instance exited.
-    if settings.enable_kill_switch() && !connected_paths.is_empty() {
+    //
+    // ORDER MATTERS: bypass must land at the helper before `AddRules`. The
+    // helper snapshots `state.bypass_cidrs` inside `AddRules` and bakes it
+    // into the nft script (bypass accept rules + MSS clamp). Two independent
+    // spawns would race — if KS won, the firewall would drop bypassed
+    // traffic until the next manual reconnect.
+    let has_connected = !connected_paths.is_empty();
+    let bypass_cidrs = settings.bypass_cidrs();
+    let ks_enabled = settings.enable_kill_switch();
+    if has_connected && (ks_enabled || !bypass_cidrs.is_empty()) {
         let allow_lan = settings.kill_switch_allow_lan();
         let dbus_clone = dbus.clone();
         let tray_clone = tray.clone();
         glib::spawn_future_local(async move {
-            for path in connected_paths {
-                match super::status_handler::apply_kill_switch(&dbus_clone, &path, allow_lan).await
-                {
-                    Ok(true) => {
-                        let p = path.clone();
-                        tray_clone.update(move |t| {
-                            if let Some(s) = t.sessions.get_mut(&p) {
-                                s.kill_switch_active = true;
-                            }
-                        });
-                        crate::dialogs::show_killswitch_active_notification();
+            if !bypass_cidrs.is_empty()
+                && crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await
+            {
+                crate::dbus::killswitch::apply_bypass_routes().await;
+            }
+
+            if ks_enabled {
+                for path in connected_paths {
+                    match super::status_handler::apply_kill_switch(&dbus_clone, &path, allow_lan)
+                        .await
+                    {
+                        Ok(true) => {
+                            let p = path.clone();
+                            tray_clone.update(move |t| {
+                                if let Some(s) = t.sessions.get_mut(&p) {
+                                    s.kill_switch_active = true;
+                                }
+                            });
+                            crate::dialogs::show_killswitch_active_notification();
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            warn!("kill-switch: startup re-apply failed for {}: {}", path, e)
+                        }
                     }
-                    Ok(false) => {}
-                    Err(e) => warn!("kill-switch: startup re-apply failed for {}: {}", path, e),
                 }
             }
         });

@@ -55,29 +55,44 @@ pub(super) fn on_connected(
     tray: &ksni::blocking::Handle<VpnTray>,
 ) {
     let settings = crate::settings::Settings::new();
-    if !settings.enable_kill_switch() {
-        return;
-    }
-    let allow_lan = settings.kill_switch_allow_lan();
     let path = session_path.to_string();
     let conn = conn.clone();
     let tray = tray.clone();
+
+    // Bypass routing is independent of kill-switch (D4). Apply whenever
+    // the user has configured bypass CIDRs — no KS gate.
+    let bypass_cidrs = settings.bypass_cidrs();
+    let ks_enabled = settings.enable_kill_switch();
+    let allow_lan = settings.kill_switch_allow_lan();
+
     glib::spawn_future_local(async move {
-        match apply_kill_switch(&conn, &path, allow_lan).await {
-            Ok(true) => {
-                let p = path.clone();
-                tray.update(move |t| {
-                    if let Some(s) = t.sessions.get_mut(&p) {
-                        s.kill_switch_active = true;
-                    }
-                });
-                crate::dialogs::show_killswitch_active_notification();
+        // Push bypass CIDRs and install routing (replaces any prior state).
+        // Gate ApplyBypassRoutes on SetBypassCidrs success — if validation
+        // rejects the list, the helper retains its prior state and applying
+        // would install routes for the wrong CIDRs.
+        if !bypass_cidrs.is_empty() && crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await
+        {
+            crate::dbus::killswitch::apply_bypass_routes().await;
+        }
+
+        // Kill-switch firewall — gated by user preference.
+        if ks_enabled {
+            match apply_kill_switch(&conn, &path, allow_lan).await {
+                Ok(true) => {
+                    let p = path.clone();
+                    tray.update(move |t| {
+                        if let Some(s) = t.sessions.get_mut(&p) {
+                            s.kill_switch_active = true;
+                        }
+                    });
+                    crate::dialogs::show_killswitch_active_notification();
+                }
+                Ok(false) if !HELPER_MISSING_NOTIFIED.swap(true, Ordering::Relaxed) => {
+                    crate::dialogs::show_helper_missing_notification();
+                }
+                Err(e) => warn!("kill-switch: apply failed: {}", e),
+                _ => {}
             }
-            Ok(false) if !HELPER_MISSING_NOTIFIED.swap(true, Ordering::Relaxed) => {
-                crate::dialogs::show_helper_missing_notification();
-            }
-            Err(e) => warn!("kill-switch: apply failed: {}", e),
-            _ => {}
         }
     });
 }

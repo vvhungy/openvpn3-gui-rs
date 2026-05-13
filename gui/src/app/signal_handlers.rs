@@ -149,6 +149,7 @@ pub(crate) async fn setup_signal_handlers(
                             let tray_clear = tray_for_session.clone();
                             glib::spawn_future_local(async move {
                                 crate::dbus::killswitch::remove_rules().await;
+                                crate::dbus::killswitch::remove_bypass_routes().await;
                                 tray_clear.update(|t| {
                                     for s in t.sessions.values_mut() {
                                         s.kill_switch_active = false;
