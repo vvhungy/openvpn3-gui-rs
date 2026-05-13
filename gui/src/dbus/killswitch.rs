@@ -59,6 +59,8 @@ pub trait KillSwitch {
 
     fn ClearBypassCidrs(&self) -> zbus::Result<()>;
 
+    fn ValidateBypassCidrs(&self, cidrs: Vec<String>) -> zbus::Result<Vec<String>>;
+
     fn ApplyBypassRoutes(&self) -> zbus::Result<()>;
 
     fn RemoveBypassRoutes(&self) -> zbus::Result<()>;
@@ -191,6 +193,46 @@ pub async fn set_bypass_cidrs(cidrs: Vec<String>) -> bool {
             false
         }
     }
+}
+
+/// Ask the helper to dry-run validate `cidrs` — same rules `SetBypassCidrs`
+/// applies (loopback / multicast / link-local / unspecified / `/0`
+/// rejection, host-bit masking, dedup after canonicalization, max-count
+/// ceiling) but with NO state mutation. The helper's canonical form (or
+/// helper-side rejection message) is what the GUI shows the user before
+/// they commit the list via Save.
+///
+/// Returns `Ok(canonical_list)` on accept, `Err(diagnostic)` on reject.
+/// When the helper package is not installed, returns
+/// `Err("helper not installed")` — the GUI's "Helper not installed" hint
+/// label is the user-facing surface for that state; this string is just
+/// a fallback so live validation does not silently accept invalid input
+/// when helper validation cannot run.
+pub async fn validate_bypass_cidrs(cidrs: Vec<String>) -> Result<Vec<String>, String> {
+    let Some(conn) = system_bus().await else {
+        return Err("system bus unavailable".to_string());
+    };
+    if !helper_present(conn).await {
+        return Err("helper not installed".to_string());
+    }
+    let proxy = build_proxy(conn)
+        .await
+        .map_err(|e| format!("proxy build failed: {e}"))?;
+    proxy
+        .ValidateBypassCidrs(cidrs)
+        .await
+        .map_err(|e| extract_diagnostic(&e))
+}
+
+/// Strip zbus's "InvalidArgs: " prefix from helper's diagnostic message
+/// so the UI shows the same text the helper logs would show on a real
+/// `SetBypassCidrs` reject. Falls back to the raw zbus Display on any
+/// other error kind.
+fn extract_diagnostic(err: &zbus::Error) -> String {
+    let raw = err.to_string();
+    raw.strip_prefix("InvalidArgs: ")
+        .map(str::to_string)
+        .unwrap_or(raw)
 }
 
 /// Ask the helper to clear its bypass CIDR list. Idempotent — safe to call

@@ -198,6 +198,15 @@ impl KillSwitch {
         Ok(())
     }
 
+    /// Dry-run validation — applies the same canonicalization and rejection
+    /// rules as `SetBypassCidrs` but does NOT mutate state. Returns the
+    /// canonical list on success (host bits masked, duplicates removed) so
+    /// the GUI can show the user what would be stored, or `InvalidArgs`
+    /// carrying the same diagnostic message `SetBypassCidrs` would emit.
+    async fn validate_bypass_cidrs(&self, cidrs: Vec<String>) -> fdo::Result<Vec<String>> {
+        validate_bypass_cidrs(&cidrs).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))
+    }
+
     /// Apply the routing-layer split-tunnel: priority-100 ip-rule per CIDR
     /// (symmetric v4+v6), secondary table 100 pointing at the captured
     /// pre-VPN gateway, rp_filter set to loose on the physical iface, and a

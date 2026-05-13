@@ -3,6 +3,7 @@
 //! No testable pure surface — GTK widget builder.
 
 mod general_tab;
+mod routing_tab;
 mod security_tab;
 
 use gtk4::prelude::*;
@@ -36,12 +37,15 @@ pub fn show_preferences_dialog(
 
     let (general, gw) = general_tab::build(settings, &configs);
     let (security, sw, was_killswitch_on) = security_tab::build(settings, &window);
+    let (routing, rw) = routing_tab::build(settings);
 
     let notebook = Notebook::builder().hexpand(true).vexpand(true).build();
     let general_tab_label = Label::new(Some("General"));
     let security_tab_label = Label::new(Some("Security"));
+    let routing_tab_label = Label::new(Some("Routing"));
     notebook.append_page(&general, Some(&general_tab_label));
     notebook.append_page(&security, Some(&security_tab_label));
+    notebook.append_page(&routing, Some(&routing_tab_label));
     outer.append(&notebook);
 
     let settings_clone = settings.clone();
@@ -144,6 +148,30 @@ pub fn show_preferences_dialog(
                         crate::dialogs::show_killswitch_inactive_notification();
                     });
                 }
+
+                // Bypass CIDR list: persist to GSettings, and if any session
+                // is currently connected push the new list to the helper so
+                // the change takes effect immediately (cold-start re-apply in
+                // dbus_init covers the no-session-connected case on next
+                // connect). Independent of kill-switch state per D4.
+                let new_cidrs = rw.entries.borrow().clone();
+                if new_cidrs != rw.initial {
+                    settings_clone.set_bypass_cidrs(&new_cidrs);
+                    let any_connected = tray_for_save
+                        .update(|t| t.sessions.values().any(|s| s.status.is_connected()))
+                        .unwrap_or(false);
+                    if any_connected {
+                        glib::spawn_future_local(async move {
+                            if new_cidrs.is_empty() {
+                                crate::dbus::killswitch::remove_bypass_routes().await;
+                                crate::dbus::killswitch::clear_bypass_cidrs().await;
+                            } else if crate::dbus::killswitch::set_bypass_cidrs(new_cidrs).await {
+                                crate::dbus::killswitch::apply_bypass_routes().await;
+                            }
+                        });
+                    }
+                }
+
                 window.close();
             }
         },
