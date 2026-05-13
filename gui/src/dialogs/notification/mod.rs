@@ -117,12 +117,13 @@ pub fn show_reconnect_notification(
     config_path: String,
     config_name: String,
     action_tx: crate::tray::ActionSender,
+    tray: ksni::blocking::Handle<crate::tray::VpnTray>,
 ) {
     if !Settings::new().warn_on_unexpected_disconnect() {
         return;
     }
     glib::spawn_future_local(async move {
-        if let Err(e) = do_reconnect_notification(config_path, config_name, action_tx).await {
+        if let Err(e) = do_reconnect_notification(config_path, config_name, action_tx, tray).await {
             warn!("Reconnect notification error: {}", e);
         }
     });
@@ -132,6 +133,7 @@ async fn do_reconnect_notification(
     config_path: String,
     config_name: String,
     action_tx: crate::tray::ActionSender,
+    tray: ksni::blocking::Handle<crate::tray::VpnTray>,
 ) -> anyhow::Result<()> {
     let conn = zbus::Connection::session().await?;
 
@@ -214,6 +216,12 @@ async fn do_reconnect_notification(
                             // next manual connect.
                             crate::dbus::killswitch::remove_rules().await;
                             crate::dbus::killswitch::remove_bypass_routes().await;
+                            tray.update(|t| {
+                                for s in t.sessions.values_mut() {
+                                    s.kill_switch_active = false;
+                                }
+                                t.bypass_state = crate::tray::BypassState::Off;
+                            });
                             show_killswitch_inactive_notification();
                             break;
                         }
