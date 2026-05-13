@@ -161,12 +161,30 @@ pub fn show_preferences_dialog(
                         .update(|t| t.sessions.values().any(|s| s.status.is_connected()))
                         .unwrap_or(false);
                     if any_connected {
+                        let tray_for_bypass = tray_for_save.clone();
                         glib::spawn_future_local(async move {
                             if new_cidrs.is_empty() {
                                 crate::dbus::killswitch::remove_bypass_routes().await;
                                 crate::dbus::killswitch::clear_bypass_cidrs().await;
-                            } else if crate::dbus::killswitch::set_bypass_cidrs(new_cidrs).await {
-                                crate::dbus::killswitch::apply_bypass_routes().await;
+                                tray_for_bypass
+                                    .update(|t| t.bypass_state = crate::tray::BypassState::Off);
+                            } else {
+                                let count = new_cidrs.len();
+                                let set_ok =
+                                    crate::dbus::killswitch::set_bypass_cidrs(new_cidrs).await;
+                                let apply_ok =
+                                    set_ok && crate::dbus::killswitch::apply_bypass_routes().await;
+                                if apply_ok {
+                                    tray_for_bypass.update(move |t| {
+                                        t.bypass_state = crate::tray::BypassState::Active(count)
+                                    });
+                                    crate::dialogs::show_bypass_active_notification(count);
+                                } else {
+                                    tray_for_bypass.update(|t| {
+                                        t.bypass_state = crate::tray::BypassState::Failed
+                                    });
+                                    crate::dialogs::show_bypass_failed_notification();
+                                }
                             }
                         });
                     }

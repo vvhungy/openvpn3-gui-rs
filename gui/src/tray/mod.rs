@@ -5,4 +5,4 @@ mod menu;
 mod pixmaps;
 mod shared_state;
 
-pub use indicator::{ActionSender, ConfigInfo, SessionInfo, TrayAction, VpnTray};
+pub use indicator::{ActionSender, BypassState, ConfigInfo, SessionInfo, TrayAction, VpnTray};

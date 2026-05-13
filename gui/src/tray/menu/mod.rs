@@ -6,7 +6,7 @@
 use ksni::MenuItem;
 use ksni::menu::{StandardItem, SubMenu};
 
-use super::indicator::{TrayAction, VpnTray};
+use super::indicator::{BypassState, TrayAction, VpnTray};
 
 mod submenus;
 
@@ -29,6 +29,22 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
         }
         .into(),
     );
+
+    let bypass_label = match &tray.bypass_state {
+        BypassState::Off => "🌐 Split tunnel: Off".to_string(),
+        BypassState::Active(1) => "🌐 Split tunnel: 1 network".to_string(),
+        BypassState::Active(n) => format!("🌐 Split tunnel: {} networks", n),
+        BypassState::Failed => "⚠️ Split tunnel: Apply failed".to_string(),
+    };
+    items.push(
+        StandardItem {
+            label: bypass_label,
+            enabled: false,
+            ..Default::default()
+        }
+        .into(),
+    );
+
     items.push(MenuItem::Separator);
 
     if tray.configs.is_empty() && tray.sessions.is_empty() {
@@ -200,6 +216,7 @@ mod tests {
             labels,
             [
                 "🔓 Kill-switch: Off",
+                "🌐 Split tunnel: Off",
                 "---",
                 "No profiles imported",
                 "---",
@@ -233,9 +250,10 @@ mod tests {
         });
         let labels = menu_labels(&build_menu(&tray));
         assert_eq!(labels[0], "🔓 Kill-switch: Off");
-        assert_eq!(labels[1], "---");
-        assert_eq!(labels[2], "[Work VPN]");
-        assert_eq!(labels[3], "---");
+        assert_eq!(labels[1], "🌐 Split tunnel: Off");
+        assert_eq!(labels[2], "---");
+        assert_eq!(labels[3], "[Work VPN]");
+        assert_eq!(labels[4], "---");
     }
 
     #[test]
@@ -258,7 +276,38 @@ mod tests {
             make_session("/sess/1", "/cfg/1", "Work VPN", StatusMinor::ConnConnected),
         );
         let labels = menu_labels(&build_menu(&tray));
-        assert!(labels[2].starts_with("[Work VPN:"));
+        assert!(labels[3].starts_with("[Work VPN:"));
         assert!(!labels.contains(&"[Work VPN]".into()));
+    }
+
+    #[test]
+    fn test_bypass_row_off_when_default() {
+        let tray = make_tray();
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(labels[1], "🌐 Split tunnel: Off");
+    }
+
+    #[test]
+    fn test_bypass_row_singular_when_one() {
+        let mut tray = make_tray();
+        tray.bypass_state = BypassState::Active(1);
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(labels[1], "🌐 Split tunnel: 1 network");
+    }
+
+    #[test]
+    fn test_bypass_row_plural_when_many() {
+        let mut tray = make_tray();
+        tray.bypass_state = BypassState::Active(3);
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(labels[1], "🌐 Split tunnel: 3 networks");
+    }
+
+    #[test]
+    fn test_bypass_row_failed_state() {
+        let mut tray = make_tray();
+        tray.bypass_state = BypassState::Failed;
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(labels[1], "⚠️ Split tunnel: Apply failed");
     }
 }

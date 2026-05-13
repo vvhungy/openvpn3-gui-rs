@@ -65,14 +65,24 @@ pub(super) fn on_connected(
     let ks_enabled = settings.enable_kill_switch();
     let allow_lan = settings.kill_switch_allow_lan();
 
+    let tray_for_bypass = tray.clone();
     glib::spawn_future_local(async move {
         // Push bypass CIDRs and install routing (replaces any prior state).
         // Gate ApplyBypassRoutes on SetBypassCidrs success — if validation
         // rejects the list, the helper retains its prior state and applying
         // would install routes for the wrong CIDRs.
-        if !bypass_cidrs.is_empty() && crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await
-        {
-            crate::dbus::killswitch::apply_bypass_routes().await;
+        if !bypass_cidrs.is_empty() {
+            let count = bypass_cidrs.len();
+            let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
+            let apply_ok = set_ok && crate::dbus::killswitch::apply_bypass_routes().await;
+            if apply_ok {
+                tray_for_bypass
+                    .update(move |t| t.bypass_state = crate::tray::BypassState::Active(count));
+                crate::dialogs::show_bypass_active_notification(count);
+            } else {
+                tray_for_bypass.update(|t| t.bypass_state = crate::tray::BypassState::Failed);
+                crate::dialogs::show_bypass_failed_notification();
+            }
         }
 
         // Kill-switch firewall — gated by user preference.
