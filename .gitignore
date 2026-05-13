@@ -9,6 +9,7 @@ data/gschemas.compiled
 .env
 .idea/
 .vscode/
+.lean-ctx/
 *.swp
 *~
 

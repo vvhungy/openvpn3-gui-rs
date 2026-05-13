@@ -14,10 +14,11 @@ A system tray GUI for [OpenVPN3 Linux](https://github.com/OpenVPN/openvpn3-linux
 - Auto-reconnect prompt when a session drops unexpectedly
 - Connection-stall detection — flags an idle tunnel in the tray menu and icon when traffic stops flowing
 - Kill-switch — block all non-VPN traffic via nftables when a tunnel drops (requires the `openvpn3-killswitch-helper` package); always-visible state row (🔒/🔓) in the tray menu; lock indicator (🔒) in the session menu label when active; notifications on rule apply (persistent) and removal; notification and Preferences hint when the helper is not installed; quit confirmation warns before removing rules
+- Split tunneling — exempt specific networks from the VPN tunnel so they route over the local connection (requires the `openvpn3-killswitch-helper` package); configure bypass CIDRs in the Preferences Routing tab; always-visible state row (🌐) in the tray menu showing active count or apply-failure; notifications on route apply and failure; symmetric IPv4/IPv6 routing with MSS clamping
 - First-run help notification when the OpenVPN3 backend cannot be reached
 - Automatic recovery when the OpenVPN3 service restarts
 - Tabbed session log viewer — live tail of OpenVPN3 backend log messages, one tab per profile
-- Tabbed Preferences dialog (General / Security): startup behaviour, notifications, menu update interval, connection timeout, stall threshold, kill-switch with nested warn-on-disconnect, credential management
+- Tabbed Preferences dialog (General / Security / Routing): startup behaviour, notifications, menu update interval, connection timeout, stall threshold, kill-switch with nested warn-on-disconnect, split-tunneling bypass CIDR editor, credential management
 - DEB, RPM, and AUR packaging (separate `openvpn3-killswitch-helper` package for the privileged firewall helper)
 
 ## Requirements
@@ -85,9 +86,10 @@ menu.
 **Top-level menu:**
 
 - **🔒/🔓 Kill-switch: On/Off** — always-visible state row (insensitive; toggle in Preferences)
+- **🌐 Split tunnel: Off / N networks / Apply failed** — always-visible state row (insensitive; configure in Preferences → Routing)
 - **View Logs** — tabbed log viewer, one tab per VPN profile (always visible)
 - **Import Config...** — pick a `.ovpn` file to import into OpenVPN3
-- **Preferences...** — tabbed dialog (General: startup, notifications, intervals, stall detection; Security: kill-switch, warn-on-disconnect, credentials)
+- **Preferences...** — tabbed dialog (General: startup, notifications, intervals, stall detection; Security: kill-switch, warn-on-disconnect, credentials; Routing: split-tunneling bypass CIDR editor)
 - **About** / **Quit**
 
 ## Command-line options

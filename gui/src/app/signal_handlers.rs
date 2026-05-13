@@ -149,10 +149,12 @@ pub(crate) async fn setup_signal_handlers(
                             let tray_clear = tray_for_session.clone();
                             glib::spawn_future_local(async move {
                                 crate::dbus::killswitch::remove_rules().await;
+                                crate::dbus::killswitch::remove_bypass_routes().await;
                                 tray_clear.update(|t| {
                                     for s in t.sessions.values_mut() {
                                         s.kill_switch_active = false;
                                     }
+                                    t.bypass_state = crate::tray::BypassState::Off;
                                 });
                                 crate::dialogs::show_killswitch_inactive_notification();
                             });
@@ -170,6 +172,7 @@ pub(crate) async fn setup_signal_handlers(
                                 config_path,
                                 config_name,
                                 action_tx_for_session.clone(),
+                                tray_for_session.clone(),
                             );
                         }
                     }

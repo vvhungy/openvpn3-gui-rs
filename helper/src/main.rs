@@ -1,3 +1,4 @@
+mod bypass;
 mod nft;
 mod service;
 mod watcher;

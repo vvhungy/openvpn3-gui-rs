@@ -127,5 +127,27 @@
         allowing normal internet access while paused.
       </description>
     </key>
+
+    <key name="bypass-cidrs" type="as">
+      <default>[]</default>
+      <summary>CIDR ranges to route outside the VPN tunnel</summary>
+      <description>
+        List of IP CIDRs (e.g. '10.0.0.0/8', '192.168.1.0/24') whose
+        traffic is routed via the physical network interface instead of
+        the VPN tunnel. Each entry is validated and canonicalised by the
+        privileged helper. Loopback, multicast, link-local, and /0
+        prefixes are rejected.
+      </description>
+    </key>
+
+    <key name="bypass-cidrs-max-count" type="i">
+      <default>32</default>
+      <summary>Maximum number of bypass CIDR entries</summary>
+      <description>
+        User-facing limit on the number of CIDR entries in the bypass
+        list. The helper enforces a hard ceiling (128); this setting
+        clamps the UI input below that ceiling. Range: 1–128.
+      </description>
+    </key>
   </schema>
 </schemalist>

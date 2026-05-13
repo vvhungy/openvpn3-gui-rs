@@ -9,6 +9,21 @@ use crate::dbus::types::SessionStatus;
 use crate::status::{get_status_description, get_status_icon};
 use tracing::error;
 
+/// Bypass (split-tunnel) state surfaced in the tray indicator row.
+///
+/// Helper API is binary today — `Off` covers "no list configured" and "list
+/// cleared", `Active(n)` reports the count installed, `Failed` covers any
+/// apply-time failure (helper missing, validation reject, gateway capture
+/// fail, kernel rule install error). Per-route partial failure (e.g.
+/// "4 active, 1 failed") is deferred to a future sprint that extends the
+/// helper API to return per-CIDR outcomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BypassState {
+    Off,
+    Active(usize),
+    Failed,
+}
+
 /// Action to dispatch from tray menu clicks back to the GTK app
 #[derive(Debug, Clone)]
 pub enum TrayAction {
@@ -121,6 +136,9 @@ pub struct VpnTray {
     pixmaps: HashMap<&'static str, Vec<ksni::Icon>>,
     /// Whether kill-switch is enabled in settings (shown in menu row)
     pub kill_switch_enabled: bool,
+    /// Bypass (split-tunnel) state — system-wide, not per-session.
+    /// Reflects the *install* state of routes, not the configured-list state.
+    pub bypass_state: BypassState,
 }
 
 impl VpnTray {
@@ -131,6 +149,7 @@ impl VpnTray {
             pixmaps: super::pixmaps::build_pixmap_cache(),
             action_tx,
             kill_switch_enabled: false,
+            bypass_state: BypassState::Off,
         }
     }
 

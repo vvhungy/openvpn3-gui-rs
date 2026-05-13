@@ -18,15 +18,33 @@ use zbus::Connection;
 use zbus::fdo;
 use zbus::interface;
 
-use crate::{nft, watcher};
+use crate::{bypass, nft, watcher};
 
 const NFT_BIN: &str = "nft";
 const IFNAMSIZ_MAX: usize = 15; // Linux IFNAMSIZ - 1 (NUL terminator)
+
+/// Helper-enforced absolute ceiling on bypass CIDR list size.
+/// The GUI-side GSettings limit (default 32, scheduled for Sprint 23 T3)
+/// caps user-visible list length in the Preferences editor; this constant
+/// is defence-in-depth at the trust boundary. Kept well below the kernel
+/// `ip rule` O(n)-per-packet cost knee.
+const MAX_BYPASS_CIDRS: usize = 128;
 
 #[derive(Default)]
 struct State {
     sender: Option<String>,
     watcher: Option<JoinHandle<()>>,
+    /// Canonicalized bypass CIDR list (replace-all semantics per T4 D3).
+    /// Populated by `SetBypassCidrs`, cleared by `ClearBypassCidrs`.
+    bypass_cidrs: Vec<String>,
+    /// T2: true between a successful `ApplyBypassRoutes` and the matching
+    /// `RemoveBypassRoutes` (or shutdown). Drives shutdown cleanup —
+    /// only tear down routing state we actually installed.
+    bypass_routes_applied: bool,
+    /// T2: (iface, original rp_filter value) captured at apply-time.
+    /// `RemoveBypassRoutes` takes this back so we can restore the iface's
+    /// rp_filter to its pre-apply value. `None` when routing not applied.
+    rp_filter_original: Option<(String, String)>,
 }
 
 #[derive(Default)]
@@ -36,6 +54,14 @@ pub struct KillSwitch {
 
 #[interface(name = "net.openvpn.v3.killswitch")]
 impl KillSwitch {
+    /// Helper crate version, exposed as the `Version` D-Bus property.
+    /// GUI reads this on cold-start to log a compat warning if the
+    /// installed helper predates the GUI's minimum supported version.
+    #[zbus(property)]
+    async fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     /// Apply kill-switch nftables rules. Replace semantics — any existing
     /// rules from a previous client are torn down first.
     async fn add_rules(
@@ -51,7 +77,26 @@ impl KillSwitch {
             split_ips(&vpn_server_ips).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
         let v4_refs: Vec<&str> = v4.iter().map(String::as_str).collect();
         let v6_refs: Vec<&str> = v6.iter().map(String::as_str).collect();
-        let script = nft::add_rules_script(interface, &v4_refs, &v6_refs, allow_lan);
+
+        // Snapshot the bypass list outside the await window so we don't hold
+        // the std::sync::Mutex across tokio::process::Command::output().
+        let bypass_cidrs = {
+            let state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_cidrs.clone()
+        };
+        let (bypass_v4, bypass_v6) = bypass::split_by_family(&bypass_cidrs)
+            .map_err(|e| fdo::Error::Failed(format!("bypass split: {e}")))?;
+        let bypass_v4_refs: Vec<&str> = bypass_v4.iter().map(String::as_str).collect();
+        let bypass_v6_refs: Vec<&str> = bypass_v6.iter().map(String::as_str).collect();
+
+        let script = nft::add_rules_script(
+            interface,
+            &v4_refs,
+            &v6_refs,
+            allow_lan,
+            &bypass_v4_refs,
+            &bypass_v6_refs,
+        );
 
         // Replace any existing rules; ignore "no such table" on first run.
         let _ = run_nft(nft::remove_rules_script()).await;
@@ -120,12 +165,140 @@ impl KillSwitch {
         info!("kill-switch rules removed");
         Ok(())
     }
+
+    /// Set the bypass CIDR list. Replace-all semantics per T4 D3.
+    /// Validates input at the trust boundary; rejects loopback, multicast,
+    /// link-local, unspecified, and `/0` prefixes. Stores only — actual rule
+    /// installation lands in Sprint 23 T2.
+    async fn set_bypass_cidrs(
+        &self,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        cidrs: Vec<String>,
+    ) -> fdo::Result<()> {
+        let canonical =
+            validate_bypass_cidrs(&cidrs).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
+        let count = canonical.len();
+        {
+            let mut state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_cidrs = canonical;
+        }
+        info!(count, caller = ?hdr.sender(), "bypass CIDR list set");
+        Ok(())
+    }
+
+    /// Clear the bypass CIDR list. Idempotent. Fail-closed cleanup per T4 D3.
+    async fn clear_bypass_cidrs(&self) -> fdo::Result<()> {
+        let prior = {
+            let mut state = self.state.lock().expect("state mutex poisoned");
+            let prior = state.bypass_cidrs.len();
+            state.bypass_cidrs.clear();
+            prior
+        };
+        info!(removed = prior, "bypass CIDR list cleared");
+        Ok(())
+    }
+
+    /// Dry-run validation — applies the same canonicalization and rejection
+    /// rules as `SetBypassCidrs` but does NOT mutate state. Returns the
+    /// canonical list on success (host bits masked, duplicates removed) so
+    /// the GUI can show the user what would be stored, or `InvalidArgs`
+    /// carrying the same diagnostic message `SetBypassCidrs` would emit.
+    async fn validate_bypass_cidrs(&self, cidrs: Vec<String>) -> fdo::Result<Vec<String>> {
+        validate_bypass_cidrs(&cidrs).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))
+    }
+
+    /// Apply the routing-layer split-tunnel: priority-100 ip-rule per CIDR
+    /// (symmetric v4+v6), secondary table 100 pointing at the captured
+    /// pre-VPN gateway, rp_filter set to loose on the physical iface, and a
+    /// scoped conntrack flush per bypass CIDR. Independent of kill-switch
+    /// state per S22 D4. Replace-all semantics per D3 — any prior routing
+    /// state is torn down first. No-op success when bypass list is empty.
+    async fn apply_bypass_routes(&self) -> fdo::Result<()> {
+        let cidrs = {
+            let state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_cidrs.clone()
+        };
+        if cidrs.is_empty() {
+            // D3: clearing is via ClearBypassCidrs + RemoveBypassRoutes.
+            // Calling Apply with an empty list is a benign no-op.
+            info!("ApplyBypassRoutes: bypass list empty — no routing changes");
+            return Ok(());
+        }
+
+        // D3 replace-all: tear down any prior state first. Best-effort —
+        // a clean system returns errors we ignore inside teardown_routing.
+        bypass::teardown_routing()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("bypass teardown: {e}")))?;
+        bypass::ensure_rt_tables_entry()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("rt_tables register: {e}")))?;
+        // Re-capture at apply-time per CLAUDE.md "network-bound state has
+        // implicit TTL". Same call site handles D5 (Resume re-capture).
+        let net = bypass::capture_default_gateway()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("gateway capture: {e}")))?;
+        let original_rpf = bypass::set_rp_filter_loose(&net.iface)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("rp_filter set: {e}")))?;
+        bypass::install_rules(&cidrs)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("ip rule add: {e}")))?;
+        bypass::populate_table(&net)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("populate table: {e}")))?;
+        // conntrack flush is defence-in-depth — return value intentionally
+        // discarded (failure logged inside flush_conntrack_scoped).
+        bypass::flush_conntrack_scoped(&cidrs).await;
+
+        {
+            let mut state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_routes_applied = true;
+            state.rp_filter_original = Some((net.iface.clone(), original_rpf));
+        }
+        info!(
+            count = cidrs.len(),
+            iface = %net.iface,
+            "bypass routes applied"
+        );
+        Ok(())
+    }
+
+    /// Tear down the routing-layer split-tunnel: delete every ip-rule at our
+    /// priority (both families), flush table 100, restore rp_filter. Idempotent
+    /// — safe to call when nothing is applied. Does NOT touch nft state per
+    /// D4 (the firewall layer is the responsibility of `remove_rules`).
+    async fn remove_bypass_routes(&self) -> fdo::Result<()> {
+        let rpf = {
+            let mut state = self.state.lock().expect("state mutex poisoned");
+            state.bypass_routes_applied = false;
+            state.rp_filter_original.take()
+        };
+        if let Some((iface, value)) = rpf {
+            // Best-effort restore — iface may have disappeared (e.g. user
+            // unplugged WiFi). Log and continue with rule/table teardown.
+            if let Err(e) = bypass::restore_rp_filter(&iface, &value).await {
+                warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
+            }
+        }
+        bypass::teardown_routing()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("bypass teardown: {e}")))?;
+        info!("bypass routes removed");
+        Ok(())
+    }
 }
 
-/// Best-effort rule cleanup, called from the SIGTERM/SIGINT handler in main.
+/// Best-effort cleanup of both firewall *and* routing state, called from
+/// the SIGTERM/SIGINT handler in main. Per D4 the watcher and explicit
+/// `remove_rules` deliberately do NOT touch routing — only shutdown clears
+/// everything (the helper is going away, no one will clean up otherwise).
 pub async fn cleanup_rules() {
     if let Err(e) = run_nft(nft::remove_rules_script()).await {
         warn!(err = ?e, "shutdown cleanup nft failed (often expected)");
+    }
+    if let Err(e) = bypass::teardown_routing().await {
+        warn!(err = ?e, "shutdown cleanup bypass routing failed");
     }
 }
 
@@ -185,6 +358,96 @@ fn split_ips(ips: &[String]) -> Result<(Vec<String>, Vec<String>)> {
         }
     }
     Ok((v4, v6))
+}
+
+/// Parse and validate a bypass CIDR list at the D-Bus trust boundary.
+/// Returns canonicalized strings (host bits masked off) ready for storage.
+///
+/// Rejects: list size > [`MAX_BYPASS_CIDRS`], missing `/` prefix, invalid
+/// address, prefix out of range, prefix `/0` (bypass everything is not a
+/// meaningful rule), loopback, multicast, link-local (v4 169.254.0.0/16
+/// and v6 fe80::/10), unspecified, and duplicates after canonicalization.
+fn validate_bypass_cidrs(cidrs: &[String]) -> Result<Vec<String>> {
+    if cidrs.len() > MAX_BYPASS_CIDRS {
+        bail!(
+            "bypass CIDR list too long: {} entries (max {})",
+            cidrs.len(),
+            MAX_BYPASS_CIDRS
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(cidrs.len());
+    for entry in cidrs {
+        let canonical =
+            canonicalize_cidr(entry).with_context(|| format!("invalid bypass CIDR '{entry}'"))?;
+        if !seen.insert(canonical.clone()) {
+            bail!(
+                "duplicate bypass CIDR after canonicalization: '{}'",
+                canonical
+            );
+        }
+        out.push(canonical);
+    }
+    Ok(out)
+}
+
+fn canonicalize_cidr(s: &str) -> Result<String> {
+    let (addr_str, prefix_str) = s
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("missing '/' prefix length"))?;
+    if addr_str.is_empty() || prefix_str.is_empty() {
+        bail!("empty address or prefix");
+    }
+    let addr: IpAddr = addr_str
+        .parse()
+        .with_context(|| format!("invalid IP address '{addr_str}'"))?;
+    let prefix: u8 = prefix_str
+        .parse()
+        .with_context(|| format!("invalid prefix length '{prefix_str}'"))?;
+
+    if prefix == 0 {
+        bail!("prefix /0 not allowed (would bypass entire internet)");
+    }
+    if addr.is_loopback() {
+        bail!("loopback address not allowed in bypass list");
+    }
+    if addr.is_multicast() {
+        bail!("multicast address not allowed in bypass list");
+    }
+    if addr.is_unspecified() {
+        bail!("unspecified address (0.0.0.0 or ::) not allowed in bypass list");
+    }
+
+    match addr {
+        IpAddr::V4(v4) => {
+            if prefix > 32 {
+                bail!("IPv4 prefix /{prefix} exceeds /32");
+            }
+            let oct = v4.octets();
+            if oct[0] == 169 && oct[1] == 254 {
+                bail!("link-local IPv4 (169.254.0.0/16) not allowed in bypass list");
+            }
+            let bits = u32::from_be_bytes(oct);
+            let mask: u32 = u32::MAX << (32 - prefix);
+            let net = bits & mask;
+            let net_addr = std::net::Ipv4Addr::from(net.to_be_bytes());
+            Ok(format!("{net_addr}/{prefix}"))
+        }
+        IpAddr::V6(v6) => {
+            if prefix > 128 {
+                bail!("IPv6 prefix /{prefix} exceeds /128");
+            }
+            let seg = v6.segments();
+            if seg[0] & 0xffc0 == 0xfe80 {
+                bail!("link-local IPv6 (fe80::/10) not allowed in bypass list");
+            }
+            let bits = u128::from_be_bytes(v6.octets());
+            let mask: u128 = u128::MAX << (128 - prefix);
+            let net = bits & mask;
+            let net_addr = std::net::Ipv6Addr::from(net.to_be_bytes());
+            Ok(format!("{net_addr}/{prefix}"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +515,110 @@ mod tests {
         assert!(split_ips(&["not-an-ip".into()]).is_err());
         assert!(split_ips(&["1.2.3.4".into(), "garbage".into()]).is_err());
         assert!(split_ips(&["256.0.0.1".into()]).is_err()); // out-of-range octet
+    }
+
+    // === bypass CIDR validation tests (Sprint 23 T1) ===
+
+    #[test]
+    fn validate_bypass_cidrs_accepts_ipv4() {
+        let r = validate_bypass_cidrs(&["10.0.0.0/8".into(), "192.168.1.0/24".into()]).unwrap();
+        assert_eq!(r, vec!["10.0.0.0/8", "192.168.1.0/24"]);
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_accepts_ipv6() {
+        let r = validate_bypass_cidrs(&["2001:db8::/32".into()]).unwrap();
+        assert_eq!(r, vec!["2001:db8::/32"]);
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_canonicalizes_host_bits_v4() {
+        // 10.0.0.1/8 has host bits set — canonical form is 10.0.0.0/8.
+        let r = validate_bypass_cidrs(&["10.0.0.1/8".into()]).unwrap();
+        assert_eq!(r, vec!["10.0.0.0/8"]);
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_canonicalizes_host_bits_v6() {
+        let r = validate_bypass_cidrs(&["2001:db8:1234::5/32".into()]).unwrap();
+        assert_eq!(r, vec!["2001:db8::/32"]);
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_missing_prefix() {
+        assert!(validate_bypass_cidrs(&["10.0.0.0".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_oversize_prefix() {
+        assert!(validate_bypass_cidrs(&["10.0.0.0/33".into()]).is_err());
+        assert!(validate_bypass_cidrs(&["2001:db8::/129".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_prefix_zero() {
+        assert!(validate_bypass_cidrs(&["1.2.3.4/0".into()]).is_err());
+        assert!(validate_bypass_cidrs(&["2001:db8::/0".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_loopback_v4() {
+        assert!(validate_bypass_cidrs(&["127.0.0.1/8".into()]).is_err());
+        assert!(validate_bypass_cidrs(&["127.0.0.0/8".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_loopback_v6() {
+        assert!(validate_bypass_cidrs(&["::1/128".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_multicast_v4() {
+        assert!(validate_bypass_cidrs(&["224.0.0.1/24".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_multicast_v6() {
+        assert!(validate_bypass_cidrs(&["ff02::1/16".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_link_local_v4() {
+        assert!(validate_bypass_cidrs(&["169.254.1.1/16".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_link_local_v6() {
+        assert!(validate_bypass_cidrs(&["fe80::1/10".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_unspecified() {
+        assert!(validate_bypass_cidrs(&["0.0.0.0/8".into()]).is_err());
+        assert!(validate_bypass_cidrs(&["::/64".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_exceeds_max_count() {
+        let many: Vec<String> = (0..(MAX_BYPASS_CIDRS + 1))
+            .map(|i| format!("10.{}.{}.0/24", i / 256, i % 256))
+            .collect();
+        assert!(validate_bypass_cidrs(&many).is_err());
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_rejects_duplicate_after_canonicalize() {
+        // Both 10.0.0.1/8 and 10.255.255.255/8 canonicalize to 10.0.0.0/8.
+        let r = validate_bypass_cidrs(&["10.0.0.1/8".into(), "10.255.255.255/8".into()]);
+        assert!(
+            r.is_err(),
+            "expected duplicate-after-canonicalize error, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn validate_bypass_cidrs_accepts_empty_list() {
+        let r = validate_bypass_cidrs(&[]).unwrap();
+        assert!(r.is_empty());
     }
 }

@@ -269,6 +269,44 @@ impl Settings {
             error!("Failed to set kill-switch-block-during-pause: {}", e);
         }
     }
+
+    /// Bypass CIDR list — CIDRs routed via the physical interface outside the
+    /// VPN tunnel. Empty list means no split-tunneling.
+    pub fn bypass_cidrs(&self) -> Vec<String> {
+        self.settings
+            .as_ref()
+            .map(|s| {
+                s.strv("bypass-cidrs")
+                    .into_iter()
+                    .map(|g| g.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Persist the bypass CIDR list. The list is the user's *intent* (durable);
+    /// the helper re-validates at the trust boundary on every `SetBypassCidrs`
+    /// call.
+    #[allow(dead_code)] // T3 ships plumbing; first call site lands in T4 (Preferences).
+    pub fn set_bypass_cidrs(&self, cidrs: &[String]) {
+        if let Some(settings) = &self.settings {
+            let values: Vec<&str> = cidrs.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = settings.set_strv("bypass-cidrs", values) {
+                error!("Failed to set bypass-cidrs: {}", e);
+            }
+        }
+    }
+
+    /// User-facing limit on the number of bypass CIDR entries. Clamped to
+    /// [1, 128] where 128 is the helper's hard ceiling.
+    #[allow(dead_code)] // T3 ships plumbing; first call site lands in T4 (Preferences).
+    pub fn bypass_cidrs_max_count(&self) -> i32 {
+        self.settings
+            .as_ref()
+            .map(|s| s.int("bypass-cidrs-max-count"))
+            .unwrap_or(32)
+            .clamp(1, 128)
+    }
 }
 
 impl Default for Settings {
@@ -407,5 +445,20 @@ mod tests {
     #[test]
     fn test_set_kill_switch_block_during_pause_no_panic() {
         Settings::new_empty().set_kill_switch_block_during_pause(true);
+    }
+
+    #[test]
+    fn test_bypass_cidrs_default_empty() {
+        assert!(Settings::new_empty().bypass_cidrs().is_empty());
+    }
+
+    #[test]
+    fn test_set_bypass_cidrs_no_panic() {
+        Settings::new_empty().set_bypass_cidrs(&["10.0.0.0/8".to_string()]);
+    }
+
+    #[test]
+    fn test_bypass_cidrs_max_count_default() {
+        assert_eq!(Settings::new_empty().bypass_cidrs_max_count(), 32);
     }
 }
