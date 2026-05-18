@@ -80,8 +80,10 @@ rpm-helper: all
 # Development targets
 
 # Bump version across all packaging files.
-# Usage: make bump-version V=0.3.0
-V ?= $(error "Usage: make bump-version V=X.Y.Z")
+# Auto-increments patch; override with V=X.Y.Z for minor/major bumps.
+_CUR_VER := $(shell sed -n 's/^version = "\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)"/\1.\2.\3/p' gui/Cargo.toml)
+_NEXT_PATCH := $(shell echo $(_CUR_VER) | awk -F. '{print $$1"."$$2"."$$3+1}')
+V ?= $(_NEXT_PATCH)
 
 bump-version:
 	@echo "Bumping to $(V)..."
