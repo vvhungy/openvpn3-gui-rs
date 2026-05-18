@@ -22,7 +22,7 @@
       <li>Auto-connect on startup (most-recent or specific profile)</li>
       <li>Reconnect prompt on unexpected session drop</li>
       <li>Username/password, challenge/OTP, and browser-redirect authentication</li>
-      <li>Tabbed session log viewer with live log streaming</li>
+      <li>Tabbed session log viewer with live log streaming, per-tab search and log-level filter, filter-aware copy, and persistent window size</li>
       <li>Tabbed Preferences dialog (General / Security / Routing) for startup, notifications, intervals, timeout, stall detection, kill-switch, split-tunneling bypass CIDR editor, and credentials</li>
       <li>Configurable connection timeout with notification</li>
       <li>Connection stall detection — flags an idle tunnel in tray menu and icon</li>
