@@ -52,7 +52,7 @@ jobs:
         run: cargo deb -p openvpn3-gui-rs --no-build
 
       - name: Build RPM package
-        run: cd gui && cargo generate-rpm
+        run: cargo generate-rpm -p openvpn3-gui-rs
 
       - name: Upload DEB artifact
         uses: actions/upload-artifact@v4

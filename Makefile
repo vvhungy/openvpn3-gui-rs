@@ -69,7 +69,7 @@ deb: all
 	cargo deb -p openvpn3-gui-rs --no-build
 
 rpm: all
-	cd gui && cargo generate-rpm
+	cargo generate-rpm -p openvpn3-gui-rs
 
 deb-helper: all
 	cargo deb -p openvpn3-killswitch-helper --no-build
