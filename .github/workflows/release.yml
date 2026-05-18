@@ -56,7 +56,9 @@ jobs:
 
       - name: Build RPM (GUI)
         working-directory: gui
-        run: cargo generate-rpm -o ../target/generate-rpm
+        run: |
+          mkdir -p ../target/generate-rpm
+          cargo generate-rpm -o ../target/generate-rpm
 
       - name: Build RPM (helper)
         working-directory: helper
