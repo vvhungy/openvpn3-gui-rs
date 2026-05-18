@@ -1,6 +1,6 @@
 [package]
 name = "openvpn3-gui-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["HungVV <vvhung@yahoo.com>"]
@@ -80,41 +80,71 @@ license = "GPL-3.0-or-later"
 requires = { gtk4 = "*", glib2 = "*", libsecret = "*" }
 
 [[package.metadata.generate-rpm.assets]]
-source = "target/release/openvpn3-gui-rs"
+source = "../target/release/openvpn3-gui-rs"
 dest = "/usr/bin/openvpn3-gui-rs"
 mode = "755"
 
 [[package.metadata.generate-rpm.assets]]
-source = "data/net.openvpn.openvpn3_gui_rs.desktop"
+source = "../data/net.openvpn.openvpn3_gui_rs.desktop"
 dest = "/usr/share/applications/net.openvpn.openvpn3_gui_rs.desktop"
 mode = "644"
 
 [[package.metadata.generate-rpm.assets]]
-source = "data/net.openvpn.openvpn3_gui_rs.gschema.xml"
+source = "../data/net.openvpn.openvpn3_gui_rs.gschema.xml"
 dest = "/usr/share/glib-2.0/schemas/net.openvpn.openvpn3_gui_rs.gschema.xml"
 mode = "644"
 
 [[package.metadata.generate-rpm.assets]]
-source = "data/net.openvpn.openvpn3_gui_rs.metainfo.xml"
+source = "../data/net.openvpn.openvpn3_gui_rs.metainfo.xml"
 dest = "/usr/share/metainfo/net.openvpn.openvpn3_gui_rs.metainfo.xml"
 mode = "644"
 
 [[package.metadata.generate-rpm.assets]]
-source = "data/icons/hicolor/scalable/apps/openvpn3-gui-rs.svg"
+source = "../data/icons/hicolor/scalable/apps/openvpn3-gui-rs.svg"
 dest = "/usr/share/icons/hicolor/scalable/apps/openvpn3-gui-rs.svg"
 mode = "644"
 
 [[package.metadata.generate-rpm.assets]]
-source = "data/icons/hicolor/scalable/status/"
-dest = "/usr/share/icons/hicolor/scalable/status/"
+source = "../data/icons/hicolor/scalable/status/openvpn3-gui-rs-active.svg"
+dest = "/usr/share/icons/hicolor/scalable/status/openvpn3-gui-rs-active.svg"
 mode = "644"
 
 [[package.metadata.generate-rpm.assets]]
-source = "data/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg"
+source = "../data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle.svg"
+dest = "/usr/share/icons/hicolor/scalable/status/openvpn3-gui-rs-idle.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../data/icons/hicolor/scalable/status/openvpn3-gui-rs-idle-error.svg"
+dest = "/usr/share/icons/hicolor/scalable/status/openvpn3-gui-rs-idle-error.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../data/icons/hicolor/scalable/status/openvpn3-gui-rs-loading.svg"
+dest = "/usr/share/icons/hicolor/scalable/status/openvpn3-gui-rs-loading.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../data/icons/hicolor/scalable/status/openvpn3-gui-rs-paused.svg"
+dest = "/usr/share/icons/hicolor/scalable/status/openvpn3-gui-rs-paused.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../data/icons/hicolor/scalable/status/openvpn3-gui-rs-killswitch-on.svg"
+dest = "/usr/share/icons/hicolor/scalable/status/openvpn3-gui-rs-killswitch-on.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../data/icons/hicolor/scalable/status/openvpn3-gui-rs-killswitch-off.svg"
+dest = "/usr/share/icons/hicolor/scalable/status/openvpn3-gui-rs-killswitch-off.svg"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../data/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg"
 dest = "/usr/share/icons/hicolor/scalable/mimetypes/application-x-openvpn-profile.svg"
 mode = "644"
 
 [[package.metadata.generate-rpm.assets]]
-source = "data/icons/Yaru/scalable/mimetypes/application-x-openvpn-profile.svg"
+source = "../data/icons/Yaru/scalable/mimetypes/application-x-openvpn-profile.svg"
 dest = "/usr/share/icons/Yaru/scalable/mimetypes/application-x-openvpn-profile.svg"
 mode = "644"

@@ -1,6 +1,7 @@
 mod bypass;
 mod nft;
 mod service;
+mod validation;
 mod watcher;
 
 use anyhow::{Context, Result};

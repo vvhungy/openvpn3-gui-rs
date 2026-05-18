@@ -307,6 +307,42 @@ impl Settings {
             .unwrap_or(32)
             .clamp(1, 128)
     }
+
+    /// Persisted logs viewer window width in pixels (default 800, clamped 400..=4000).
+    pub fn logs_window_width(&self) -> i32 {
+        self.settings
+            .as_ref()
+            .map(|s| s.int("logs-window-width"))
+            .unwrap_or(800)
+            .clamp(400, 4000)
+    }
+
+    /// Persist logs viewer window width in pixels.
+    pub fn set_logs_window_width(&self, px: i32) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_int("logs-window-width", px.clamp(400, 4000))
+        {
+            error!("Failed to set logs-window-width: {}", e);
+        }
+    }
+
+    /// Persisted logs viewer window height in pixels (default 600, clamped 300..=3000).
+    pub fn logs_window_height(&self) -> i32 {
+        self.settings
+            .as_ref()
+            .map(|s| s.int("logs-window-height"))
+            .unwrap_or(600)
+            .clamp(300, 3000)
+    }
+
+    /// Persist logs viewer window height in pixels.
+    pub fn set_logs_window_height(&self, px: i32) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_int("logs-window-height", px.clamp(300, 3000))
+        {
+            error!("Failed to set logs-window-height: {}", e);
+        }
+    }
 }
 
 impl Default for Settings {
@@ -460,5 +496,25 @@ mod tests {
     #[test]
     fn test_bypass_cidrs_max_count_default() {
         assert_eq!(Settings::new_empty().bypass_cidrs_max_count(), 32);
+    }
+
+    #[test]
+    fn test_logs_window_width_default() {
+        assert_eq!(Settings::new_empty().logs_window_width(), 800);
+    }
+
+    #[test]
+    fn test_set_logs_window_width_no_panic() {
+        Settings::new_empty().set_logs_window_width(1024);
+    }
+
+    #[test]
+    fn test_logs_window_height_default() {
+        assert_eq!(Settings::new_empty().logs_window_height(), 600);
+    }
+
+    #[test]
+    fn test_set_logs_window_height_no_panic() {
+        Settings::new_empty().set_logs_window_height(768);
     }
 }

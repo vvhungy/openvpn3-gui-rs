@@ -45,26 +45,30 @@ jobs:
           cargo install cargo-deb
           cargo install cargo-generate-rpm
 
-      - name: Build release binary
-        run: cargo build --release
+      - name: Build release binaries
+        run: cargo build --release --workspace
 
-      - name: Build DEB package
-        run: cargo deb --no-build
+      - name: Build DEB (GUI)
+        run: cargo deb -p openvpn3-gui-rs --no-build
 
-      - name: Build RPM package
-        run: cargo generate-rpm
+      - name: Build DEB (helper)
+        run: cargo deb -p openvpn3-killswitch-helper --no-build
 
-      - name: Upload DEB artifact
+      - name: Build RPM (GUI)
+        working-directory: gui
+        run: cargo generate-rpm -o ../target/generate-rpm
+
+      - name: Build RPM (helper)
+        working-directory: helper
+        run: cargo generate-rpm -o ../target/generate-rpm
+
+      - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: deb-package
-          path: target/debian/*.deb
-
-      - name: Upload RPM artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rpm-package
-          path: target/generate-rpm/*.rpm
+          name: packages
+          path: |
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
 
   create-release:
     name: Create GitHub Release
@@ -76,16 +80,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download DEB
+      - name: Download packages
         uses: actions/download-artifact@v4
         with:
-          name: deb-package
-          path: dist/
-
-      - name: Download RPM
-        uses: actions/download-artifact@v4
-        with:
-          name: rpm-package
+          name: packages
           path: dist/
 
       - name: Create release

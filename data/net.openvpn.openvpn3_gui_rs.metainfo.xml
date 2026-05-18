@@ -22,7 +22,7 @@
       <li>Auto-connect on startup (most-recent or specific profile)</li>
       <li>Reconnect prompt on unexpected session drop</li>
       <li>Username/password, challenge/OTP, and browser-redirect authentication</li>
-      <li>Tabbed session log viewer with live log streaming</li>
+      <li>Tabbed session log viewer with live log streaming, per-tab search and log-level filter, filter-aware copy, and persistent window size</li>
       <li>Tabbed Preferences dialog (General / Security / Routing) for startup, notifications, intervals, timeout, stall detection, kill-switch, split-tunneling bypass CIDR editor, and credentials</li>
       <li>Configurable connection timeout with notification</li>
       <li>Connection stall detection — flags an idle tunnel in tray menu and icon</li>
@@ -56,15 +56,17 @@
   <content_rating type="oars-1.1" />
 
   <releases>
-    <release version="0.2.0" date="2026-04-03">
+    <release version="0.3.0" date="2026-05-18">
       <description>
-        <p>Rewrite in Rust with GTK4</p>
+        <p>Split-tunneling bypass, kill-switch hardening, and production readiness</p>
         <ul>
-          <li>Significantly improved startup time</li>
-          <li>Reduced memory usage</li>
-          <li>Native GTK4 integration</li>
-          <li>Better error handling</li>
-          <li>Unit tests for core functionality</li>
+          <li>Split-tunneling: exempt specific networks from VPN via bypass CIDR editor (Preferences Routing tab)</li>
+          <li>Kill-switch: bypass tray indicator, lock icon in session label, persistent notifications, quit confirmation</li>
+          <li>Logs viewer: per-tab search and log-level filter, filter-aware copy, persistent window size</li>
+          <li>GSettings schema migration smoke test for safe upgrades</li>
+          <li>Connect-time failure-mode audit — silent errors now surface as notifications</li>
+          <li>RPM packaging fixes (asset paths, directory entries)</li>
+          <li>Version management: single source of truth from Cargo.toml, make bump-version target</li>
         </ul>
       </description>
     </release>

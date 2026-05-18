@@ -8,7 +8,7 @@ ICON_DIR = $(PREFIX)/share/icons/hicolor
 DESKTOP_DIR = $(PREFIX)/share/applications
 METAINFO_DIR = $(PREFIX)/share/metainfo
 
-.PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug setup-hooks check
+.PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug setup-hooks check bump-version
 
 all:
 	cargo build --release --workspace
@@ -69,15 +69,32 @@ deb: all
 	cargo deb -p openvpn3-gui-rs --no-build
 
 rpm: all
-	cargo generate-rpm -p openvpn3-gui-rs
+	cd gui && cargo generate-rpm -o ../target/generate-rpm
 
 deb-helper: all
 	cargo deb -p openvpn3-killswitch-helper --no-build
 
 rpm-helper: all
-	cd helper && cargo generate-rpm
+	cd helper && cargo generate-rpm -o ../target/generate-rpm
 
 # Development targets
+
+# Bump version across all packaging files.
+# Auto-increments patch; override with V=X.Y.Z for minor/major bumps.
+_CUR_VER := $(shell sed -n 's/^version = "\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)"/\1.\2.\3/p' gui/Cargo.toml)
+_NEXT_PATCH := $(shell echo $(_CUR_VER) | awk -F. '{print $$1"."$$2"."$$3+1}')
+V ?= $(_NEXT_PATCH)
+
+bump-version:
+	@echo "Bumping to $(V)..."
+	sed -i 's/^version = ".*"/version = "$(V)"/' gui/Cargo.toml
+	sed -i 's/^version = ".*"/version = "$(V)"/' helper/Cargo.toml
+	sed -i 's/pkgver=.*/pkgver=$(V)/' pkg/aur/PKGBUILD
+	sed -i 's/release version="[^"]*" date="[^"]*"/release version="$(V)" date="$(shell date +%Y-%m-%d)"/' \
+		data/net.openvpn.openvpn3_gui_rs.metainfo.xml
+	@echo "Updated: gui/Cargo.toml, helper/Cargo.toml, PKGBUILD, metainfo.xml"
+	@echo "Next: add metainfo <release> bullet, review diff, commit + tag v$(V)"
+
 run:
 	cargo run
 

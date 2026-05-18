@@ -22,17 +22,66 @@ use zbus::MessageStream;
 use zbus::message::Type as MessageType;
 
 use crate::app::log_buffer;
+use crate::settings::Settings;
 
 mod format;
 
 use format::format_log_line;
 
-/// State for a single tab: its text buffer and end-mark for auto-scroll.
+/// Per-tab state. Holds the full unfiltered entry vec so search/level
+/// changes can rebuild the visible buffer without re-fetching from the
+/// global log buffer. `level_min` is 0 (all), 5 (warn+), or 6 (error).
 struct TabState {
     buffer: gtk4::TextBuffer,
     end_mark: gtk4::TextMark,
     text_view: TextView,
-    scrolled: ScrolledWindow,
+    page: gtk4::Box,
+    entries: Rc<RefCell<Vec<log_buffer::LogEntry>>>,
+    search_text: Rc<RefCell<String>>,
+    level_min: Rc<RefCell<u32>>,
+}
+
+/// Returns true if the entry passes the current filter pair (substring
+/// match on message, case-insensitive; category >= level_min).
+fn passes_filter(entry: &log_buffer::LogEntry, search: &str, level_min: u32) -> bool {
+    if entry.category < level_min {
+        return false;
+    }
+    if !search.is_empty()
+        && !entry
+            .message
+            .to_lowercase()
+            .contains(&search.to_lowercase())
+    {
+        return false;
+    }
+    true
+}
+
+/// Rebuild the visible TextBuffer from the unfiltered entries vec by
+/// re-applying the current filter. Called on search/level change.
+fn rebuild_buffer(
+    buffer: &gtk4::TextBuffer,
+    entries: &[log_buffer::LogEntry],
+    search: &str,
+    level_min: u32,
+) {
+    let mut text = String::new();
+    for e in entries {
+        if passes_filter(e, search, level_min) {
+            text.push_str(&format_log_line(&e.timestamp, e.category, &e.message));
+        }
+    }
+    buffer.set_text(&text);
+}
+
+/// Map DropDown selected index to the min category threshold.
+fn level_index_to_min(idx: u32) -> u32 {
+    match idx {
+        1 => 5,
+        2 => 6,
+        _ => 0,
+    }
 }
 
 /// Show the tabbed log viewer window.
@@ -44,11 +93,12 @@ pub fn show_log_viewer(
     tray: &ksni::blocking::Handle<crate::tray::VpnTray>,
     dbus: &zbus::Connection,
 ) {
+    let settings = Settings::new();
     let window = Window::builder()
         .title("VPN Logs")
         .modal(false)
-        .default_width(750)
-        .default_height(500)
+        .default_width(settings.logs_window_width())
+        .default_height(settings.logs_window_height())
         .build();
 
     if let Some(p) = parent {
@@ -115,7 +165,7 @@ pub fn show_log_viewer(
     } else {
         for config_name in &all_names {
             let tab = create_tab_for_config(config_name);
-            notebook.append_page(&tab.scrolled, Some(&gtk4::Label::new(Some(config_name))));
+            notebook.append_page(&tab.page, Some(&gtk4::Label::new(Some(config_name))));
             tabs.borrow_mut().insert(config_name.clone(), tab);
         }
     }
@@ -162,9 +212,15 @@ pub fn show_log_viewer(
     });
 
     let cancel_for_close = cancel_tx;
-    window.connect_close_request(move |_| {
+    let settings_for_close = settings.clone();
+    window.connect_close_request(move |w| {
         if let Some(tx) = cancel_for_close.borrow_mut().take() {
             let _ = tx.send(());
+        }
+        let (width, height) = (w.width(), w.height());
+        if width > 0 && height > 0 {
+            settings_for_close.set_logs_window_width(width);
+            settings_for_close.set_logs_window_height(height);
         }
         glib::Propagation::Proceed
     });
@@ -263,16 +319,28 @@ pub fn show_log_viewer(
                             }
                             let tab = create_tab_for_config(&config_name);
                             notebook_rc.append_page(
-                                &tab.scrolled,
+                                &tab.page,
                                 Some(&gtk4::Label::new(Some(&config_name))),
                             );
                             tabs_map.insert(config_name.clone(), tab);
                         }
 
                         if let Some(tab) = tabs_map.get(&config_name) {
-                            let mut end_iter = tab.buffer.end_iter();
-                            tab.buffer.insert(&mut end_iter, &line);
-                            tab.text_view.scroll_mark_onscreen(&tab.end_mark);
+                            let entry = log_buffer::LogEntry {
+                                timestamp,
+                                session_path: session_path.clone(),
+                                config_name: config_name.clone(),
+                                category,
+                                message: message.to_string(),
+                            };
+                            tab.entries.borrow_mut().push(entry.clone());
+                            let search = tab.search_text.borrow().clone();
+                            let level_min = *tab.level_min.borrow();
+                            if passes_filter(&entry, &search, level_min) {
+                                let mut end_iter = tab.buffer.end_iter();
+                                tab.buffer.insert(&mut end_iter, &line);
+                                tab.text_view.scroll_mark_onscreen(&tab.end_mark);
+                            }
                         }
                     }
                 }
@@ -294,11 +362,12 @@ pub fn show_log_viewer(
 }
 
 /// Create a tab for a config name, populated with all buffered history
-/// across all session paths for that config.
+/// across all session paths for that config. Tab layout is a vertical
+/// box: filter strip on top (search + level dropdown + copy button),
+/// scrolled log area below. Filter state is per-tab and independent.
 fn create_tab_for_config(config_name: &str) -> TabState {
     let buffer = gtk4::TextBuffer::new(None);
 
-    // Collect all entries across all sessions for this config name
     let buffered_sessions = log_buffer::sessions_with_logs();
     let relevant_paths: Vec<&str> = buffered_sessions
         .iter()
@@ -310,22 +379,19 @@ fn create_tab_for_config(config_name: &str) -> TabState {
     for path in &relevant_paths {
         all_entries.extend(log_buffer::entries_for_session(path));
     }
-    // Sort by timestamp (entries from different sessions interleave)
     all_entries.sort_by_key(|e| e.timestamp);
 
-    if all_entries.is_empty() {
+    let entries = Rc::new(RefCell::new(all_entries));
+    let search_text = Rc::new(RefCell::new(String::new()));
+    let level_min = Rc::new(RefCell::new(0u32));
+
+    // Initial buffer paint — empty filter shows everything; if no history
+    // yet, show a listener hint so the tab isn't blank on first open.
+    if entries.borrow().is_empty() {
         let header = format!("Listening for log messages from '{}'...\n", config_name);
         buffer.set_text(&header);
     } else {
-        let mut text = String::new();
-        for entry in &all_entries {
-            text.push_str(&format_log_line(
-                &entry.timestamp,
-                entry.category,
-                &entry.message,
-            ));
-        }
-        buffer.set_text(&text);
+        rebuild_buffer(&buffer, &entries.borrow(), "", 0);
     }
 
     let text_view = TextView::builder()
@@ -350,10 +416,88 @@ fn create_tab_for_config(config_name: &str) -> TabState {
 
     text_view.scroll_mark_onscreen(&end_mark);
 
+    // --- Filter strip widgets ---
+    let search_entry = gtk4::Entry::builder()
+        .placeholder_text("Search log…")
+        .hexpand(true)
+        .build();
+
+    let level_model = gtk4::StringList::new(&["All levels", "Warn and above", "Error only"]);
+    let level_dropdown = gtk4::DropDown::builder().model(&level_model).build();
+
+    let copy_btn = gtk4::Button::builder()
+        .label("Copy")
+        .tooltip_text("Copy visible (filtered) log to clipboard")
+        .build();
+
+    let strip = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    strip.set_margin_top(6);
+    strip.set_margin_bottom(6);
+    strip.set_margin_start(8);
+    strip.set_margin_end(8);
+    strip.append(&search_entry);
+    strip.append(&level_dropdown);
+    strip.append(&copy_btn);
+
+    // --- Wire filter signals ---
+    {
+        let entries = Rc::clone(&entries);
+        let search_text = Rc::clone(&search_text);
+        let level_min = Rc::clone(&level_min);
+        let buffer = buffer.clone();
+        let text_view = text_view.clone();
+        let end_mark = end_mark.clone();
+        search_entry.connect_changed(move |e| {
+            *search_text.borrow_mut() = e.text().to_string();
+            rebuild_buffer(
+                &buffer,
+                &entries.borrow(),
+                &search_text.borrow(),
+                *level_min.borrow(),
+            );
+            text_view.scroll_mark_onscreen(&end_mark);
+        });
+    }
+
+    {
+        let entries = Rc::clone(&entries);
+        let search_text = Rc::clone(&search_text);
+        let level_min = Rc::clone(&level_min);
+        let buffer = buffer.clone();
+        let text_view = text_view.clone();
+        let end_mark = end_mark.clone();
+        level_dropdown.connect_selected_notify(move |dd| {
+            *level_min.borrow_mut() = level_index_to_min(dd.selected());
+            rebuild_buffer(
+                &buffer,
+                &entries.borrow(),
+                &search_text.borrow(),
+                *level_min.borrow(),
+            );
+            text_view.scroll_mark_onscreen(&end_mark);
+        });
+    }
+
+    {
+        let buffer = buffer.clone();
+        let text_view = text_view.clone();
+        copy_btn.connect_clicked(move |_| {
+            let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+            text_view.clipboard().set_text(&text);
+        });
+    }
+
+    let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    page.append(&strip);
+    page.append(&scrolled);
+
     TabState {
         buffer,
         end_mark,
         text_view,
-        scrolled,
+        page,
+        entries,
+        search_text,
+        level_min,
     }
 }
