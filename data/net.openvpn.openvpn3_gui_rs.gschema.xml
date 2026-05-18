@@ -149,5 +149,23 @@
         clamps the UI input below that ceiling. Range: 1–128.
       </description>
     </key>
+
+    <key name="logs-window-width" type="i">
+      <default>800</default>
+      <summary>Logs viewer window width (pixels)</summary>
+      <description>
+        Persisted width of the tabbed VPN log viewer window. Saved on
+        window close, restored on open. Range: 400–4000.
+      </description>
+    </key>
+
+    <key name="logs-window-height" type="i">
+      <default>600</default>
+      <summary>Logs viewer window height (pixels)</summary>
+      <description>
+        Persisted height of the tabbed VPN log viewer window. Saved on
+        window close, restored on open. Range: 300–3000.
+      </description>
+    </key>
   </schema>
 </schemalist>
