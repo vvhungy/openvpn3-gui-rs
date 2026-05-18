@@ -8,7 +8,7 @@ ICON_DIR = $(PREFIX)/share/icons/hicolor
 DESKTOP_DIR = $(PREFIX)/share/applications
 METAINFO_DIR = $(PREFIX)/share/metainfo
 
-.PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug setup-hooks check
+.PHONY: all install uninstall clean deb rpm test smoke-test fmt lint run debug setup-hooks check bump-version
 
 all:
 	cargo build --release --workspace
@@ -78,6 +78,21 @@ rpm-helper: all
 	cd helper && cargo generate-rpm
 
 # Development targets
+
+# Bump version across all packaging files.
+# Usage: make bump-version V=0.3.0
+V ?= $(error "Usage: make bump-version V=X.Y.Z")
+
+bump-version:
+	@echo "Bumping to $(V)..."
+	sed -i 's/^version = ".*"/version = "$(V)"/' gui/Cargo.toml
+	sed -i 's/^version = ".*"/version = "$(V)"/' helper/Cargo.toml
+	sed -i 's/pkgver=.*/pkgver=$(V)/' pkg/aur/PKGBUILD
+	sed -i 's/release version="[^"]*" date="[^"]*"/release version="$(V)" date="$(shell date +%Y-%m-%d)"/' \
+		data/net.openvpn.openvpn3_gui_rs.metainfo.xml
+	@echo "Updated: gui/Cargo.toml, helper/Cargo.toml, PKGBUILD, metainfo.xml"
+	@echo "Next: add metainfo <release> bullet, review diff, commit + tag v$(V)"
+
 run:
 	cargo run
 
