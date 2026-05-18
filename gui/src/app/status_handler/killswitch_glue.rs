@@ -37,12 +37,12 @@ pub(crate) async fn apply_kill_switch(
     let device_name = proxy.device_name().await?;
     if device_name.is_empty() {
         warn!("kill-switch: device_name empty on connected session — rules NOT applied");
-        return Ok(true);
+        return Ok(false);
     }
     let (_proto, server_ip, _port) = proxy.connected_to().await?;
     if server_ip.is_empty() {
         warn!("kill-switch: connected_to address empty — rules NOT applied");
-        return Ok(true);
+        return Ok(false);
     }
     let helper_installed =
         crate::dbus::killswitch::add_rules(&device_name, vec![server_ip], allow_lan).await;
@@ -100,7 +100,13 @@ pub(super) fn on_connected(
                 Ok(false) if !HELPER_MISSING_NOTIFIED.swap(true, Ordering::Relaxed) => {
                     crate::dialogs::show_helper_missing_notification();
                 }
-                Err(e) => warn!("kill-switch: apply failed: {}", e),
+                Err(e) => {
+                    warn!("kill-switch: apply failed: {}", e);
+                    crate::dialogs::show_error_notification(
+                        "Kill-Switch Failed",
+                        &format!("Firewall rules could not be applied: {}", e),
+                    );
+                }
                 _ => {}
             }
         }

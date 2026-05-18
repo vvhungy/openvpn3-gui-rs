@@ -139,7 +139,14 @@ impl Application {
 
                 match setup_signal_handlers(&dbus, tray.clone(), action_tx).await {
                     Ok(_) => info!("Signal handlers setup complete"),
-                    Err(e) => error!("Failed to setup signal handlers: {}", e),
+                    Err(e) => {
+                        error!("Failed to setup signal handlers: {}", e);
+                        crate::dialogs::show_error_notification(
+                            "Status Monitoring Failed",
+                            "Could not subscribe to VPN status updates. \
+                             The app will run but may not reflect connection changes.",
+                        );
+                    }
                 }
 
                 // Start buffering Log signals for the log viewer
