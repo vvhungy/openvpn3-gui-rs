@@ -56,6 +56,14 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.1" date="2026-05-18">
+      <description>
+        <p>Patch release: CI packaging fix</p>
+        <ul>
+          <li>Release workflow: pre-create RPM output directory so cargo-generate-rpm produces correctly-named .rpm files (fixes v0.3.0 release shipping without RPMs)</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-05-18">
       <description>
         <p>Split-tunneling bypass, kill-switch hardening, and production readiness</p>
