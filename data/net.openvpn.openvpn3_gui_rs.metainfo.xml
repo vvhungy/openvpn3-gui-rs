@@ -57,6 +57,18 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.3" date="2026-05-19">
+      <description>
+        <p>Sprint 26: per-entry bypass toggle, AUR helper packaging, close-out</p>
+        <ul>
+          <li>Split tunneling: per-entry enable/disable checkboxes in the Routing tab — suspend a bypass CIDR without losing the row</li>
+          <li>Packaging: AUR PKGBUILD for the privileged kill-switch helper</li>
+          <li>Packaging: removed unreferenced killswitch SVG icons from DEB/RPM assets</li>
+          <li>Docs: kill-switch and split-tunneling design docs refreshed to match current code</li>
+          <li>Failure modes: silent-failure tail closed as won't fix with recorded rationale</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-05-19">
       <description>
         <p>Launch on login, notification improvements, release hardening</p>
