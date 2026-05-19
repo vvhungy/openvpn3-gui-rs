@@ -1,5 +1,13 @@
 name: Release
 
+# Expected release artifacts (manifest — keep in sync with build steps below):
+#   target/debian/openvpn3-gui-rs_<ver>_amd64.deb
+#   target/debian/openvpn3-killswitch-helper_<ver>_amd64.deb
+#   target/generate-rpm/openvpn3-gui-rs-<ver>-1.x86_64.rpm
+#   target/generate-rpm/openvpn3-killswitch-helper-<ver>-1.x86_64.rpm
+# Every build step ends with `ls -la <glob>` so a silent produce-step failure
+# surfaces at the failing step, not downstream at upload time (v0.3.0 incident).
+
 on:
   push:
     tags:
@@ -49,20 +57,27 @@ jobs:
         run: cargo build --release --workspace
 
       - name: Build DEB (GUI)
-        run: cargo deb -p openvpn3-gui-rs --no-build
+        run: |
+          cargo deb -p openvpn3-gui-rs --no-build
+          ls -la target/debian/openvpn3-gui-rs_*.deb
 
       - name: Build DEB (helper)
-        run: cargo deb -p openvpn3-killswitch-helper --no-build
+        run: |
+          cargo deb -p openvpn3-killswitch-helper --no-build
+          ls -la target/debian/openvpn3-killswitch-helper_*.deb
 
       - name: Build RPM (GUI)
         working-directory: gui
         run: |
           mkdir -p ../target/generate-rpm
           cargo generate-rpm -o ../target/generate-rpm
+          ls -la ../target/generate-rpm/openvpn3-gui-rs-*.rpm
 
       - name: Build RPM (helper)
         working-directory: helper
-        run: cargo generate-rpm -o ../target/generate-rpm
+        run: |
+          cargo generate-rpm -o ../target/generate-rpm
+          ls -la ../target/generate-rpm/openvpn3-killswitch-helper-*.rpm
 
       - name: Upload packages
         uses: actions/upload-artifact@v4
