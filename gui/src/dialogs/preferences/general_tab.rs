@@ -1,6 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{Box as GtkBox, CheckButton, ComboBoxText, Label, Orientation, Separator, SpinButton};
 
+use crate::autostart;
 use crate::dialogs::layout::{CONTENT_MARGIN, INDENT, SECTION_SPACING};
 use crate::settings::Settings;
 use crate::tray::ConfigInfo;
@@ -30,6 +31,39 @@ pub(super) fn build(settings: &Settings, configs: &[ConfigInfo]) -> (GtkBox, Gen
         .halign(gtk4::Align::Start)
         .build();
     general.append(&startup_label);
+
+    let launch_on_login_check = CheckButton::builder()
+        .label("Launch on login")
+        .active(autostart::is_enabled())
+        .build();
+    {
+        let settings_for_toggle = settings.clone();
+        launch_on_login_check.connect_toggled(move |btn| {
+            let want = btn.is_active();
+            let res = if want {
+                autostart::enable()
+            } else {
+                autostart::disable()
+            };
+            match res {
+                Ok(()) => settings_for_toggle.set_launch_on_login(want),
+                Err(e) => {
+                    tracing::error!(
+                        "autostart {} failed: {}",
+                        if want { "enable" } else { "disable" },
+                        e
+                    );
+                    crate::dialogs::show_error_notification(
+                        "Launch on Login Failed",
+                        &format!("Could not update autostart entry: {}", e),
+                    );
+                }
+            }
+        });
+    }
+    general.append(&launch_on_login_check);
+
+    general.append(&Separator::new(Orientation::Horizontal));
 
     let current_action = settings.startup_action();
     let current_specific = settings.specific_config_path();
