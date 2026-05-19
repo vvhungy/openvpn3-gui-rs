@@ -152,6 +152,18 @@
       </description>
     </key>
 
+    <key name="bypass-cidrs-disabled" type="as">
+      <default>[]</default>
+      <summary>Bypass CIDR entries temporarily disabled by the user</summary>
+      <description>
+        Subset of 'bypass-cidrs' that the user has unchecked in the Routing
+        tab to deactivate without removing. Disabled entries are skipped
+        when pushing to the privileged helper on Connect, cold-start
+        re-apply, and Preferences Save. Entries not present in
+        'bypass-cidrs' are ignored (orphans clean themselves up).
+      </description>
+    </key>
+
     <key name="bypass-cidrs-max-count" type="i">
       <default>32</default>
       <summary>Maximum number of bypass CIDR entries</summary>

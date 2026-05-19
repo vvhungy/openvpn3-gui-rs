@@ -1,0 +1,33 @@
+# Maintainer: HungVV <vvhung@yahoo.com>
+pkgname=openvpn3-killswitch-helper
+pkgver=0.3.2
+pkgrel=1
+pkgdesc="Privileged D-Bus helper installing nftables kill-switch rules for openvpn3-gui-rs"
+arch=('x86_64' 'aarch64')
+url="https://github.com/vvhungy/openvpn3-gui-rs"
+license=('GPL-3.0-or-later')
+depends=('nftables' 'dbus')
+makedepends=('rust' 'cargo')
+source=("openvpn3-gui-rs-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "openvpn3-gui-rs-$pkgver"
+    cargo build --release --locked -p openvpn3-killswitch-helper
+}
+
+package() {
+    cd "openvpn3-gui-rs-$pkgver"
+
+    # Helper binary (runs as root via system D-Bus activation)
+    install -Dm755 "target/release/openvpn3-killswitch-helper" \
+        "$pkgdir/usr/bin/openvpn3-killswitch-helper"
+
+    # D-Bus system-service activation file
+    install -Dm644 "data/net.openvpn.v3.killswitch.service" \
+        "$pkgdir/usr/share/dbus-1/system-services/net.openvpn.v3.killswitch.service"
+
+    # D-Bus access policy
+    install -Dm644 "data/net.openvpn.v3.killswitch.conf" \
+        "$pkgdir/etc/dbus-1/system.d/net.openvpn.v3.killswitch.conf"
+}

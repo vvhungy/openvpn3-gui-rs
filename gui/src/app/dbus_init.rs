@@ -182,17 +182,27 @@ pub(crate) async fn init_dbus(
     // spawns would race — if KS won, the firewall would drop bypassed
     // traffic until the next manual reconnect.
     let has_connected = !connected_paths.is_empty();
-    let bypass_cidrs = settings.bypass_cidrs();
+    let bypass_cidrs =
+        crate::settings::enabled_cidrs(&settings.bypass_cidrs(), &settings.bypass_cidrs_disabled());
     let ks_enabled = settings.enable_kill_switch();
     if has_connected && (ks_enabled || !bypass_cidrs.is_empty()) {
         let allow_lan = settings.kill_switch_allow_lan();
         let dbus_clone = dbus.clone();
         let tray_clone = tray.clone();
         glib::spawn_future_local(async move {
-            if !bypass_cidrs.is_empty()
-                && crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await
-            {
-                crate::dbus::killswitch::apply_bypass_routes().await;
+            if !bypass_cidrs.is_empty() {
+                let count = bypass_cidrs.len();
+                let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
+                let apply_ok = set_ok && crate::dbus::killswitch::apply_bypass_routes().await;
+                if apply_ok {
+                    tray_clone
+                        .update(move |t| t.bypass_state = crate::tray::BypassState::Active(count));
+                    crate::dialogs::show_bypass_active_notification(count);
+                } else {
+                    tray_clone.update(|t| t.bypass_state = crate::tray::BypassState::Failed);
+                    warn!("bypass routing: startup re-apply failed");
+                    crate::dialogs::show_bypass_failed_notification();
+                }
             }
 
             if ks_enabled {

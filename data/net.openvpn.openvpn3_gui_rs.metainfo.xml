@@ -24,11 +24,11 @@
       <li>Reconnect prompt on unexpected session drop</li>
       <li>Username/password, challenge/OTP, and browser-redirect authentication</li>
       <li>Tabbed session log viewer with live log streaming, per-tab search and log-level filter, filter-aware copy, and persistent window size</li>
-      <li>Tabbed Preferences dialog (General / Security / Routing) for startup, notifications, intervals, timeout, stall detection, kill-switch, split-tunneling bypass CIDR editor, and credentials</li>
+      <li>Tabbed Preferences dialog (General / Security / Routing) for startup, notifications, intervals, timeout, stall detection, kill-switch, split-tunneling bypass CIDR editor with per-entry enable/disable, and credentials</li>
       <li>Configurable connection timeout with notification</li>
       <li>Connection stall detection — flags an idle tunnel in tray menu and icon</li>
       <li>Kill-switch — block all non-VPN traffic via nftables when a tunnel drops (requires the privileged helper package); always-visible state row (lock/unlock) in tray menu; lock indicator in session label when active; notifications on rule apply (persistent) and removal; helper-missing notification and Preferences hint; quit confirmation warns before removing rules</li>
-      <li>Split tunneling — exempt specific networks from the VPN tunnel so they route over the local connection (requires the privileged helper package); configure bypass CIDRs in the Preferences Routing tab; always-visible state row in tray menu; notifications on route apply and failure; symmetric IPv4/IPv6 routing with MSS clamping</li>
+      <li>Split tunneling — exempt specific networks from the VPN tunnel so they route over the local connection (requires the privileged helper package); configure bypass CIDRs in the Preferences Routing tab with per-entry enable/disable checkboxes; always-visible state row in tray menu; notifications on route apply and failure; symmetric IPv4/IPv6 routing with MSS clamping</li>
       <li>First-run help notification when the OpenVPN3 backend is not installed or reachable</li>
       <li>Automatic recovery when the OpenVPN3 service restarts</li>
       <li>Multiple VPN configuration support</li>
@@ -62,9 +62,11 @@
         <p>Launch on login, notification improvements, release hardening</p>
         <ul>
           <li>Launch on login — XDG autostart toggle in Preferences General tab</li>
+          <li>Split tunneling: per-entry enable/disable checkboxes in the Routing tab — suspend a bypass CIDR without losing the row</li>
           <li>Notifications: surface silent failures on kill-switch re-apply and menu actions</li>
           <li>Release workflow: per-step artifact assertions catch silent build failures early</li>
           <li>bump-version: awk-based prepend preserves all prior release entries</li>
+          <li>Packaging: AUR PKGBUILD for the privileged kill-switch helper</li>
         </ul>
       </description>
     </release>

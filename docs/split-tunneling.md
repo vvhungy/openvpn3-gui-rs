@@ -2,6 +2,15 @@
 
 Sprint 21 / T4 — read-only spike, deliverable is this document.
 
+> **Current status (S26):** Implemented per Option B (per-route + nft bypass set).
+> Shipped: Preferences Routing tab (Add/Remove CIDR), helper `SetBypassCidrs` +
+> `ApplyBypassRoutes` + `ClearBypassRoutes`, cold-start re-apply
+> (`dbus_init.rs`), connect/disconnect/pause/resume integration, tray bypass
+> state row, S26/T2 per-entry enable/disable checkbox without deleting rows.
+> Below this banner is a historical record of S21–S22 design/PoC; "Sprint 23
+> action" notes are snapshots from that period — refer to current code for
+> the shipped behaviour.
+
 ## Problem statement
 
 Split-tunneling lets a subset of traffic bypass the VPN tunnel and travel

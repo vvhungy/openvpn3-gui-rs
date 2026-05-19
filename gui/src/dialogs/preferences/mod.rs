@@ -155,23 +155,34 @@ pub fn show_preferences_dialog(
                 // dbus_init covers the no-session-connected case on next
                 // connect). Independent of kill-switch state per D4.
                 let new_cidrs = rw.entries.borrow().clone();
-                if new_cidrs != rw.initial {
-                    settings_clone.set_bypass_cidrs(&new_cidrs);
+                let new_disabled = rw.disabled.borrow().clone();
+                let cidrs_changed = new_cidrs != rw.initial;
+                let disabled_changed = new_disabled != rw.initial_disabled;
+                if cidrs_changed || disabled_changed {
+                    if cidrs_changed {
+                        settings_clone.set_bypass_cidrs(&new_cidrs);
+                    }
+                    if disabled_changed {
+                        settings_clone.set_bypass_cidrs_disabled(&new_disabled);
+                    }
+                    // Helper push uses the enabled-only subset — disabled
+                    // entries are GUI-side state and never reach the helper.
+                    let enabled = crate::settings::enabled_cidrs(&new_cidrs, &new_disabled);
                     let any_connected = tray_for_save
                         .update(|t| t.sessions.values().any(|s| s.status.is_connected()))
                         .unwrap_or(false);
                     if any_connected {
                         let tray_for_bypass = tray_for_save.clone();
                         glib::spawn_future_local(async move {
-                            if new_cidrs.is_empty() {
+                            if enabled.is_empty() {
                                 crate::dbus::killswitch::remove_bypass_routes().await;
                                 crate::dbus::killswitch::clear_bypass_cidrs().await;
                                 tray_for_bypass
                                     .update(|t| t.bypass_state = crate::tray::BypassState::Off);
                             } else {
-                                let count = new_cidrs.len();
+                                let count = enabled.len();
                                 let set_ok =
-                                    crate::dbus::killswitch::set_bypass_cidrs(new_cidrs).await;
+                                    crate::dbus::killswitch::set_bypass_cidrs(enabled).await;
                                 let apply_ok =
                                     set_ok && crate::dbus::killswitch::apply_bypass_routes().await;
                                 if apply_ok {

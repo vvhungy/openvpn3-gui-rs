@@ -71,14 +71,26 @@ Failed" / "Restart Failed") and the underlying error message. Removes the
 arrives shortly after and corrects state — but on actual D-Bus failure
 the user had no feedback.
 
-## Deferred to Sprint 26+ (within S25 time budget)
+## Won't fix (rationale recorded, S26 closeout)
 
-- **#6, #7** Version checks: log-only is acceptable for now; users can check
-  logs. A notification could be added but is low priority since version
-  mismatches are rare and the app degrades gracefully.
-- **#12** Auth dispatch returns None: rare D-Bus proxy failure; connection
-  will eventually timeout or user can retry. Adding a "check your D-Bus"
-  notification would help but requires careful UX design.
-- **#18** refresh_configs failure: stale list self-corrects on next poll.
-- **#19** Service restart re-init: rare; user can restart the app.
+Reviewed in S26 T3 after carrying as "deferred" for two sprints. Decisions
+recorded per cell; rationale stable enough to close. Trigger for revisit:
+any of these surfaces in a real user report → re-open as a numbered task
+in the sprint that picks it up. Until then these are closed, not deferred.
+
+- **#6, #7** Version checks (manager + helper). Log-only mismatch is
+  acceptable: app degrades gracefully, the version probe is informational
+  by design, and users running `--verbose` see the warning. Notification
+  would add UX noise without an actionable recovery step (users can't
+  hot-upgrade openvpn3 from the tray).
+- **#12** Auth dispatch returns None on rare D-Bus proxy failure. Existing
+  error path covers the more common connection-level failure with a
+  visible notification; a dedicated "auth dispatch unreachable" surface
+  would duplicate that signal. Retry is the user remedy.
+- **#18** `refresh_configs` failure produces a stale config list that
+  self-corrects on the next poll (existing behaviour). Adding a transient
+  notification would fire repeatedly during routine D-Bus restarts.
+- **#19** Service restart re-init failure is rare and the user can restart
+  the app. Normal service restart is already covered by the existing
+  recovery path.
 
