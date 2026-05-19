@@ -144,7 +144,7 @@ Controlled by `kill-switch-block-during-pause`:
 
 No explicit code needed. Resume transitions the session back to
 `ConnConnected`, which triggers the existing `is_connected` branch in
-`status_handler.rs` → `apply_kill_switch` re-fires. Helper's replace
+`status_handler/mod.rs` → `apply_kill_switch` re-fires. Helper's replace
 semantics make this idempotent.
 
 ### Mid-session toggle
@@ -158,7 +158,10 @@ Flipping the kill-switch checkbox in Preferences takes immediate effect:
 
 If the GUI starts while a session is already connected:
 `dbus_init.rs` re-fires the `is_connected` check, which applies rules if
-the kill-switch setting is enabled. No gap after GUI restart.
+the kill-switch setting is enabled. The same path re-pushes the enabled
+bypass CIDRs and re-applies bypass routes when the filtered subset is
+non-empty, then restores `tray.bypass_state` to `Active(N)` or `Failed`
+to match helper state. No gap after GUI restart.
 
 ### Helper not installed
 
@@ -171,9 +174,9 @@ firewall enforcement.
 | Mode | Symptom | Detection |
 |------|---------|-----------|
 | `openvpn3-service` crashed | `SessDestroyed` signal, no prior `StatusChange` | `SessDestroyed` handler |
-| Backend process killed (OOM, signal) | `StatusChange` → `ProcStopped`/`ProcKilled` then `SessDestroyed` | `status_handler.rs` error path → `disconnect_with_message()` |
-| D-Bus service restart | Name owner changed on bus, all sessions destroyed | `watch_service_restart()` in `dbus_init.rs` |
-| Network interface removed | `StatusChange` → `ConnDisconnected` with error message | `status_handler.rs` disconnected path |
+| Backend process killed (OOM, signal) | `StatusChange` → `ProcStopped`/`ProcKilled` then `SessDestroyed` | `status_handler/mod.rs` error path → `disconnect_with_message()` |
+| D-Bus service restart | Name owner changed on bus, all sessions destroyed | `watch_service_restart()` in `app/service_watcher.rs` |
+| Network interface removed | `StatusChange` → `ConnDisconnected` with error message | `status_handler/mod.rs` disconnected path |
 | User clicks Disconnect | `SessDestroyed` after explicit `Disconnect()` D-Bus call | `USER_DISCONNECTED` flag |
 
 Only the last row is intentional. All others are "unexpected" and trigger
@@ -188,7 +191,7 @@ classifies disconnects:
 - Tray "Disconnect" click → `actions.rs`
 - Tray "Reconnect" click → `actions.rs`
 - `disconnect_with_message()` (auth failure, connection error) → `session_ops.rs`
-- Auth-retry session cleanup → `status_handler.rs`
+- Auth-retry session cleanup → `status_handler/mod.rs`
 
 **Consumed (checked + removed) in:**
 - `SessDestroyed` handler → `signal_handlers.rs`
@@ -214,9 +217,12 @@ The helper ships as a separate package (`openvpn3-killswitch-helper`) with:
   Rules from old tunnel may block the new connection attempt. Mitigation:
   the helper allows traffic to all VPN server IPs from the config, not
   just the currently connected one.
-- **Split-tunnel conflict:** If the user has split-tunnel rules, the
-  kill-switch may override them. Mitigation: document as known limitation;
-  future work to integrate with split-tunnel configuration.
+- **Split-tunnel coexistence (implemented):** kill-switch and split-tunnel
+  share the `inet openvpn3_killswitch` table. The helper installs
+  `bypass_set` / `bypass_set_v6` nft sets accepted before the catch-all
+  drop, and per-entry enable/disable is filtered GUI-side
+  (`settings::enabled_cidrs`) before reaching the helper. See
+  [`split-tunneling.md`](split-tunneling.md).
 
 ## Locked design decisions
 
