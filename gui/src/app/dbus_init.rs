@@ -211,7 +211,14 @@ pub(crate) async fn init_dbus(
                         }
                         Ok(false) => {}
                         Err(e) => {
-                            warn!("kill-switch: startup re-apply failed for {}: {}", path, e)
+                            warn!("kill-switch: startup re-apply failed for {}: {}", path, e);
+                            crate::dialogs::show_error_notification(
+                                "Kill-Switch Re-Apply Failed",
+                                &format!(
+                                    "Firewall rules could not be re-applied after restart: {}",
+                                    e
+                                ),
+                            );
                         }
                     }
                 }

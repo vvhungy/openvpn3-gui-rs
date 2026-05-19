@@ -1,6 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
   <schema id="net.openvpn.openvpn3-gui-rs" path="/net/openvpn/openvpn3-gui-rs/">
+    <key name="launch-on-login" type="b">
+      <default>false</default>
+      <summary>Launch on user login</summary>
+      <description>
+        When enabled, an XDG autostart entry is written to
+        $XDG_CONFIG_HOME/autostart/ so the tray indicator starts
+        automatically on the next user login. The filesystem entry is
+        the source of truth; this key mirrors it and is re-synced from
+        the filesystem on every startup.
+      </description>
+    </key>
+
     <key name="startup-action" type="s">
       <default>'nothing'</default>
       <summary>Startup action</summary>

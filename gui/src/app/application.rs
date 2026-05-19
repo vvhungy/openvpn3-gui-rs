@@ -37,6 +37,7 @@ impl Application {
             .build();
 
         let settings = Settings::new();
+        crate::autostart::sync_gsettings_from_fs(&settings);
         let credentials = CredentialStore::new()?;
 
         if args.clear_secret_storage {

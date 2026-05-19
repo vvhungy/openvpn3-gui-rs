@@ -72,6 +72,10 @@ pub(crate) fn handle_tray_action(
             glib::spawn_future_local(async move {
                 if let Err(e) = session_action(&dbus, &session_path, "disconnect").await {
                     error!("Failed to disconnect: {}", e);
+                    crate::dialogs::show_error_notification(
+                        "Disconnect Failed",
+                        &format!("Could not disconnect VPN session: {}", e),
+                    );
                 }
                 // Session destruction will be handled by SessionManagerEvent signal
             });
@@ -83,6 +87,10 @@ pub(crate) fn handle_tray_action(
             glib::spawn_future_local(async move {
                 if let Err(e) = session_action(&dbus, &session_path, "pause").await {
                     error!("Failed to pause: {}", e);
+                    crate::dialogs::show_error_notification(
+                        "Pause Failed",
+                        &format!("Could not pause VPN session: {}", e),
+                    );
                 }
             });
         }
@@ -96,6 +104,10 @@ pub(crate) fn handle_tray_action(
                     super::session_ops::resume_session(&dbus, &session_path, &tray).await
                 {
                     error!("Failed to resume: {}", e);
+                    crate::dialogs::show_error_notification(
+                        "Resume Failed",
+                        &format!("Could not resume VPN session: {}", e),
+                    );
                 }
             });
         }
@@ -106,6 +118,10 @@ pub(crate) fn handle_tray_action(
             glib::spawn_future_local(async move {
                 if let Err(e) = session_action(&dbus, &session_path, "restart").await {
                     error!("Failed to restart: {}", e);
+                    crate::dialogs::show_error_notification(
+                        "Restart Failed",
+                        &format!("Could not restart VPN session: {}", e),
+                    );
                 }
             });
         }

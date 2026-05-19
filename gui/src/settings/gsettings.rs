@@ -255,6 +255,24 @@ impl Settings {
         }
     }
 
+    /// Launch-on-login mirror. Filesystem (`autostart::is_enabled`) is the
+    /// source of truth; this key is re-synced from disk on startup.
+    pub fn launch_on_login(&self) -> bool {
+        self.settings
+            .as_ref()
+            .map(|s| s.boolean("launch-on-login"))
+            .unwrap_or(false)
+    }
+
+    /// Persist the launch-on-login mirror.
+    pub fn set_launch_on_login(&self, enabled: bool) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_boolean("launch-on-login", enabled)
+        {
+            error!("Failed to set launch-on-login: {}", e);
+        }
+    }
+
     pub fn kill_switch_block_during_pause(&self) -> bool {
         self.settings
             .as_ref()
@@ -471,6 +489,16 @@ mod tests {
     #[test]
     fn test_set_show_first_run_help_no_panic() {
         Settings::new_empty().set_show_first_run_help(false);
+    }
+
+    #[test]
+    fn test_launch_on_login_default_false() {
+        assert!(!Settings::new_empty().launch_on_login());
+    }
+
+    #[test]
+    fn test_set_launch_on_login_no_panic() {
+        Settings::new_empty().set_launch_on_login(true);
     }
 
     #[test]

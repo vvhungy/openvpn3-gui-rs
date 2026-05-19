@@ -19,6 +19,7 @@
       <li>Session management (connect, disconnect, pause, resume, restart, reconnect)</li>
       <li>Desktop notifications for status changes (deduplicated, grouped per connection)</li>
       <li>Secure credential storage via Secret Service (oo7)</li>
+      <li>Launch on login via XDG autostart (toggle in Preferences)</li>
       <li>Auto-connect on startup (most-recent or specific profile)</li>
       <li>Reconnect prompt on unexpected session drop</li>
       <li>Username/password, challenge/OTP, and browser-redirect authentication</li>
@@ -56,6 +57,17 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.2" date="2026-05-19">
+      <description>
+        <p>Launch on login, notification improvements, release hardening</p>
+        <ul>
+          <li>Launch on login — XDG autostart toggle in Preferences General tab</li>
+          <li>Notifications: surface silent failures on kill-switch re-apply and menu actions</li>
+          <li>Release workflow: per-step artifact assertions catch silent build failures early</li>
+          <li>bump-version: awk-based prepend preserves all prior release entries</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-05-18">
       <description>
         <p>Patch release: CI packaging fix</p>

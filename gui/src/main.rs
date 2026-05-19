@@ -7,6 +7,7 @@
 //! extracting it would be more code than it saves.
 
 mod app;
+mod autostart;
 mod config;
 mod credentials;
 mod dbus;

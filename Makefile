@@ -92,10 +92,10 @@ bump-version:
 	sed -i 's/^version = ".*"/version = "$(V)"/' gui/Cargo.toml
 	sed -i 's/^version = ".*"/version = "$(V)"/' helper/Cargo.toml
 	sed -i 's/pkgver=.*/pkgver=$(V)/' pkg/aur/PKGBUILD
-	sed -i 's/release version="[^"]*" date="[^"]*"/release version="$(V)" date="$(shell date +%Y-%m-%d)"/' \
+	bash scripts/prepend-metainfo-release.sh $(V) $(shell date +%Y-%m-%d) \
 		data/net.openvpn.openvpn3_gui_rs.metainfo.xml
 	@echo "Updated: gui/Cargo.toml, helper/Cargo.toml, PKGBUILD, metainfo.xml"
-	@echo "Next: add metainfo <release> bullet, review diff, commit + tag v$(V)"
+	@echo "Next: replace 'TBD' in metainfo <release> body, review diff, commit + tag v$(V)"
 
 run:
 	cargo run
