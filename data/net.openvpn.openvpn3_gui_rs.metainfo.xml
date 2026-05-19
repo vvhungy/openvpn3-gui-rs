@@ -19,6 +19,7 @@
       <li>Session management (connect, disconnect, pause, resume, restart, reconnect)</li>
       <li>Desktop notifications for status changes (deduplicated, grouped per connection)</li>
       <li>Secure credential storage via Secret Service (oo7)</li>
+      <li>Launch on login via XDG autostart (toggle in Preferences)</li>
       <li>Auto-connect on startup (most-recent or specific profile)</li>
       <li>Reconnect prompt on unexpected session drop</li>
       <li>Username/password, challenge/OTP, and browser-redirect authentication</li>

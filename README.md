@@ -9,6 +9,7 @@ A system tray GUI for [OpenVPN3 Linux](https://github.com/OpenVPN/openvpn3-linux
 - Import and remove VPN profiles from `.ovpn` files via a file chooser
 - Username/password, OTP/challenge, and browser-redirect authentication dialogs
 - Saved credentials via the system keyring (Secret Service) — per-connection, optional
+- Launch on login (XDG autostart toggle in Preferences)
 - Auto-connect on startup: most-recent session, a specific profile, or disabled
 - Desktop notifications on status changes (grouped per connection, deduplicated)
 - Auto-reconnect prompt when a session drops unexpectedly
