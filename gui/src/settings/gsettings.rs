@@ -315,6 +315,30 @@ impl Settings {
         }
     }
 
+    /// Bypass CIDR entries temporarily disabled by the user (subset of
+    /// `bypass_cidrs`). Filtered out before pushing to the helper.
+    pub fn bypass_cidrs_disabled(&self) -> Vec<String> {
+        self.settings
+            .as_ref()
+            .map(|s| {
+                s.strv("bypass-cidrs-disabled")
+                    .into_iter()
+                    .map(|g| g.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Persist the disabled-bypass-CIDR list.
+    pub fn set_bypass_cidrs_disabled(&self, cidrs: &[String]) {
+        if let Some(settings) = &self.settings {
+            let values: Vec<&str> = cidrs.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = settings.set_strv("bypass-cidrs-disabled", values) {
+                error!("Failed to set bypass-cidrs-disabled: {}", e);
+            }
+        }
+    }
+
     /// User-facing limit on the number of bypass CIDR entries. Clamped to
     /// [1, 128] where 128 is the helper's hard ceiling.
     #[allow(dead_code)] // T3 ships plumbing; first call site lands in T4 (Preferences).
@@ -519,6 +543,16 @@ mod tests {
     #[test]
     fn test_set_bypass_cidrs_no_panic() {
         Settings::new_empty().set_bypass_cidrs(&["10.0.0.0/8".to_string()]);
+    }
+
+    #[test]
+    fn test_bypass_cidrs_disabled_default_empty() {
+        assert!(Settings::new_empty().bypass_cidrs_disabled().is_empty());
+    }
+
+    #[test]
+    fn test_set_bypass_cidrs_disabled_no_panic() {
+        Settings::new_empty().set_bypass_cidrs_disabled(&["10.0.0.0/8".to_string()]);
     }
 
     #[test]

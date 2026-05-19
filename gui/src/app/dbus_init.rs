@@ -182,7 +182,8 @@ pub(crate) async fn init_dbus(
     // spawns would race — if KS won, the firewall would drop bypassed
     // traffic until the next manual reconnect.
     let has_connected = !connected_paths.is_empty();
-    let bypass_cidrs = settings.bypass_cidrs();
+    let bypass_cidrs =
+        crate::settings::enabled_cidrs(&settings.bypass_cidrs(), &settings.bypass_cidrs_disabled());
     let ks_enabled = settings.enable_kill_switch();
     if has_connected && (ks_enabled || !bypass_cidrs.is_empty()) {
         let allow_lan = settings.kill_switch_allow_lan();

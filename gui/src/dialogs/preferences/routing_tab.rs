@@ -22,7 +22,8 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, Button, Entry, Frame, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow,
+    Box as GtkBox, Button, CheckButton, Entry, Frame, Label, ListBox, ListBoxRow, Orientation,
+    ScrolledWindow,
 };
 
 use crate::dialogs::layout::{CONTENT_MARGIN, SECTION_SPACING};
@@ -32,15 +33,22 @@ pub(super) struct RoutingWidgets {
     /// Live CIDR list — mutated by the tab's own widgets, read by the
     /// outer Save closure for diff vs. `initial` and write-back.
     pub entries: Rc<RefCell<Vec<String>>>,
+    /// Live disabled-CIDR list — checkbox-driven subset of `entries` that
+    /// is skipped on apply. Mutated on toggle, read by the Save closure.
+    pub disabled: Rc<RefCell<Vec<String>>>,
     /// Snapshot at build-time so the Save closure can detect "did the
     /// user actually change the list?" without re-reading GSettings.
     pub initial: Vec<String>,
+    /// Snapshot of disabled-list for the same diff-detection purpose.
+    pub initial_disabled: Vec<String>,
 }
 
 pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
     let max_count = settings.bypass_cidrs_max_count() as usize;
     let initial = settings.bypass_cidrs();
+    let initial_disabled = settings.bypass_cidrs_disabled();
     let entries: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(initial.clone()));
+    let disabled: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(initial_disabled.clone()));
     let editing: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
     let routing = GtkBox::new(Orientation::Vertical, SECTION_SPACING);
@@ -59,7 +67,8 @@ pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
     let description = Label::builder()
         .label(
             "Traffic to these IP ranges flows outside the VPN tunnel.\n\
-             Use CIDR notation, e.g. 10.0.0.0/8 or 2001:db8::/32.",
+             Use CIDR notation, e.g. 10.0.0.0/8 or 2001:db8::/32.\n\
+             Uncheck to temporarily disable an entry without removing it.",
         )
         .halign(gtk4::Align::Start)
         .wrap(true)
@@ -127,6 +136,7 @@ pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
         let list_box = list_box.clone();
         let counter = counter.clone();
         let entries = entries.clone();
+        let disabled = disabled.clone();
         let editing = editing.clone();
         let entry = entry.clone();
         let add_btn = add_btn.clone();
@@ -164,11 +174,20 @@ pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
                 hbox.set_margin_bottom(6);
                 hbox.set_margin_start(8);
                 hbox.set_margin_end(8);
+                let is_disabled = disabled.borrow().iter().any(|d| d == cidr);
+                let enabled_cb = CheckButton::new();
+                enabled_cb.set_active(!is_disabled);
+                enabled_cb
+                    .set_tooltip_text(Some("Uncheck to temporarily disable this entry on Apply"));
+                hbox.append(&enabled_cb);
                 let lbl = Label::builder()
                     .label(cidr)
                     .halign(gtk4::Align::Start)
                     .hexpand(true)
                     .build();
+                if is_disabled {
+                    lbl.add_css_class("dim-label");
+                }
                 hbox.append(&lbl);
                 let del_btn = Button::from_icon_name("edit-delete-symbolic");
                 del_btn.add_css_class("flat");
@@ -176,6 +195,30 @@ pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
                 hbox.append(&del_btn);
                 row.set_child(Some(&hbox));
                 list_box.append(&row);
+
+                // Checkbox toggle → mutate disabled list + re-render so
+                // label dimming + tray-row Active(n) preview reflect state.
+                {
+                    let entries = entries.clone();
+                    let disabled = disabled.clone();
+                    let render_slot = render_slot.clone();
+                    enabled_cb.connect_toggled(move |cb| {
+                        let cidr = match entries.borrow().get(idx) {
+                            Some(s) => s.clone(),
+                            None => return,
+                        };
+                        let mut d = disabled.borrow_mut();
+                        if cb.is_active() {
+                            d.retain(|c| c != &cidr);
+                        } else if !d.iter().any(|c| c == &cidr) {
+                            d.push(cidr);
+                        }
+                        drop(d);
+                        if let Some(r) = render_slot.borrow().as_ref() {
+                            r();
+                        }
+                    });
+                }
 
                 // Row-click load-for-edit is wired ONCE on the parent
                 // ListBox below (see `list_box.connect_row_activated`),
@@ -185,6 +228,7 @@ pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
                 // Delete button → mutate + re-render.
                 {
                     let entries = entries.clone();
+                    let disabled = disabled.clone();
                     let editing = editing.clone();
                     let entry = entry.clone();
                     let add_btn = add_btn.clone();
@@ -192,8 +236,13 @@ pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
                     let validation_label = validation_label.clone();
                     let render_slot = render_slot.clone();
                     del_btn.connect_clicked(move |_| {
-                        if idx < entries.borrow().len() {
-                            entries.borrow_mut().remove(idx);
+                        let removed = if idx < entries.borrow().len() {
+                            Some(entries.borrow_mut().remove(idx))
+                        } else {
+                            None
+                        };
+                        if let Some(c) = removed {
+                            disabled.borrow_mut().retain(|d| d != &c);
                         }
                         // If user was editing the deleted row, reset to
                         // "adding fresh" mode.
@@ -392,7 +441,12 @@ pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
         });
     }
 
-    let widgets = RoutingWidgets { entries, initial };
+    let widgets = RoutingWidgets {
+        entries,
+        disabled,
+        initial,
+        initial_disabled,
+    };
     (routing, widgets)
 }
 

@@ -61,7 +61,8 @@ pub(super) fn on_connected(
 
     // Bypass routing is independent of kill-switch (D4). Apply whenever
     // the user has configured bypass CIDRs — no KS gate.
-    let bypass_cidrs = settings.bypass_cidrs();
+    let bypass_cidrs =
+        crate::settings::enabled_cidrs(&settings.bypass_cidrs(), &settings.bypass_cidrs_disabled());
     let ks_enabled = settings.enable_kill_switch();
     let allow_lan = settings.kill_switch_allow_lan();
 
