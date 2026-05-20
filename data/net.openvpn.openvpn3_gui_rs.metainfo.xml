@@ -57,6 +57,17 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.5" date="2026-05-20">
+      <description>
+        <p>Sprint 28: service-lifecycle robustness and per-CIDR split-tunneling status</p>
+        <ul>
+          <li>Connect: retry NewTunnel with exponential backoff (500 ms / 1 s / 2 s) so the first connect after a fresh login no longer fails when the openvpn3-sessions service has not yet been D-Bus activated</li>
+          <li>Watcher: recover gracefully when the openvpn3-sessions service is killed — clear stale tray sessions, drop kill-switch and bypass routes at the helper, and notify the user instead of leaving zombie entries that silently reject Disconnect/Resume/Restart</li>
+          <li>Split tunneling: per-CIDR success/failure reporting — tray label distinguishes "N networks" (all applied), "N active, M failed" (partial), and "Apply failed" (system-wide); a persistent notification lists up to five failing CIDRs so the user knows exactly which subnets did not route outside the tunnel</li>
+          <li>Helper: ApplyBypassRoutes now returns per-entry granularity instead of failing the whole batch on the first bad CIDR; MIN_HELPER_VERSION raised to 0.3.5 to match the wire-incompatible signature change</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.4" date="2026-05-20">
       <description>
         <p>Sprint 27: split-tunneling DNS-leak documentation, build-step assertions, resume-auth diagnostics</p>
