@@ -35,6 +35,7 @@ fn is_retryable_activation_error_name(name: &str) -> bool {
     matches!(
         name,
         "org.freedesktop.DBus.Error.UnknownObject"
+            | "org.freedesktop.DBus.Error.UnknownMethod"
             | "org.freedesktop.DBus.Error.ServiceUnknown"
             | "org.freedesktop.DBus.Error.NameHasNoOwner"
     )
@@ -305,6 +306,15 @@ mod tests {
     fn test_retryable_activation_error_unknown_object() {
         assert!(is_retryable_activation_error_name(
             "org.freedesktop.DBus.Error.UnknownObject"
+        ));
+    }
+
+    #[test]
+    fn test_retryable_activation_error_unknown_method() {
+        // Observed on real cold-start: openvpn3-sessions service activates
+        // mid-call and replies UnknownMethod before the object is registered.
+        assert!(is_retryable_activation_error_name(
+            "org.freedesktop.DBus.Error.UnknownMethod"
         ));
     }
 
