@@ -12,6 +12,19 @@ mod submenus;
 
 use submenus::{config_submenu, session_submenu};
 
+/// Format the tray "Split tunnel" row body for an `Active` bypass state.
+/// Shape: `"N active"` (no failures), `"N active, M failed"` (partial), or
+/// `"Apply failed"` (zero applied — surface this rather than say "0 active").
+fn format_bypass_active(applied: usize, failed: usize) -> String {
+    match (applied, failed) {
+        (0, 0) => "🌐 Split tunnel: Off".to_string(),
+        (0, _) => "⚠️ Split tunnel: Apply failed".to_string(),
+        (1, 0) => "🌐 Split tunnel: 1 network".to_string(),
+        (a, 0) => format!("🌐 Split tunnel: {a} networks"),
+        (a, f) => format!("⚠️ Split tunnel: {a} active, {f} failed"),
+    }
+}
+
 /// Build the full tray menu for the given tray state.
 pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
     let mut items: Vec<MenuItem<VpnTray>> = Vec::new();
@@ -32,8 +45,7 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
 
     let bypass_label = match &tray.bypass_state {
         BypassState::Off => "🌐 Split tunnel: Off".to_string(),
-        BypassState::Active(1) => "🌐 Split tunnel: 1 network".to_string(),
-        BypassState::Active(n) => format!("🌐 Split tunnel: {} networks", n),
+        BypassState::Active { applied, failed } => format_bypass_active(*applied, *failed),
         BypassState::Failed => "⚠️ Split tunnel: Apply failed".to_string(),
     };
     items.push(
@@ -290,7 +302,10 @@ mod tests {
     #[test]
     fn test_bypass_row_singular_when_one() {
         let mut tray = make_tray();
-        tray.bypass_state = BypassState::Active(1);
+        tray.bypass_state = BypassState::Active {
+            applied: 1,
+            failed: 0,
+        };
         let labels = menu_labels(&build_menu(&tray));
         assert_eq!(labels[1], "🌐 Split tunnel: 1 network");
     }
@@ -298,7 +313,10 @@ mod tests {
     #[test]
     fn test_bypass_row_plural_when_many() {
         let mut tray = make_tray();
-        tray.bypass_state = BypassState::Active(3);
+        tray.bypass_state = BypassState::Active {
+            applied: 3,
+            failed: 0,
+        };
         let labels = menu_labels(&build_menu(&tray));
         assert_eq!(labels[1], "🌐 Split tunnel: 3 networks");
     }
@@ -307,6 +325,30 @@ mod tests {
     fn test_bypass_row_failed_state() {
         let mut tray = make_tray();
         tray.bypass_state = BypassState::Failed;
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(labels[1], "⚠️ Split tunnel: Apply failed");
+    }
+
+    #[test]
+    fn test_bypass_row_partial_failure() {
+        let mut tray = make_tray();
+        tray.bypass_state = BypassState::Active {
+            applied: 3,
+            failed: 2,
+        };
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(labels[1], "⚠️ Split tunnel: 3 active, 2 failed");
+    }
+
+    #[test]
+    fn test_bypass_row_all_failed_renders_as_failed() {
+        // Zero successful applies — render as "Apply failed" rather than
+        // "0 active, N failed" which would read as still-partial-working.
+        let mut tray = make_tray();
+        tray.bypass_state = BypassState::Active {
+            applied: 0,
+            failed: 2,
+        };
         let labels = menu_labels(&build_menu(&tray));
         assert_eq!(labels[1], "⚠️ Split tunnel: Apply failed");
     }

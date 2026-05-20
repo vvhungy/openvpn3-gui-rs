@@ -6,6 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use zbus::proxy::CacheProperties;
 
+use super::bypass_apply::apply_bypass_outcome_to_tray;
 use crate::config::{MANAGER_VERSION_MINIMUM, MANAGER_VERSION_RECOMMENDED, MIN_HELPER_VERSION};
 use crate::dbus::{
     configuration::{ConfigurationManagerProxy, ConfigurationProxy},
@@ -191,18 +192,13 @@ pub(crate) async fn init_dbus(
         let tray_clone = tray.clone();
         glib::spawn_future_local(async move {
             if !bypass_cidrs.is_empty() {
-                let count = bypass_cidrs.len();
                 let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
-                let apply_ok = set_ok && crate::dbus::killswitch::apply_bypass_routes().await;
-                if apply_ok {
-                    tray_clone
-                        .update(move |t| t.bypass_state = crate::tray::BypassState::Active(count));
-                    crate::dialogs::show_bypass_active_notification(count);
+                let outcome = if set_ok {
+                    crate::dbus::killswitch::apply_bypass_routes().await
                 } else {
-                    tray_clone.update(|t| t.bypass_state = crate::tray::BypassState::Failed);
-                    warn!("bypass routing: startup re-apply failed");
-                    crate::dialogs::show_bypass_failed_notification();
-                }
+                    None
+                };
+                apply_bypass_outcome_to_tray(&tray_clone, outcome, "startup re-apply");
             }
 
             if ks_enabled {

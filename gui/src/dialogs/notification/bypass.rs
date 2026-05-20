@@ -70,6 +70,39 @@ pub fn show_bypass_active_notification(count: usize) {
     });
 }
 
+/// Fired when bypass apply partially succeeded — some CIDRs installed, others
+/// failed. Persistent (`urgency=critical`, `expire_timeout=0`) per T5a spec:
+/// the user must know which subnets did NOT route outside the VPN, since the
+/// "Active N" tray label alone could leave them thinking everything worked.
+pub fn show_bypass_partial_notification(applied: usize, failed: Vec<(String, String)>) {
+    if !Settings::new().show_notifications() {
+        return;
+    }
+    let failed_count = failed.len();
+    // Cap the CIDR list to keep the notification body readable; full detail
+    // is in the helper journal log.
+    const MAX_LISTED: usize = 5;
+    let listed: Vec<String> = failed
+        .iter()
+        .take(MAX_LISTED)
+        .map(|(c, _)| c.clone())
+        .collect();
+    let tail = if failed_count > MAX_LISTED {
+        format!(" (+{} more)", failed_count - MAX_LISTED)
+    } else {
+        String::new()
+    };
+    let body = format!(
+        "{applied} bypass network(s) routed; {failed_count} failed: {}{tail}",
+        listed.join(", ")
+    );
+    glib::spawn_future_local(async move {
+        if let Err(e) = send_bypass_state("Split Tunneling Partially Applied", &body, 2, 0).await {
+            warn!("Failed to send bypass partial notification: {}", e);
+        }
+    });
+}
+
 /// Fired when bypass apply fails (helper reject, network capture failed, etc.).
 /// Persistent (`urgency=critical`, `expire_timeout=0`) per approved T5a spec:
 /// silent failure would leave the user thinking split tunneling worked.

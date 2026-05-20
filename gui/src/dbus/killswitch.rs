@@ -61,7 +61,8 @@ pub trait KillSwitch {
 
     fn ValidateBypassCidrs(&self, cidrs: Vec<String>) -> zbus::Result<Vec<String>>;
 
-    fn ApplyBypassRoutes(&self) -> zbus::Result<()>;
+    #[allow(clippy::type_complexity)]
+    fn ApplyBypassRoutes(&self) -> zbus::Result<(Vec<String>, Vec<(String, String)>)>;
 
     fn RemoveBypassRoutes(&self) -> zbus::Result<()>;
 
@@ -258,35 +259,50 @@ pub async fn clear_bypass_cidrs() {
     }
 }
 
+/// Per-CIDR outcome of an `ApplyBypassRoutes` call. `applied` lists CIDRs
+/// for which `ip rule add` succeeded; `failed` carries `(cidr, reason)` for
+/// ones that did not. System-wide apply failures (helper missing, gateway
+/// capture, rp_filter, table populate) surface as `None` from the wrapper —
+/// the caller renders those as `BypassState::Failed`.
+#[derive(Debug, Clone)]
+pub struct BypassApplyOutcome {
+    pub applied: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
 /// Ask the helper to install bypass routing (ip rules + secondary table +
 /// conntrack flush). The helper captures the pre-VPN gateway at apply-time
 /// (ephemeral, network-bound TTL). Must be preceded by `set_bypass_cidrs`
 /// so the helper has a CIDR list to route.
 ///
-/// Returns `false` when the helper is absent or the call fails.
-pub async fn apply_bypass_routes() -> bool {
-    let Some(conn) = system_bus().await else {
-        return false;
-    };
+/// Returns `None` when the helper is absent, the proxy fails, or the call
+/// fails entirely (system-wide apply error). Returns `Some` with per-CIDR
+/// granularity for partial-success cases.
+pub async fn apply_bypass_routes() -> Option<BypassApplyOutcome> {
+    let conn = system_bus().await?;
     if !helper_present(conn).await {
         warn!("kill-switch: helper not installed — bypass routes NOT applied");
-        return false;
+        return None;
     }
     let proxy = match build_proxy(conn).await {
         Ok(p) => p,
         Err(e) => {
             warn!("kill-switch: proxy build failed: {}", e);
-            return false;
+            return None;
         }
     };
     match proxy.ApplyBypassRoutes().await {
-        Ok(()) => {
-            info!("kill-switch: bypass routes applied");
-            true
+        Ok((applied, failed)) => {
+            info!(
+                applied = applied.len(),
+                failed = failed.len(),
+                "kill-switch: bypass routes applied"
+            );
+            Some(BypassApplyOutcome { applied, failed })
         }
         Err(e) => {
             warn!("kill-switch: ApplyBypassRoutes failed: {}", e);
-            false
+            None
         }
     }
 }

@@ -17,6 +17,10 @@ pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// OpenVPN3 configuration manager D-Bus service name (used to detect restarts)
 pub const OPENVPN3_SERVICE: &str = "net.openvpn.v3.configuration";
 
+/// OpenVPN3 sessions manager D-Bus service name. Independent of OPENVPN3_SERVICE:
+/// killing only sessionmgr leaves configuration alive, and tray sessions go stale.
+pub const OPENVPN3_SESSIONS_SERVICE: &str = "net.openvpn.v3.sessions";
+
 /// Minimum supported OpenVPN3 manager version
 pub const MANAGER_VERSION_MINIMUM: u32 = 20;
 
@@ -27,7 +31,7 @@ pub const MANAGER_VERSION_RECOMMENDED: u32 = 21;
 /// Bump only when the helper's D-Bus interface changes incompatibly:
 /// method removed, required method added, or property type changed.
 /// Do NOT bump for helper bug fixes or internal-only changes.
-pub const MIN_HELPER_VERSION: &str = "0.1.0";
+pub const MIN_HELPER_VERSION: &str = "0.3.5";
 
 /// Default icon name
 pub const DEFAULT_ICON: &str = "openvpn3-gui-rs-idle";
