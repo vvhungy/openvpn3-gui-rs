@@ -28,6 +28,47 @@ use crate::dbus::types::SessionStatus;
 use crate::settings::Settings;
 use crate::tray::{SessionInfo, VpnTray};
 
+/// D-Bus error names that indicate cold-start activation race — first
+/// `NewTunnel` after fresh login can fire before openvpn3-sessionmgr has
+/// spawned; the service activates on demand and subsequent attempts succeed.
+fn is_retryable_activation_error_name(name: &str) -> bool {
+    matches!(
+        name,
+        "org.freedesktop.DBus.Error.UnknownObject"
+            | "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NameHasNoOwner"
+    )
+}
+
+fn is_retryable_activation_error(err: &zbus::Error) -> bool {
+    matches!(err, zbus::Error::MethodError(name, _, _) if is_retryable_activation_error_name(name.as_str()))
+}
+
+/// Wrap `NewTunnel` with backoff for cold-start D-Bus activation races.
+/// 3 retries at 500ms / 1s / 2s; non-activation errors bubble up immediately.
+async fn new_tunnel_with_retry(
+    session_manager: &SessionManagerProxy<'_>,
+    obj_path: zbus::zvariant::ObjectPath<'_>,
+) -> zbus::Result<OwnedObjectPath> {
+    const BACKOFFS_MS: [u64; 3] = [500, 1000, 2000];
+    for (attempt, delay_ms) in BACKOFFS_MS.iter().enumerate() {
+        match session_manager.NewTunnel(obj_path.clone()).await {
+            Ok(p) => return Ok(p),
+            Err(e) if is_retryable_activation_error(&e) => {
+                warn!(
+                    "NewTunnel attempt {}/4 failed (activation race): {}; retrying in {}ms",
+                    attempt + 1,
+                    e,
+                    delay_ms
+                );
+                glib::timeout_future(std::time::Duration::from_millis(*delay_ms)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    session_manager.NewTunnel(obj_path).await
+}
+
 /// Connect to a VPN configuration
 pub(crate) async fn connect_to_config(
     dbus: &zbus::Connection,
@@ -67,7 +108,7 @@ pub(crate) async fn connect_to_config(
         .build()
         .await?;
     let obj_path = zbus::zvariant::ObjectPath::try_from(config_path_str)?;
-    let session_path = session_manager.NewTunnel(obj_path).await?;
+    let session_path = new_tunnel_with_retry(&session_manager, obj_path).await?;
     info!("Session created: {}", session_path);
 
     // Add session to tray immediately
@@ -258,5 +299,46 @@ mod tests {
     #[test]
     fn test_user_disconnected_lock_accessible() {
         let _guard = USER_DISCONNECTED.lock().unwrap();
+    }
+
+    #[test]
+    fn test_retryable_activation_error_unknown_object() {
+        assert!(is_retryable_activation_error_name(
+            "org.freedesktop.DBus.Error.UnknownObject"
+        ));
+    }
+
+    #[test]
+    fn test_retryable_activation_error_service_unknown() {
+        assert!(is_retryable_activation_error_name(
+            "org.freedesktop.DBus.Error.ServiceUnknown"
+        ));
+    }
+
+    #[test]
+    fn test_retryable_activation_error_name_has_no_owner() {
+        assert!(is_retryable_activation_error_name(
+            "org.freedesktop.DBus.Error.NameHasNoOwner"
+        ));
+    }
+
+    #[test]
+    fn test_retryable_activation_error_rejects_access_denied() {
+        // Credential / auth errors must NOT be masked by retry.
+        assert!(!is_retryable_activation_error_name(
+            "org.freedesktop.DBus.Error.AccessDenied"
+        ));
+    }
+
+    #[test]
+    fn test_retryable_activation_error_rejects_no_reply() {
+        assert!(!is_retryable_activation_error_name(
+            "org.freedesktop.DBus.Error.NoReply"
+        ));
+    }
+
+    #[test]
+    fn test_retryable_activation_error_rejects_empty() {
+        assert!(!is_retryable_activation_error_name(""));
     }
 }
