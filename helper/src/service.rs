@@ -206,7 +206,12 @@ impl KillSwitch {
     /// scoped conntrack flush per bypass CIDR. Independent of kill-switch
     /// state per S22 D4. Replace-all semantics per D3 — any prior routing
     /// state is torn down first. No-op success when bypass list is empty.
-    async fn apply_bypass_routes(&self) -> fdo::Result<()> {
+    ///
+    /// Returns `(applied, failed)` where `applied` is the CIDRs whose
+    /// `ip rule add` succeeded and `failed` carries `(cidr, reason)` for ones
+    /// that did not. System-wide steps (gateway capture, rp_filter, table)
+    /// still fail fast — only per-CIDR failures are collected (S28 T3).
+    async fn apply_bypass_routes(&self) -> fdo::Result<(Vec<String>, Vec<(String, String)>)> {
         let cidrs = {
             let state = self.state.lock().expect("state mutex poisoned");
             state.bypass_cidrs.clone()
@@ -215,7 +220,7 @@ impl KillSwitch {
             // D3: clearing is via ClearBypassCidrs + RemoveBypassRoutes.
             // Calling Apply with an empty list is a benign no-op.
             info!("ApplyBypassRoutes: bypass list empty — no routing changes");
-            return Ok(());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         // D3 replace-all: tear down any prior state first. Best-effort —
@@ -234,15 +239,14 @@ impl KillSwitch {
         let original_rpf = bypass::set_rp_filter_loose(&net.iface)
             .await
             .map_err(|e| fdo::Error::Failed(format!("rp_filter set: {e}")))?;
-        bypass::install_rules(&cidrs)
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("ip rule add: {e}")))?;
+        let (applied, failed) = bypass::install_rules(&cidrs).await;
         bypass::populate_table(&net)
             .await
             .map_err(|e| fdo::Error::Failed(format!("populate table: {e}")))?;
         // conntrack flush is defence-in-depth — return value intentionally
-        // discarded (failure logged inside flush_conntrack_scoped).
-        bypass::flush_conntrack_scoped(&cidrs).await;
+        // discarded (failure logged inside flush_conntrack_scoped). Use
+        // `applied` so we don't burn cycles on CIDRs that never got a rule.
+        bypass::flush_conntrack_scoped(&applied).await;
 
         {
             let mut state = self.state.lock().expect("state mutex poisoned");
@@ -250,11 +254,12 @@ impl KillSwitch {
             state.rp_filter_original = Some((net.iface.clone(), original_rpf));
         }
         info!(
-            count = cidrs.len(),
+            applied = applied.len(),
+            failed = failed.len(),
             iface = %net.iface,
             "bypass routes applied"
         );
-        Ok(())
+        Ok((applied, failed))
     }
 
     /// Tear down the routing-layer split-tunnel: delete every ip-rule at our

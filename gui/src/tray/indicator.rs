@@ -11,16 +11,16 @@ use tracing::error;
 
 /// Bypass (split-tunnel) state surfaced in the tray indicator row.
 ///
-/// Helper API is binary today — `Off` covers "no list configured" and "list
-/// cleared", `Active(n)` reports the count installed, `Failed` covers any
-/// apply-time failure (helper missing, validation reject, gateway capture
-/// fail, kernel rule install error). Per-route partial failure (e.g.
-/// "4 active, 1 failed") is deferred to a future sprint that extends the
-/// helper API to return per-CIDR outcomes.
+/// `Off` covers "no list configured" and "list cleared".
+/// `Active { applied, failed }` carries per-CIDR partial-failure granularity
+/// from the helper (S28 T3): a partially-applied apply lands here with
+/// `failed > 0` rather than collapsing to `Failed`. `Failed` is reserved for
+/// system-wide apply failures (helper missing, gateway capture, rp_filter,
+/// table populate) where no per-CIDR detail is available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BypassState {
     Off,
-    Active(usize),
+    Active { applied: usize, failed: usize },
     Failed,
 }
 

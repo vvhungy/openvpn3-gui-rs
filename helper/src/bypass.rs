@@ -145,12 +145,25 @@ fn rp_filter_path(iface: &str) -> String {
 ///
 /// Closes the T5 IPv6 leak: a v6 CIDR now actually installs an `ip -6 rule`,
 /// where the PoC silently dropped it.
-pub async fn install_rules(cidrs: &[String]) -> Result<()> {
+///
+/// Partial-failure semantics (S28 T3): one bad CIDR no longer aborts the rest.
+/// Returns `(applied, failed)` — `applied` lists CIDRs whose `ip rule add`
+/// succeeded; `failed` carries `(cidr, reason)` for ones that did not. Caller
+/// surfaces granular status; the all-or-nothing system-wide steps
+/// (gateway capture, rp_filter, table populate) still fail fast upstream.
+pub async fn install_rules(cidrs: &[String]) -> (Vec<String>, Vec<(String, String)>) {
+    let mut applied = Vec::new();
+    let mut failed = Vec::new();
     for cidr in cidrs {
-        let v6 = cidr_is_v6(cidr)?;
-        ip_rule_add(cidr, v6).await?;
+        match cidr_is_v6(cidr) {
+            Ok(v6) => match ip_rule_add(cidr, v6).await {
+                Ok(()) => applied.push(cidr.clone()),
+                Err(e) => failed.push((cidr.clone(), format!("{e:#}"))),
+            },
+            Err(e) => failed.push((cidr.clone(), format!("classify: {e:#}"))),
+        }
     }
-    Ok(())
+    (applied, failed)
 }
 
 async fn ip_rule_add(cidr: &str, v6: bool) -> Result<()> {
@@ -394,6 +407,34 @@ mod tests {
             iface: "eth0".into(),
         };
         assert!(n.gateway_v6.is_none());
+    }
+
+    #[tokio::test]
+    async fn install_rules_partitions_invalid_cidr() {
+        // Malformed CIDRs fail classify rather than reaching `ip rule add`.
+        // Doesn't need root since classify is pure parsing.
+        let cidrs = vec!["10.0.0.0/8".to_string(), "not-a-cidr".to_string()];
+        let (_applied, failed) = install_rules(&cidrs).await;
+        assert!(failed.iter().any(|(c, _)| c == "not-a-cidr"));
+    }
+
+    #[tokio::test]
+    async fn install_rules_empty_input_returns_empty_pair() {
+        let (applied, failed) = install_rules(&[]).await;
+        assert!(applied.is_empty());
+        assert!(failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn install_rules_reason_includes_input_cidr() {
+        let cidrs = vec!["bogus".to_string()];
+        let (_applied, failed) = install_rules(&cidrs).await;
+        assert_eq!(failed.len(), 1);
+        // Reason text should mention either "classify" or the bad input — used
+        // by the GUI to render a per-CIDR diagnostic in the notification body.
+        let (cidr, reason) = &failed[0];
+        assert_eq!(cidr, "bogus");
+        assert!(reason.contains("classify") || reason.contains("bogus"));
     }
 
     #[test]

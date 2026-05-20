@@ -73,17 +73,17 @@ pub(super) fn on_connected(
         // rejects the list, the helper retains its prior state and applying
         // would install routes for the wrong CIDRs.
         if !bypass_cidrs.is_empty() {
-            let count = bypass_cidrs.len();
             let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
-            let apply_ok = set_ok && crate::dbus::killswitch::apply_bypass_routes().await;
-            if apply_ok {
-                tray_for_bypass
-                    .update(move |t| t.bypass_state = crate::tray::BypassState::Active(count));
-                crate::dialogs::show_bypass_active_notification(count);
+            let outcome = if set_ok {
+                crate::dbus::killswitch::apply_bypass_routes().await
             } else {
-                tray_for_bypass.update(|t| t.bypass_state = crate::tray::BypassState::Failed);
-                crate::dialogs::show_bypass_failed_notification();
-            }
+                None
+            };
+            crate::app::bypass_apply::apply_bypass_outcome_to_tray(
+                &tray_for_bypass,
+                outcome,
+                "session connect",
+            );
         }
 
         // Kill-switch firewall — gated by user preference.

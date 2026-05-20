@@ -31,7 +31,7 @@ pub const MANAGER_VERSION_RECOMMENDED: u32 = 21;
 /// Bump only when the helper's D-Bus interface changes incompatibly:
 /// method removed, required method added, or property type changed.
 /// Do NOT bump for helper bug fixes or internal-only changes.
-pub const MIN_HELPER_VERSION: &str = "0.1.0";
+pub const MIN_HELPER_VERSION: &str = "0.3.5";
 
 /// Default icon name
 pub const DEFAULT_ICON: &str = "openvpn3-gui-rs-idle";
