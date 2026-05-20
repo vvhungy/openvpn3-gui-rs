@@ -374,6 +374,26 @@ pub(super) async fn setup_status_handler(
                     // Remove terminal sessions from the tray immediately rather than
                     // waiting for SessDestroyed. Prevents zombie "Profile: Done" entries.
                     if is_now_disconnected {
+                        // Cache (config_path, config_name) so the SessDestroyed
+                        // handler can still fire its reconnect notification after
+                        // we remove the session from the tray (SessDestroyed can
+                        // arrive several seconds after the 3s removal below).
+                        let path_for_cache = path_for_removal.clone();
+                        let tray_for_cache = tray_for_status.clone();
+                        if let Some((cp, cn)) = tray_for_cache
+                            .update(|t| {
+                                t.sessions
+                                    .get(&path_for_cache)
+                                    .map(|s| (s.config_path.clone(), s.config_name.clone()))
+                            })
+                            .flatten()
+                            && !cp.is_empty()
+                            && let Ok(mut map) =
+                                super::session_ops::RECENT_DESTROYED_SESSIONS.lock()
+                        {
+                            map.insert(path_for_cache, (cp, cn));
+                        }
+
                         // Delay removal so the notification chain completes with
                         // the correct profile name (Disconnecting → Disconnected → Done).
                         let tray_for_removal = tray_for_status.clone();

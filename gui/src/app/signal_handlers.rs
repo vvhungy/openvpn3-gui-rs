@@ -111,14 +111,25 @@ pub(crate) async fn setup_signal_handlers(
                             }
                         });
                     } else if event_type == SessionManagerEventType::SessDestroyed as u16 {
-                        // Capture config info before removing from tray
+                        // Capture config info before removing from tray. Fall back
+                        // to RECENT_DESTROYED_SESSIONS — status_handler removes the
+                        // entry from tray.sessions 3s after Disconnected, but
+                        // SessDestroyed can arrive several seconds later (~9s in
+                        // the resume-after-long-pause path), so without this cache
+                        // the reconnect notification silently fails to fire.
                         let session_info = tray_for_session
                             .update(|t| {
                                 t.sessions
                                     .get(&session_path)
                                     .map(|s| (s.config_path.clone(), s.config_name.clone()))
                             })
-                            .flatten();
+                            .flatten()
+                            .or_else(|| {
+                                super::session_ops::RECENT_DESTROYED_SESSIONS
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut m| m.remove(&session_path))
+                            });
 
                         // Delay removal so status notifications complete with the
                         // correct profile name. The status_handler also schedules a
