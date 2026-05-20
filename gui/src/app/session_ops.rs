@@ -7,6 +7,19 @@ use tracing::{error, info, warn};
 /// Session paths the user explicitly disconnected (not unexpected drops)
 pub(crate) static USER_DISCONNECTED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+/// Side-channel cache of (config_path, config_name) for sessions removed from
+/// the tray on `ConnDisconnected` before `SessDestroyed` arrives.
+///
+/// `status_handler` schedules a 3s `tray.sessions.remove()` on disconnect to
+/// suppress zombie "Profile: Done" entries, but the SessionManager's
+/// `SessDestroyed` event can take ~8s after that. Without this cache, the
+/// SessDestroyed handler reads `tray.sessions.get()` and gets `None`, so the
+/// unexpected-drop reconnect notification silently fails to fire. Populated
+/// before removal; drained on SessDestroyed read.
+pub(crate) static RECENT_DESTROYED_SESSIONS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, (String, String)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::OwnedObjectPath;
 
@@ -147,7 +160,12 @@ pub(crate) async fn resume_session(
     info!("Session resumed: {}", session_path_str);
 
     match session.Ready().await {
-        Ok(()) => {}
+        Ok(()) => {
+            info!(
+                "Session {} ready after resume — no credentials needed (re-auth, if required, will arrive via StatusChange)",
+                session_path_str
+            );
+        }
         Err(e) => {
             info!("Session not ready after resume (needs credentials): {}", e);
             let config_name = tray

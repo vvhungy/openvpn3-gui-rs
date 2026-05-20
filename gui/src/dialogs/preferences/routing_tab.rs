@@ -68,7 +68,9 @@ pub(super) fn build(settings: &Settings) -> (GtkBox, RoutingWidgets) {
         .label(
             "Traffic to these IP ranges flows outside the VPN tunnel.\n\
              Use CIDR notation, e.g. 10.0.0.0/8 or 2001:db8::/32.\n\
-             Uncheck to temporarily disable an entry without removing it.",
+             Uncheck to temporarily disable an entry without removing it.\n\
+             Note: DNS lookups still use your system resolver — the query \
+             name may leak even when traffic bypasses the tunnel.",
         )
         .halign(gtk4::Align::Start)
         .wrap(true)

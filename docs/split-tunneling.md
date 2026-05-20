@@ -504,3 +504,114 @@ kill-switch v6 firewall active.
 neither blocks implementation; both are defensive measures that production
 code should include regardless. IPv6 leak finding adds one concrete
 requirement to S23 scope: symmetric v6 rules or persistent v6 firewall.
+
+# Sprint 27 / T3 — DNS-leak behaviour on bypass CIDRs
+
+Read-only investigation. Closes the `check_dns — NOT CONCLUSIVE` follow-up
+from S22 T5 PoC (lines 451-458 above) and the S26 backlog DNS-leak item.
+
+## Scope
+
+What happens to DNS queries for hosts whose **resolved IP** lands inside a
+configured bypass CIDR? The connection itself follows the documented
+bypass path (priority-100 `ip rule` → `openvpn3-bypass` table → LAN
+gateway). The question is what path the *name resolution* takes before
+the connection is established.
+
+## Code-path analysis (no live measurement needed)
+
+`grep -ri "dns\|resolv\|nameserver\|udp.*53" helper/src/` returns zero
+matches outside the one comment in `bypass.rs:36`. The helper installs
+**only** `ip rule` + `ip route` + `nft` rules. No code touches
+`/etc/resolv.conf`, systemd-resolved, NetworkManager, or any per-link DNS
+configuration. The bypass mechanism is **destination-IP-based**, full
+stop.
+
+DNS resolution on a typical Linux desktop with OpenVPN3 follows:
+
+1. App calls `getaddrinfo("bypass-host.example")`.
+2. glibc reads `/etc/resolv.conf` → typically `nameserver 127.0.0.53`
+   (systemd-resolved stub).
+3. systemd-resolved picks an upstream per-link:
+   - **Tunnel link** (`tun0`): DNS servers pushed by VPN via
+     `dhcp-option DNS`, configured into resolved by `openvpn3-service-netcfg`.
+   - **Physical link** (`wlp0s20f3`, `enp0s31f6`): DNS from DHCP / NM.
+4. The query exits via whichever link resolved chose. **Our `ip rule`
+   does not see it** — the query goes to `127.0.0.53`, which is `lo`,
+   not a bypass CIDR.
+5. systemd-resolved's outbound query to the chosen upstream DNS goes
+   via that upstream's link route. If upstream is the VPN-pushed DNS
+   (e.g. `10.8.0.1`), the query exits via `tun0`. If upstream is
+   DHCP-pushed (`1.1.1.1`), the query exits via the LAN iface.
+6. Once the IP comes back, the app connects to `192.0.2.50` → **then**
+   our priority-100 `ip rule` catches the destination and routes via LAN.
+
+## Failure modes
+
+**Failure mode 1 — VPN-side DNS leak (most common configuration).**
+When the VPN profile uses `push "dhcp-option DNS"` (typical for
+corporate / commercial VPNs), the VPN provider's DNS resolver sees
+every `bypass-host.example` lookup. Connection traffic correctly
+bypasses, but **DNS metadata leaks to the VPN provider** — the
+provider can enumerate which bypass hosts the user resolves, even
+though it sees zero TCP/UDP traffic to them.
+
+**Failure mode 2 — ISP-side DNS leak (no VPN DNS push).**
+If the VPN profile does *not* push DNS, queries use the physical
+link's DNS (DHCP-provided, typically ISP or 1.1.1.1/8.8.8.8). This
+matches the no-VPN baseline for bypassed hosts. Acceptable for users
+whose threat model is "hide bypass traffic from VPN provider" but
+not for users whose threat model is "hide DNS from ISP".
+
+**Failure mode 3 — Correct path (rare).**
+Only if the user manually configures `nameserver` in `/etc/resolv.conf`
+to a private IP inside a bypass CIDR (e.g. `nameserver 10.0.0.1`
+where `10.0.0.0/8` is in `bypass-cidrs`) does the DNS query itself
+get caught by our `ip rule` and routed via LAN. This is not the
+default for any common setup.
+
+## Verdict
+
+**Matches partial expectation, gap documented.** The current
+implementation is consistent with the design intent stated at line 78
+("CIDRs only — DNS-resolved entries out of scope") and with the
+Option B trade-off table line 104 (per-destination granularity, not
+per-process or per-domain). DNS leakage is a known limitation of
+destination-IP-based split-tunneling.
+
+What was not previously documented: users may reasonably assume that
+bypassing `192.0.2.0/24` also hides their interest in those hosts
+from the VPN provider. It does not. **README + Preferences Routing
+tab tooltip should state this explicitly** so users with metadata
+threat models know to expect it.
+
+## Fix scope (deferred to backlog)
+
+A genuine DNS fix requires one of:
+
+- **Per-domain DNS routing via systemd-resolved.** Push a routing-only
+  link with `Domains=~bypass-host.example` and `DNS=<LAN resolver>` to
+  resolved. Requires us to know the *domains*, not just CIDRs — which
+  was rejected at v1 (line 78). Would also need integration with
+  `resolvectl` and a fallback when systemd-resolved isn't the active
+  resolver.
+- **Intercept localhost DNS queries.** Add an `ip rule` for
+  `udp dport 53` to the bypass table. Catches queries to public
+  resolvers (`1.1.1.1`, `8.8.8.8`) but not to systemd-resolved on
+  `127.0.0.53` (that's `lo`, not routable). Half-measure at best.
+- **Run a DNS proxy in the bypass network namespace.** Heavy. Out of
+  scope for a system-tray indicator.
+
+**Recommendation:** defer the fix. Land the documentation update
+(README + tooltip) in **T7 (sprint-end hygiene)**, not T5 (drift
+detection) — DNS leakage is orthogonal to nft set drift. Real fix
+goes to backlog gated on user demand (no concrete user report yet).
+
+## Backlog entry
+
+- **DNS-leak fix for bypass CIDRs** — destination-IP-based split-tunnel
+  does not cover the resolver query path. Three implementation options
+  documented above; each carries non-trivial design cost. Trigger: real
+  user report of metadata exposure concern, or expansion of
+  split-tunneling to per-domain entries (which would force a DNS
+  solution anyway).

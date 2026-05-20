@@ -64,20 +64,27 @@ uninstall:
 clean:
 	cargo clean
 
-# Distribution packages
+# Distribution packages.
+# Each target ends with a post-condition assertion (ls -la <glob>) so a silent
+# produce-step failure surfaces here, not downstream at upload/install time.
+# Mirrors the same assertions in .github/workflows/release.yml.
 deb: all
 	cargo deb -p openvpn3-gui-rs --no-build
+	ls -la target/debian/openvpn3-gui-rs_*.deb
 
 rpm: all
 	mkdir -p target/generate-rpm
 	cd gui && cargo generate-rpm -o ../target/generate-rpm
+	ls -la target/generate-rpm/openvpn3-gui-rs-*.rpm
 
 deb-helper: all
 	cargo deb -p openvpn3-killswitch-helper --no-build
+	ls -la target/debian/openvpn3-killswitch-helper_*.deb
 
 rpm-helper: all
 	mkdir -p target/generate-rpm
 	cd helper && cargo generate-rpm -o ../target/generate-rpm
+	ls -la target/generate-rpm/openvpn3-killswitch-helper-*.rpm
 
 # Development targets
 
@@ -92,6 +99,7 @@ bump-version:
 	sed -i 's/^version = ".*"/version = "$(V)"/' gui/Cargo.toml
 	sed -i 's/^version = ".*"/version = "$(V)"/' helper/Cargo.toml
 	sed -i 's/pkgver=.*/pkgver=$(V)/' pkg/aur/PKGBUILD
+	sed -i 's/pkgver=.*/pkgver=$(V)/' pkg/aur-helper/PKGBUILD
 	bash scripts/prepend-metainfo-release.sh $(V) $(shell date +%Y-%m-%d) \
 		data/net.openvpn.openvpn3_gui_rs.metainfo.xml
 	@echo "Updated: gui/Cargo.toml, helper/Cargo.toml, PKGBUILD, metainfo.xml"

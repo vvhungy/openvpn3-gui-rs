@@ -57,6 +57,17 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.4" date="2026-05-20">
+      <description>
+        <p>Sprint 27: split-tunneling DNS-leak documentation, build-step assertions, resume-auth diagnostics</p>
+        <ul>
+          <li>Docs: surface DNS-leak caveat for split tunneling in README and the Routing preferences tab — bypass routes destination IPs only, query names still hit the system resolver</li>
+          <li>Docs: full code-path + failure-mode analysis of the DNS resolver path appended to docs/split-tunneling.md</li>
+          <li>Diagnostics: info-level logs for resume-after-pause re-auth dispatch (session_ops, status_handler) to disambiguate the long-pause re-credential flow</li>
+          <li>Build: Makefile dist targets (deb, deb-helper, rpm, rpm-helper) now assert artifact presence with ls -la after each cargo invocation — mirrors the release.yml post-conditions</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.3" date="2026-05-19">
       <description>
         <p>Sprint 26: per-entry bypass toggle, AUR helper packaging, close-out</p>
