@@ -17,6 +17,10 @@ pub const APPLICATION_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// OpenVPN3 configuration manager D-Bus service name (used to detect restarts)
 pub const OPENVPN3_SERVICE: &str = "net.openvpn.v3.configuration";
 
+/// OpenVPN3 sessions manager D-Bus service name. Independent of OPENVPN3_SERVICE:
+/// killing only sessionmgr leaves configuration alive, and tray sessions go stale.
+pub const OPENVPN3_SESSIONS_SERVICE: &str = "net.openvpn.v3.sessions";
+
 /// Minimum supported OpenVPN3 manager version
 pub const MANAGER_VERSION_MINIMUM: u32 = 20;
 
