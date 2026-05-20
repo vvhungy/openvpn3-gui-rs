@@ -88,8 +88,15 @@ pub(super) async fn setup_status_handler(
                     // after Resume on an invalidated session must still reach the
                     // dispatcher even if the same (major, minor) was seen earlier.
                     let is_auth = status.is_auth_request();
-                    if !is_auth && last_signal.get(&path) == Some(&(major, minor)) {
+                    let prev = last_signal.get(&path).copied();
+                    if !is_auth && prev == Some((major, minor)) {
                         continue;
+                    }
+                    if is_auth && prev == Some((major, minor)) {
+                        info!(
+                            "Auth signal re-emitted for {} (major={}, minor={}) — dedup-exempt, dispatching",
+                            path, major, minor
+                        );
                     }
                     last_signal.insert(path.clone(), (major, minor));
 

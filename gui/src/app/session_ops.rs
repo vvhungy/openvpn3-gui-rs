@@ -147,7 +147,12 @@ pub(crate) async fn resume_session(
     info!("Session resumed: {}", session_path_str);
 
     match session.Ready().await {
-        Ok(()) => {}
+        Ok(()) => {
+            info!(
+                "Session {} ready after resume — no credentials needed (re-auth, if required, will arrive via StatusChange)",
+                session_path_str
+            );
+        }
         Err(e) => {
             info!("Session not ready after resume (needs credentials): {}", e);
             let config_name = tray
