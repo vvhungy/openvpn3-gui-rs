@@ -145,6 +145,7 @@ pub(crate) fn handle_tray_action(
             let parent = parent.clone();
             crate::dialogs::show_config_remove_dialog(
                 Some(parent.upcast_ref()),
+                &config_path.clone(),
                 &name,
                 move || {
                     let dbus = dbus.clone();

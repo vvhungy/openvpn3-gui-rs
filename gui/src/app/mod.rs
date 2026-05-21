@@ -26,7 +26,6 @@ mod application;
 mod auth_dispatch;
 mod auth_handlers;
 pub(crate) mod bypass_apply;
-mod challenge_handler;
 mod config_ops;
 mod credential_handler;
 mod dbus_init;

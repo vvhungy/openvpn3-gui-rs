@@ -15,42 +15,45 @@ pub fn show_config_select_dialog<F>(parent: Option<&gtk4::Window>, on_select: F)
 where
     F: Fn(std::path::PathBuf) + 'static,
 {
-    let dialog = FileChooserDialog::builder()
-        .title("Select OpenVPN Configuration")
-        .action(FileChooserAction::Open)
-        .modal(true)
-        .build();
+    let parent = parent.cloned();
+    super::singleton::present_global("config_select", move || {
+        let dialog = FileChooserDialog::builder()
+            .title("Select OpenVPN Configuration")
+            .action(FileChooserAction::Open)
+            .modal(true)
+            .build();
 
-    dialog.add_button("Cancel", ResponseType::Cancel);
-    dialog.add_button("Open", ResponseType::Accept);
+        dialog.add_button("Cancel", ResponseType::Cancel);
+        dialog.add_button("Open", ResponseType::Accept);
 
-    let filter = gtk4::FileFilter::new();
-    filter.set_name(Some("OpenVPN Configuration (*.ovpn, *.conf)"));
-    filter.add_pattern("*.ovpn");
-    filter.add_pattern("*.conf");
-    dialog.add_filter(&filter);
+        let filter = gtk4::FileFilter::new();
+        filter.set_name(Some("OpenVPN Configuration (*.ovpn, *.conf)"));
+        filter.add_pattern("*.ovpn");
+        filter.add_pattern("*.conf");
+        dialog.add_filter(&filter);
 
-    let all_filter = gtk4::FileFilter::new();
-    all_filter.set_name(Some("All Files"));
-    all_filter.add_pattern("*");
-    dialog.add_filter(&all_filter);
+        let all_filter = gtk4::FileFilter::new();
+        all_filter.set_name(Some("All Files"));
+        all_filter.add_pattern("*");
+        dialog.add_filter(&all_filter);
 
-    if let Some(p) = parent {
-        dialog.set_transient_for(Some(p));
-    }
-
-    dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept
-            && let Some(file) = dialog.file()
-            && let Some(path) = file.path()
-        {
-            info!("Selected file: {:?}", path);
-            on_select(path);
+        if let Some(p) = parent.as_ref() {
+            dialog.set_transient_for(Some(p));
         }
-        dialog.close();
-    });
 
-    dialog.present();
+        dialog.connect_response(move |dialog, response| {
+            if response == ResponseType::Accept
+                && let Some(file) = dialog.file()
+                && let Some(path) = file.path()
+            {
+                info!("Selected file: {:?}", path);
+                on_select(path);
+            }
+            dialog.close();
+        });
+
+        dialog.upcast::<gtk4::Window>()
+    });
 }
 
 /// Show configuration import dialog to set a name for the imported config
@@ -137,7 +140,26 @@ pub fn show_config_import_dialog<F>(
 }
 
 /// Show configuration removal confirmation dialog
-pub fn show_config_remove_dialog<F>(parent: Option<&gtk4::Window>, name: &str, on_remove: F)
+pub fn show_config_remove_dialog<F>(
+    parent: Option<&gtk4::Window>,
+    key: &str,
+    name: &str,
+    on_remove: F,
+) where
+    F: Fn() + 'static,
+{
+    let parent = parent.cloned();
+    let name = name.to_string();
+    super::singleton::present_keyed(key, move || {
+        build_config_remove_window(parent.as_ref(), &name, on_remove)
+    });
+}
+
+fn build_config_remove_window<F>(
+    parent: Option<&gtk4::Window>,
+    name: &str,
+    on_remove: F,
+) -> gtk4::Window
 where
     F: Fn() + 'static,
 {
@@ -184,59 +206,62 @@ where
     ));
 
     window.set_child(Some(&vbox));
-    window.present();
+    window
 }
 
 /// Show quit-while-kill-switch-active confirmation dialog.
 pub fn show_quit_confirmation_dialog(parent: Option<&gtk4::Window>, gtk_app: GtkApplication) {
-    let window = gtk4::Window::builder()
-        .title("Quit with kill-switch active?")
-        .modal(true)
-        .resizable(false)
-        .build();
+    let parent = parent.cloned();
+    super::singleton::present_global("quit_confirmation", move || {
+        let window = gtk4::Window::builder()
+            .title("Quit with kill-switch active?")
+            .modal(true)
+            .resizable(false)
+            .build();
 
-    if let Some(p) = parent {
-        window.set_transient_for(Some(p));
-    }
+        if let Some(p) = parent.as_ref() {
+            window.set_transient_for(Some(p));
+        }
 
-    let outer = GtkBox::new(Orientation::Vertical, 0);
-    let hbox = GtkBox::new(Orientation::Horizontal, 16);
-    hbox.set_margin_top(CONTENT_MARGIN);
-    hbox.set_margin_bottom(CONTENT_MARGIN);
-    hbox.set_margin_start(CONTENT_MARGIN);
-    hbox.set_margin_end(CONTENT_MARGIN);
+        let outer = GtkBox::new(Orientation::Vertical, 0);
+        let hbox = GtkBox::new(Orientation::Horizontal, 16);
+        hbox.set_margin_top(CONTENT_MARGIN);
+        hbox.set_margin_bottom(CONTENT_MARGIN);
+        hbox.set_margin_start(CONTENT_MARGIN);
+        hbox.set_margin_end(CONTENT_MARGIN);
 
-    let icon = Image::from_icon_name("dialog-warning");
-    icon.set_icon_size(IconSize::Large);
-    icon.set_pixel_size(48);
-    hbox.append(&icon);
+        let icon = Image::from_icon_name("dialog-warning");
+        icon.set_icon_size(IconSize::Large);
+        icon.set_pixel_size(48);
+        hbox.append(&icon);
 
-    let body = Label::builder()
-        .label("Quitting will remove the kill-switch firewall rules.\nYour VPN session will stay connected, but traffic will\nno longer be blocked if the tunnel drops.")
-        .halign(gtk4::Align::Start)
-        .valign(gtk4::Align::Center)
-        .wrap(true)
-        .build();
-    hbox.append(&body);
+        let body = Label::builder()
+            .label("Quitting will remove the kill-switch firewall rules.\nYour VPN session will stay connected, but traffic will\nno longer be blocked if the tunnel drops.")
+            .halign(gtk4::Align::Start)
+            .valign(gtk4::Align::Center)
+            .wrap(true)
+            .build();
+        hbox.append(&body);
 
-    outer.append(&hbox);
-    outer.append(&Separator::new(Orientation::Horizontal));
-    outer.append(&make_button_row(
-        "Cancel",
-        "Quit anyway",
-        {
-            let window = window.clone();
-            move || window.close()
-        },
-        {
-            let window = window.clone();
-            move || {
-                window.close();
-                gtk_app.quit();
-            }
-        },
-    ));
+        outer.append(&hbox);
+        outer.append(&Separator::new(Orientation::Horizontal));
+        outer.append(&make_button_row(
+            "Cancel",
+            "Quit anyway",
+            {
+                let window = window.clone();
+                move || window.close()
+            },
+            {
+                let window = window.clone();
+                move || {
+                    window.close();
+                    gtk_app.quit();
+                }
+            },
+        ));
 
-    window.set_child(Some(&outer));
-    window.present();
+        window.set_child(Some(&outer));
+        window
+    });
 }

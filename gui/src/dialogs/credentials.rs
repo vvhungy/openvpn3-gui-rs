@@ -34,11 +34,31 @@ pub struct CredentialField {
 /// `on_cancel` is called if the user cancels.
 pub fn show_credentials_dialog<F, C>(
     parent: Option<&gtk4::Window>,
+    key: &str,
     config_name: &str,
     fields: &[CredentialField],
     on_submit: F,
     on_cancel: C,
 ) where
+    F: Fn(Vec<(String, String)>, bool) + 'static,
+    C: Fn() + 'static,
+{
+    let parent = parent.cloned();
+    let config_name = config_name.to_string();
+    let fields = fields.to_vec();
+    super::singleton::present_keyed_system(key, move || {
+        build_credentials_window(parent.as_ref(), &config_name, &fields, on_submit, on_cancel)
+    });
+}
+
+fn build_credentials_window<F, C>(
+    parent: Option<&gtk4::Window>,
+    config_name: &str,
+    fields: &[CredentialField],
+    on_submit: F,
+    on_cancel: C,
+) -> gtk4::Window
+where
     F: Fn(Vec<(String, String)>, bool) + 'static,
     C: Fn() + 'static,
 {
@@ -173,112 +193,5 @@ pub fn show_credentials_dialog<F, C>(
     }
 
     window.set_child(Some(&vbox));
-    window.present();
-}
-
-/// Show a challenge/response dialog for OTP or challenge-based authentication.
-///
-/// `on_cancel` is called if the user cancels the dialog.
-pub fn show_challenge_dialog<F, C>(
-    parent: Option<&gtk4::Window>,
-    config_name: &str,
-    challenge: &str,
-    on_response: F,
-    on_cancel: C,
-) where
-    F: Fn(String) + 'static,
-    C: Fn() + 'static,
-{
-    let window = gtk4::Window::builder()
-        .title("VPN Authentication Challenge")
-        .modal(true)
-        .resizable(false)
-        .build();
-
-    if let Some(p) = parent {
-        window.set_transient_for(Some(p));
-    }
-
-    let vbox = GtkBox::new(Orientation::Vertical, 0);
-
-    let grid = Grid::builder()
-        .margin_top(CONTENT_MARGIN)
-        .margin_bottom(CONTENT_MARGIN)
-        .margin_start(CONTENT_MARGIN)
-        .margin_end(CONTENT_MARGIN)
-        .row_spacing(GRID_SPACING)
-        .column_spacing(GRID_SPACING)
-        .build();
-
-    // Config name
-    let config_label = Label::builder()
-        .label(format!("Configuration: {}", config_name))
-        .halign(gtk4::Align::Start)
-        .build();
-    grid.attach(&config_label, 0, 0, 2, 1);
-
-    // Challenge text
-    let challenge_label = Label::builder()
-        .label(challenge)
-        .halign(gtk4::Align::Start)
-        .wrap(true)
-        .margin_top(GRID_SPACING)
-        .margin_bottom(GRID_SPACING)
-        .build();
-    grid.attach(&challenge_label, 0, 1, 2, 1);
-
-    // Response entry
-    let response_label = Label::builder()
-        .label("Response:")
-        .halign(gtk4::Align::Start)
-        .build();
-    grid.attach(&response_label, 0, 2, 1, 1);
-
-    let response_entry = Entry::builder()
-        .hexpand(true)
-        .placeholder_text("Enter response")
-        .build();
-    grid.attach(&response_entry, 1, 2, 1, 1);
-
-    vbox.append(&grid);
-
-    // Guard against double-fire
-    let handled = Rc::new(Cell::new(false));
-
-    let response_clone = response_entry.clone();
-    vbox.append(&make_button_row(
-        "Cancel",
-        "Submit",
-        {
-            let window = window.clone();
-            let handled = handled.clone();
-            move || {
-                if handled.get() {
-                    return;
-                }
-                handled.set(true);
-                on_cancel();
-                window.close();
-            }
-        },
-        {
-            let window = window.clone();
-            move || {
-                if handled.get() {
-                    return;
-                }
-                handled.set(true);
-                let response_text = response_clone.text().to_string();
-                if !response_text.is_empty() {
-                    on_response(response_text);
-                }
-                window.close();
-            }
-        },
-    ));
-
-    response_entry.grab_focus();
-
-    window.set_child(Some(&vbox));
-    window.present();
+    window
 }

@@ -15,6 +15,15 @@ use crate::credentials::policy::{display_label_for, is_storable_field};
 use crate::dbus::session::SessionProxy;
 use crate::dbus::types::ClientAttentionType;
 
+/// Standard credential field labels — dialog always shows all 3 regardless
+/// of which slots the D-Bus queue currently holds. Extra dialog fields with
+/// no matching queue slot are silently ignored on submit.
+const STANDARD_FIELDS: [(&str, bool); 3] = [
+    ("Username", false),
+    ("Password", true),
+    ("One-Time Code", true),
+];
+
 pub(crate) const MAX_CREDENTIAL_ATTEMPTS: u32 = 3;
 
 /// Auth failures older than this are considered stale and the counter resets.
@@ -28,6 +37,34 @@ pub(crate) struct AuthAttempt {
 pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<String, AuthAttempt>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Common D-Bus label variants seen from different OpenVPN3 servers.
+/// Used to probe the keyring when the actual queue slot label doesn't
+/// match the standard field label.
+fn keyring_label_variants(standard_label: &str) -> &'static [&'static str] {
+    match standard_label {
+        "Username" => &["username", "Enter Username", "Enter username"],
+        "Password" => &[
+            "password",
+            "Enter Password",
+            "Enter password",
+            "Your password",
+        ],
+        "One-Time Code" => &["one-time code", "Authenticator Code", "One Time Password"],
+        _ => &[],
+    }
+}
+
+/// Check whether a D-Bus label belongs to a standard field category.
+fn label_matches_category(label: &str, standard_label: &str) -> bool {
+    let lower = label.to_lowercase();
+    match standard_label {
+        "Username" => lower.contains("username"),
+        "Password" => lower.contains("password"),
+        // OTP / challenge: anything that isn't username or password
+        _ => !lower.contains("username") && !lower.contains("password"),
+    }
+}
 
 /// Fetch credential input slots from D-Bus and show the credentials dialog.
 ///
@@ -95,8 +132,10 @@ pub(crate) async fn request_credentials(
     }
 
     if slots.is_empty() {
-        warn!("No credential slots found for session {}", session_path);
-        return;
+        warn!(
+            "No credential slots found for session {} — showing standard fields",
+            session_path
+        );
     }
 
     info!(
@@ -107,17 +146,28 @@ pub(crate) async fn request_credentials(
 
     // Resolve keyring values in async context before entering the sync dialog loop.
     // Prefilled values (from a previous attempt) take priority over keyring values.
+    // Resolve for actual queue slots, standard field labels, AND common label
+    // variants (OpenVPN3 servers use varying labels like "Username" vs
+    // "Enter username" — all map to the same keyring attribute).
     let cred_key = config_name.clone();
     let cred_store = crate::credentials::CredentialStore::default();
     let mut resolved = prefilled;
-    for (_att_type, _group, _id, label, mask) in &slots {
-        if resolved.contains_key(label) {
+    let mut labels_to_try: Vec<String> = slots.iter().map(|(_, _, _, l, _)| l.clone()).collect();
+    for (standard_label, _) in &STANDARD_FIELDS {
+        labels_to_try.push(standard_label.to_string());
+        // Common D-Bus label variants seen from different OpenVPN3 servers
+        for variant in keyring_label_variants(standard_label) {
+            labels_to_try.push(variant.to_string());
+        }
+    }
+    for label in labels_to_try {
+        if resolved.contains_key(&label) {
             continue;
         }
-        if is_storable_field(label, *mask)
-            && let Some(val) = cred_store.get_async(&cred_key, label).await.ok().flatten()
+        if is_storable_field(&label, true)
+            && let Some(val) = cred_store.get_async(&cred_key, &label).await.ok().flatten()
         {
-            resolved.insert(label.clone(), val);
+            resolved.insert(label, val);
         }
     }
 
@@ -140,16 +190,45 @@ fn show_credentials_with_slots(
     // Use config_name as credential store key (stable across sessions)
     let cred_key = config_name.clone();
 
-    // Build dynamic fields from the credential slots using pre-resolved values.
-    // Keyring lookups were already done in the async caller — prefilled contains them.
+    // Build dialog fields: always show all 3 standard fields so the user
+    // sees a consistent UI regardless of which slots are currently in the
+    // D-Bus queue. Fields that have a matching queue slot will be submitted;
+    // others are silently ignored.
     let mut fields = Vec::new();
-    for (_att_type, _group, _id, label, mask) in slots {
-        let saved = prefilled.get(label).cloned();
+    for (standard_label, standard_mask) in &STANDARD_FIELDS {
+        // Check if a real queue slot exists whose label matches this category
+        let matching_slot = slots.iter().find(|(_, _, _, label, _)| {
+            let lower = label.to_lowercase();
+            match *standard_label {
+                "Username" => lower.contains("username"),
+                "Password" => lower.contains("password"),
+                _ => !lower.contains("username") && !lower.contains("password"),
+            }
+        });
+        let (label, mask, key) = match matching_slot {
+            Some((_att_type, _group, _id, slot_label, slot_mask)) => {
+                (slot_label.clone(), *slot_mask, slot_label.clone())
+            }
+            None => (
+                standard_label.to_string(),
+                *standard_mask,
+                standard_label.to_string(),
+            ),
+        };
+        let saved = prefilled.get(&key).cloned().or_else(|| {
+            // Fallback: keyring may have stored under a different label
+            // variant that still matches this field category (e.g.
+            // "Enter username" → Username field).
+            prefilled
+                .iter()
+                .find(|(k, _)| label_matches_category(k, standard_label))
+                .map(|(_, v)| v.clone())
+        });
         fields.push(crate::dialogs::CredentialField {
-            key: label.clone(),
-            label: display_label_for(label),
-            masked: *mask,
-            can_store: is_storable_field(label, *mask),
+            key,
+            label: display_label_for(&label),
+            masked: mask,
+            can_store: is_storable_field(&label, mask),
             saved_value: saved,
         });
     }
@@ -180,6 +259,7 @@ fn show_credentials_with_slots(
     let parent = super::dialog_parent();
     crate::dialogs::show_credentials_dialog(
         parent.as_ref().map(|w| w.upcast_ref()),
+        &session_path,
         &config_name,
         &fields,
         {

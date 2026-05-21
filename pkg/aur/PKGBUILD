@@ -1,12 +1,12 @@
 # Maintainer: HungVV <vvhung@yahoo.com>
 pkgname=openvpn3-gui-rs
-pkgver=0.3.5
+pkgver=0.3.6
 pkgrel=1
 pkgdesc="System tray indicator for OpenVPN3 VPN tunnels, written in Rust with GTK4"
 arch=('x86_64' 'aarch64')
 url="https://github.com/vvhungy/openvpn3-gui-rs"
 license=('GPL-3.0-or-later')
-depends=('gtk4' 'glib2' 'libsecret' 'dbus')
+depends=('gtk4' 'glib2' 'libsecret' 'dbus' 'libadwaita')
 makedepends=('rust' 'cargo')
 optdepends=('openvpn3: VPN backend')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")

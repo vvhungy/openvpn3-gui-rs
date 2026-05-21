@@ -57,6 +57,19 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.6" date="2026-05-21">
+      <description>
+        <p>Sprint 29: dialog lifecycle hygiene, cold-start auth, and About styling</p>
+        <ul>
+          <li>Dialog singleton registry — Preferences, View Logs, About, and other windows now reuse a single instance instead of stacking duplicates on repeated tray clicks</li>
+          <li>Modal funnel — when a confirmation dialog is open, any tray action raises the modal instead of opening a new window, preventing dead-lock behind an invisible grab</li>
+          <li>Preferences is now non-modal so tray notifications remain visible while configuring settings</li>
+          <li>Cold-start authentication — sessions already waiting for credentials when the GUI starts now prompt the user automatically instead of showing "Authentication required" with no dialog</li>
+          <li>Unified auth dialog — all authentication flows (credentials, challenge/OTP) now route through a single 3-field dialog (username, password, authentication code) with keyring pre-fill</li>
+          <li>About dialog — replaced GtkAboutDialog with libadwaita AboutWindow, fixing the blue headerbar artifact on GNOME</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.5" date="2026-05-20">
       <description>
         <p>Sprint 28: service-lifecycle robustness and per-CIDR split-tunneling status</p>

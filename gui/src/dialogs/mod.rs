@@ -7,13 +7,14 @@ pub(crate) mod layout;
 mod logs;
 mod notification;
 mod preferences;
+mod singleton;
 
 pub use about::show_about_dialog;
 pub use configuration::{
     show_config_import_dialog, show_config_remove_dialog, show_config_select_dialog,
     show_quit_confirmation_dialog,
 };
-pub use credentials::{CredentialField, show_challenge_dialog, show_credentials_dialog};
+pub use credentials::{CredentialField, show_credentials_dialog};
 pub use logs::show_log_viewer;
 pub use notification::{
     show_bypass_active_notification, show_bypass_failed_notification,
