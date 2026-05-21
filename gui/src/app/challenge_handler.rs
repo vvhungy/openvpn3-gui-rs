@@ -102,6 +102,7 @@ pub(crate) async fn request_challenge(
     let parent = super::dialog_parent();
     crate::dialogs::show_challenge_dialog(
         parent.as_ref().map(|w| w.upcast_ref()),
+        &session_path.clone(),
         &config_name.clone(),
         &challenge_text,
         move |response_text| {

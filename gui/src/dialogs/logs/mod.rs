@@ -93,6 +93,19 @@ pub fn show_log_viewer(
     tray: &ksni::blocking::Handle<crate::tray::VpnTray>,
     dbus: &zbus::Connection,
 ) {
+    let parent = parent.cloned();
+    let tray = tray.clone();
+    let dbus = dbus.clone();
+    crate::dialogs::singleton::present_global("log_viewer", move || {
+        build_log_viewer(parent.as_ref(), &tray, &dbus)
+    });
+}
+
+fn build_log_viewer(
+    parent: Option<&gtk4::Window>,
+    tray: &ksni::blocking::Handle<crate::tray::VpnTray>,
+    dbus: &zbus::Connection,
+) -> gtk4::Window {
     let settings = Settings::new();
     let window = Window::builder()
         .title("VPN Logs")
@@ -224,8 +237,6 @@ pub fn show_log_viewer(
         }
         glib::Propagation::Proceed
     });
-
-    window.present();
 
     // Live-tail subscription
     let dbus = dbus.clone();
@@ -359,6 +370,8 @@ pub fn show_log_viewer(
             )
             .await;
     });
+
+    window
 }
 
 /// Create a tab for a config name, populated with all buffered history

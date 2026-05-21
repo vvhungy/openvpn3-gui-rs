@@ -10,10 +10,8 @@ use crate::dbus::session::SessionProxy;
 /// Which handler to invoke based on the server's input queue group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthDispatch {
-    /// Username/password (and possibly static_challenge) needed
+    /// All auth handled through credentials dialog (shows 3 standard fields)
     Credentials,
-    /// Dynamic or static challenge / OTP needed
-    Challenge,
 }
 
 /// Determine which handler to dispatch to based on the (type, group) pairs
@@ -41,9 +39,11 @@ pub fn dispatch_from_groups(type_groups: &[(u32, u32)]) -> Option<AuthDispatch> 
     let has_challenge = groups.iter().any(|g| challenge_groups.contains(g));
     let has_credentials = groups.contains(&1);
 
-    if has_challenge {
-        Some(AuthDispatch::Challenge)
-    } else if has_credentials {
+    // Always route to Credentials — the dialog always shows all 3 fields
+    // (username, password, authentication code) regardless of which slots
+    // are currently in the queue. Submit only provides values to actual
+    // queue slots; extra fields are silently ignored.
+    if has_credentials || has_challenge {
         Some(AuthDispatch::Credentials)
     } else {
         None
@@ -103,7 +103,7 @@ mod tests {
     fn test_dispatch_static_challenge() {
         assert_eq!(
             dispatch_from_groups(&[(1, 4)]),
-            Some(AuthDispatch::Challenge)
+            Some(AuthDispatch::Credentials)
         );
     }
 
@@ -111,7 +111,7 @@ mod tests {
     fn test_dispatch_dynamic_challenge() {
         assert_eq!(
             dispatch_from_groups(&[(1, 5)]),
-            Some(AuthDispatch::Challenge)
+            Some(AuthDispatch::Credentials)
         );
     }
 
@@ -119,17 +119,17 @@ mod tests {
     fn test_dispatch_auth_pending() {
         assert_eq!(
             dispatch_from_groups(&[(1, 6)]),
-            Some(AuthDispatch::Challenge)
+            Some(AuthDispatch::Credentials)
         );
     }
 
     #[test]
     fn test_dispatch_mixed_credentials_and_challenge() {
-        // When both user_password and challenge groups exist, challenge takes priority
-        // because credentials dialog already shows static_challenge fields
+        // Always Credentials — dialog shows all 3 fields, submit matches
+        // actual queue slots.
         assert_eq!(
             dispatch_from_groups(&[(1, 1), (1, 4)]),
-            Some(AuthDispatch::Challenge)
+            Some(AuthDispatch::Credentials)
         );
     }
 

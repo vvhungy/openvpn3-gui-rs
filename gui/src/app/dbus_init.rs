@@ -108,6 +108,10 @@ pub(crate) async fn init_dbus(
 
     let mut sessions = HashMap::new();
     let mut connected_paths: Vec<String> = Vec::new();
+    // Cold-start auth dispatch: sessions already in a "needs input" state
+    // when the GUI starts won't re-emit StatusChange, so collect them here
+    // and dispatch after tray.update so config_name lookups succeed.
+    let mut pending_auth: Vec<(String, SessionStatus, String)> = Vec::new();
     for path in &session_paths {
         match SessionProxy::builder(dbus)
             .path(path.clone())?
@@ -137,9 +141,16 @@ pub(crate) async fn init_dbus(
                     debug!("LogForward for {}: {}", path, e);
                 }
 
-                let status = SessionStatus::new(major, minor, message);
+                let status = SessionStatus::new(major, minor, message.clone());
                 if status.is_connected() {
                     connected_paths.push(path.as_str().to_string());
+                }
+                if status.needs_user_input()
+                    || status.needs_credentials()
+                    || status.needs_url_auth()
+                    || status.needs_challenge()
+                {
+                    pending_auth.push((path.as_str().to_string(), status.clone(), message));
                 }
                 sessions.insert(
                     path.as_str().to_string(),
@@ -172,6 +183,15 @@ pub(crate) async fn init_dbus(
         "Tray updated with {} configs, initial state set",
         config_paths.len()
     );
+
+    // Cold-start auth: replay missed StatusChange dispatch for sessions that
+    // were already waiting on user input when the GUI started. Without this,
+    // a session in "Authentication required" at app launch never gets its
+    // credentials/challenge dialog.
+    for (path, status, message) in pending_auth {
+        info!("Cold-start: dispatching auth handler for session {}", path);
+        super::auth_handlers::try_handle_auth(dbus, tray, &status, &path, &message);
+    }
 
     // Re-apply bypass + kill-switch state for sessions that were already
     // connected before this GUI instance started (e.g., after a GUI restart).

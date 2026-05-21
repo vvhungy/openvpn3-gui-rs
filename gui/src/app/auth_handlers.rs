@@ -1,9 +1,9 @@
 //! Authentication and input-request dispatch for StatusChange signals.
 //!
-//! Centralises the four "session needs user input" branches (user-input
-//! query, credentials, URL/browser auth, challenge/OTP) so the main status
-//! stream stays readable. Each branch looks up the config name from the
-//! tray, then spawns the corresponding handler.
+//! Centralises the "session needs user input" branches (user-input query,
+//! credentials, URL/browser auth) so the main status stream stays readable.
+//! Challenge/OTP is now handled by the credentials dialog (always shows 3
+//! fields) rather than a separate single-field dialog.
 //!
 //! No testable pure surface — async dispatch with no branching logic to unit test.
 
@@ -36,7 +36,8 @@ pub(super) fn try_handle_auth(
         return true;
     }
     if status.needs_challenge() {
-        handle_challenge_required(conn, tray, path);
+        // Challenge/OTP is now routed through credentials dialog (always 3 fields)
+        handle_credentials_required(conn, tray, path);
         return true;
     }
     false
@@ -65,14 +66,6 @@ fn handle_user_input_required(
                     &session_path,
                     &config_name,
                     Default::default(),
-                )
-                .await;
-            }
-            Some(super::auth_dispatch::AuthDispatch::Challenge) => {
-                super::challenge_handler::request_challenge(
-                    &dbus_conn,
-                    &session_path,
-                    &config_name,
                 )
                 .await;
             }
@@ -121,18 +114,4 @@ fn handle_url_auth_required(tray: &ksni::blocking::Handle<VpnTray>, path: &str, 
     {
         warn!("Failed to open auth URL in browser: {}", e);
     }
-}
-
-fn handle_challenge_required(
-    conn: &zbus::Connection,
-    tray: &ksni::blocking::Handle<VpnTray>,
-    path: &str,
-) {
-    info!("Session requires challenge/OTP response");
-    let session_path = path.to_string();
-    let dbus_conn = conn.clone();
-    let config_name = lookup_config_name(tray, path);
-    glib::spawn_future_local(async move {
-        super::challenge_handler::request_challenge(&dbus_conn, &session_path, &config_name).await;
-    });
 }

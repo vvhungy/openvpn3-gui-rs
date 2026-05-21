@@ -23,9 +23,26 @@ pub fn show_preferences_dialog(
     tray: ksni::blocking::Handle<crate::tray::VpnTray>,
     dbus: zbus::Connection,
 ) {
+    let parent = parent.cloned();
+    let settings = settings.clone();
+    super::singleton::present_global("preferences", move || {
+        build_preferences_window(parent.as_ref(), &settings, configs, tray, dbus)
+    });
+}
+
+fn build_preferences_window(
+    parent: Option<&gtk4::Window>,
+    settings: &Settings,
+    configs: Vec<ConfigInfo>,
+    tray: ksni::blocking::Handle<crate::tray::VpnTray>,
+    dbus: zbus::Connection,
+) -> gtk4::Window {
+    // Non-modal: leaves tray and other surfaces interactable while user
+    // configures — fixes the race where modal Preferences hides incoming
+    // connection notifications.
     let window = gtk4::Window::builder()
         .title("Preferences")
-        .modal(true)
+        .modal(false)
         .resizable(false)
         .build();
 
@@ -203,5 +220,5 @@ pub fn show_preferences_dialog(
     ));
 
     window.set_child(Some(&outer));
-    window.present();
+    window
 }
