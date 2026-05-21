@@ -2,17 +2,10 @@
 //!
 //! No testable pure surface — GTK widget builder.
 
-use gtk4::gdk::Texture;
-use gtk4::gdk_pixbuf::Pixbuf;
-use gtk4::gio::{Cancellable, MemoryInputStream};
-use gtk4::glib::Bytes;
 use gtk4::prelude::*;
-use gtk4::{AboutDialog, License};
+use libadwaita::AboutWindow;
 
 use crate::config::{APPLICATION_TITLE, APPLICATION_VERSION};
-
-const APP_ICON_SVG: &[u8] =
-    include_bytes!("../../../data/icons/hicolor/scalable/apps/openvpn3-gui-rs.svg");
 
 fn system_info() -> String {
     let gtk_ver = format!(
@@ -40,21 +33,14 @@ fn system_info() -> String {
 pub fn show_about_dialog(parent: Option<&gtk4::Window>) {
     let parent = parent.cloned();
     super::singleton::present_global("about", move || {
-        let dialog = AboutDialog::builder()
-            .program_name(APPLICATION_TITLE)
+        let dialog = AboutWindow::builder()
+            .application_name(APPLICATION_TITLE)
             .version(APPLICATION_VERSION)
             .comments(system_info().as_str())
-            .license_type(License::Gpl30)
+            .license_type(gtk4::License::Gpl30)
             .website("https://github.com/vvhungy/openvpn3-gui-rs")
-            .website_label("GitHub")
+            .application_icon("openvpn3-gui-rs")
             .build();
-
-        let stream = MemoryInputStream::from_bytes(&Bytes::from_owned(APP_ICON_SVG.to_vec()));
-        if let Ok(pixbuf) =
-            Pixbuf::from_stream_at_scale(&stream, 128, 128, true, None::<&Cancellable>)
-        {
-            dialog.set_logo(Some(&Texture::for_pixbuf(&pixbuf)));
-        }
 
         if let Some(p) = parent.as_ref() {
             dialog.set_transient_for(Some(p));

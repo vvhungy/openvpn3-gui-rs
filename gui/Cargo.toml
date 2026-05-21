@@ -17,6 +17,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 gtk4 = "0.9"
 glib = "0.20"
 gio = "0.20"
+libadwaita = { version = "0.7", features = ["v1_2"] }
 
 # D-Bus
 zbus = { version = "5", features = ["tokio"] }
@@ -51,7 +52,7 @@ glib-build-tools = "0.20"
 maintainer = "HungVV <vvhung@yahoo.com>"
 copyright = "2026, HungVV"
 license-file = ["../LICENSE", "0"]
-depends = "$auto, libgtk-4-1, libglib2.0-0, libsecret-1-0"
+depends = "$auto, libgtk-4-1, libglib2.0-0, libsecret-1-0, libadwaita-1-0"
 recommends = "openvpn3, openvpn3-killswitch-helper"
 section = "net"
 priority = "optional"
@@ -75,7 +76,7 @@ assets = [
 [package.metadata.generate-rpm]
 summary = "System tray indicator for OpenVPN3 VPN tunnels"
 license = "GPL-3.0-or-later"
-requires = { gtk4 = "*", glib2 = "*", libsecret = "*" }
+requires = { gtk4 = "*", glib2 = "*", libsecret = "*", libadwaita = "*" }
 
 [[package.metadata.generate-rpm.assets]]
 source = "../target/release/openvpn3-gui-rs"

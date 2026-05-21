@@ -31,6 +31,7 @@ pub struct Application;
 
 impl Application {
     pub fn run(args: AppArgs) -> anyhow::Result<ExitCode> {
+        libadwaita::init()?;
         let gtk_app = GtkApplication::builder()
             .application_id(APPLICATION_ID)
             .flags(ApplicationFlags::HANDLES_OPEN)
@@ -76,6 +77,14 @@ impl Application {
 
         gtk_app.connect_startup(move |gtk_app| {
             info!("Application startup");
+
+            // Register bundled icons so adw::AboutWindow (and any icon-name
+            // lookup) finds them both when running from the build directory
+            // and when installed.
+            if let Some(display) = gtk4::gdk::Display::default() {
+                let theme = gtk4::IconTheme::for_display(&display);
+                theme.add_search_path("data/icons");
+            }
 
             // Hidden window — never shown, used as transient parent for all dialogs
             // so GTK doesn't warn about dialogs without a transient parent.
