@@ -32,6 +32,33 @@ pub(super) fn format_log_line(
     )
 }
 
+/// Render a full plain-text export for the given entries.
+///
+/// Layout:
+///   `# openvpn3-gui-rs log export — <config_name> — exported <ISO timestamp>`
+///   `<formatted log line>` (one per entry)
+///   `# <N> entries`
+///
+/// `exported_at` is taken as an argument so this is a pure function (tests
+/// pin the timestamp). Callers pass `chrono::Local::now()`.
+pub(super) fn format_export(
+    entries: &[crate::app::log_buffer::LogEntry],
+    config_name: &str,
+    exported_at: chrono::DateTime<chrono::Local>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# openvpn3-gui-rs log export — {} — exported {}\n",
+        config_name,
+        exported_at.format("%Y-%m-%d %H:%M:%S %z"),
+    ));
+    for e in entries {
+        out.push_str(&format_log_line(&e.timestamp, e.category, &e.message));
+    }
+    out.push_str(&format!("# {} entries\n", entries.len()));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +91,46 @@ mod tests {
         let ts = chrono::NaiveTime::from_hms_opt(9, 5, 30).unwrap();
         let line = format_log_line(&ts, 6, "Connection refused");
         assert_eq!(line, "09:05:30 [ERROR] Connection refused\n");
+    }
+
+    fn fixed_export_time() -> chrono::DateTime<chrono::Local> {
+        chrono::DateTime::parse_from_rfc3339("2026-05-28T10:30:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Local)
+    }
+
+    fn make_log_entry(secs: u32, cat: u32, msg: &str) -> crate::app::log_buffer::LogEntry {
+        crate::app::log_buffer::LogEntry {
+            timestamp: chrono::NaiveTime::from_hms_opt(10, 0, secs).unwrap(),
+            session_path: "/test/s".into(),
+            config_name: "TestVPN".into(),
+            category: cat,
+            message: msg.into(),
+        }
+    }
+
+    #[test]
+    fn test_format_export_empty() {
+        let out = format_export(&[], "TestVPN", fixed_export_time());
+        assert!(out.starts_with("# openvpn3-gui-rs log export — TestVPN — exported "));
+        assert!(out.ends_with("# 0 entries\n"));
+    }
+
+    #[test]
+    fn test_format_export_with_entries() {
+        let entries = vec![
+            make_log_entry(1, 4, "first"),
+            make_log_entry(2, 6, "second"),
+        ];
+        let out = format_export(&entries, "TestVPN", fixed_export_time());
+        assert!(out.contains("[INFO] first"));
+        assert!(out.contains("[ERROR] second"));
+        assert!(out.contains("# 2 entries\n"));
+    }
+
+    #[test]
+    fn test_format_export_header_includes_config_name() {
+        let out = format_export(&[], "My Work VPN", fixed_export_time());
+        assert!(out.lines().next().unwrap().contains("My Work VPN"));
     }
 }
