@@ -33,6 +33,7 @@ pub enum TrayAction {
     Resume(String),            // session D-Bus path
     Restart(String),           // session D-Bus path
     Reconnect(String, String), // (session_path, config_path) for disconnected/error sessions
+    Statistics(String),        // session D-Bus path
     RemoveConfig(String),      // config D-Bus path
     ImportConfig,
     About,

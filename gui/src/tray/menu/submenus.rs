@@ -31,6 +31,17 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
             let p = session_path.clone();
             items.push(
                 StandardItem {
+                    label: "Statistics".into(),
+                    activate: Box::new(move |tray: &mut VpnTray| {
+                        tray.send_action(TrayAction::Statistics(p.clone()));
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            let p = session_path.clone();
+            items.push(
+                StandardItem {
                     label: "Restart".into(),
                     activate: Box::new(move |tray: &mut VpnTray| {
                         tray.send_action(TrayAction::Restart(p.clone()));
@@ -47,6 +58,17 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
                     label: "Resume".into(),
                     activate: Box::new(move |tray: &mut VpnTray| {
                         tray.send_action(TrayAction::Resume(p.clone()));
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            let p = session_path.clone();
+            items.push(
+                StandardItem {
+                    label: "Statistics".into(),
+                    activate: Box::new(move |tray: &mut VpnTray| {
+                        tray.send_action(TrayAction::Statistics(p.clone()));
                     }),
                     ..Default::default()
                 }
@@ -169,14 +191,14 @@ mod tests {
     fn test_session_submenu_connected() {
         let session = make_session("/sess/1", "/cfg/1", "VPN", StatusMinor::ConnConnected);
         let labels = menu_labels(&session_submenu(&session));
-        assert_eq!(labels, ["Pause", "Restart", "Disconnect"]);
+        assert_eq!(labels, ["Pause", "Statistics", "Restart", "Disconnect"]);
     }
 
     #[test]
     fn test_session_submenu_paused() {
         let session = make_session("/sess/1", "/cfg/1", "VPN", StatusMinor::ConnPaused);
         let labels = menu_labels(&session_submenu(&session));
-        assert_eq!(labels, ["Resume", "Restart", "Disconnect"]);
+        assert_eq!(labels, ["Resume", "Statistics", "Restart", "Disconnect"]);
     }
 
     #[test]

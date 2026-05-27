@@ -8,6 +8,7 @@ mod logs;
 mod notification;
 mod preferences;
 mod singleton;
+mod stats;
 
 pub use about::show_about_dialog;
 pub use configuration::{
@@ -24,3 +25,4 @@ pub use notification::{
     show_reconnect_notification, withdraw_first_run_help_notification,
 };
 pub use preferences::show_preferences_dialog;
+pub use stats::show_stats_dialog;

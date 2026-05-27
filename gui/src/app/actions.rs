@@ -61,6 +61,10 @@ pub(crate) fn handle_tray_action(
                 }
             });
         }
+        TrayAction::Statistics(session_path) => {
+            info!("Tray action: Statistics {}", session_path);
+            crate::dialogs::show_stats_dialog(Some(parent.upcast_ref()), dbus, tray, session_path);
+        }
         TrayAction::Disconnect(session_path) => {
             info!("Tray action: Disconnect {}", session_path);
             // Mark as user-initiated so the SessDestroyed handler skips the reconnect prompt
