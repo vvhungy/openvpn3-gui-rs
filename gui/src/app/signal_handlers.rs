@@ -66,6 +66,7 @@ async fn handle_session_created(
                 last_bytes_in: 0,
                 last_bytes_out: 0,
                 idle_since: None,
+                auto_reconnect_attempted_at: None,
                 kill_switch_active: false,
             });
     });

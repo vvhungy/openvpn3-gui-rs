@@ -365,6 +365,7 @@ pub(super) async fn setup_status_handler(
                                     last_bytes_in: 0,
                                     last_bytes_out: 0,
                                     idle_since: None,
+                                    auto_reconnect_attempted_at: None,
                                     kill_switch_active: false,
                                 },
                             );

@@ -33,6 +33,9 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                 })
                 .unwrap_or_default();
 
+            let auto_reconnect = settings.auto_reconnect();
+            let cooldown_secs = (settings.auto_reconnect_delay_seconds() as u64) * 2;
+
             for (path, connected) in session_paths {
                 if !connected {
                     continue;
@@ -47,11 +50,34 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                     let bo = stats.get("BYTES_OUT").copied().unwrap_or(0) as u64;
                     let p = path.clone();
                     let threshold = stall_threshold;
-                    tray_for_timer.update(move |t| {
-                        if let Some(s) = t.sessions.get_mut(&p) {
-                            apply_stall_detection(s, bi, bo, threshold);
+                    let trigger_reconnect = tray_for_timer
+                        .update(move |t| {
+                            if let Some(s) = t.sessions.get_mut(&p) {
+                                apply_stall_detection(s, bi, bo, threshold);
+                                should_auto_reconnect_on_stall(
+                                    s,
+                                    auto_reconnect,
+                                    threshold,
+                                    cooldown_secs,
+                                )
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+
+                    if trigger_reconnect {
+                        tracing::info!(
+                            "Stall threshold exceeded for session {}, triggering auto-reconnect via disconnect+SessDestroyed path",
+                            path
+                        );
+                        if let Err(e) =
+                            super::session_ops::session_action(&dbus_for_stats, &path, "disconnect")
+                                .await
+                        {
+                            tracing::warn!("Stall-driven disconnect failed for {}: {}", path, e);
                         }
-                    });
+                    }
                 }
             }
 
@@ -107,6 +133,42 @@ pub fn apply_stall_detection(
     }
 }
 
+/// Decide whether a stalled session should trigger an auto-reconnect.
+///
+/// Returns true when:
+/// - `auto_reconnect` setting is enabled
+/// - stall detection is on (`threshold_secs > 0`)
+/// - session is idle past the stall threshold
+/// - cooldown window has elapsed since the last attempt for this session
+///   (prevents loops against persistently dead servers)
+///
+/// Marks `auto_reconnect_attempted_at` on the session when returning true so
+/// the caller doesn't need to remember to set it. The caller is responsible
+/// for issuing the disconnect — SessDestroyed then drives T1's reconnect path.
+pub fn should_auto_reconnect_on_stall(
+    session: &mut crate::tray::SessionInfo,
+    auto_reconnect: bool,
+    threshold_secs: u32,
+    cooldown_secs: u64,
+) -> bool {
+    if !auto_reconnect || threshold_secs == 0 {
+        return false;
+    }
+    let Some(since) = session.idle_since else {
+        return false;
+    };
+    if since.elapsed().as_secs() < threshold_secs as u64 {
+        return false;
+    }
+    if let Some(last) = session.auto_reconnect_attempted_at
+        && last.elapsed().as_secs() < cooldown_secs
+    {
+        return false;
+    }
+    session.auto_reconnect_attempted_at = Some(std::time::Instant::now());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +190,7 @@ mod tests {
             last_bytes_in: 1000,
             last_bytes_out: 500,
             idle_since: None,
+            auto_reconnect_attempted_at: None,
             kill_switch_active: false,
         }
     }
@@ -165,5 +228,59 @@ mod tests {
         s.idle_since = Some(std::time::Instant::now());
         apply_stall_detection(&mut s, 1000, 500, 0);
         assert!(s.idle_since.is_none());
+    }
+
+    #[test]
+    fn test_should_reconnect_disabled_setting() {
+        let mut s = make_connected_session();
+        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        assert!(!should_auto_reconnect_on_stall(&mut s, false, 60, 60));
+        assert!(s.auto_reconnect_attempted_at.is_none());
+    }
+
+    #[test]
+    fn test_should_reconnect_threshold_zero() {
+        let mut s = make_connected_session();
+        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        assert!(!should_auto_reconnect_on_stall(&mut s, true, 0, 60));
+    }
+
+    #[test]
+    fn test_should_reconnect_not_idle() {
+        let mut s = make_connected_session();
+        s.idle_since = None;
+        assert!(!should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+    }
+
+    #[test]
+    fn test_should_reconnect_below_threshold() {
+        let mut s = make_connected_session();
+        s.idle_since = Some(std::time::Instant::now());
+        assert!(!should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+    }
+
+    #[test]
+    fn test_should_reconnect_fires_past_threshold() {
+        let mut s = make_connected_session();
+        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        assert!(should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+        assert!(s.auto_reconnect_attempted_at.is_some());
+    }
+
+    #[test]
+    fn test_should_reconnect_cooldown_blocks_loop() {
+        let mut s = make_connected_session();
+        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        s.auto_reconnect_attempted_at = Some(std::time::Instant::now());
+        assert!(!should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+    }
+
+    #[test]
+    fn test_should_reconnect_after_cooldown_expires() {
+        let mut s = make_connected_session();
+        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        s.auto_reconnect_attempted_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        assert!(should_auto_reconnect_on_stall(&mut s, true, 60, 60));
     }
 }

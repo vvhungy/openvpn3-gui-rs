@@ -65,6 +65,10 @@ pub struct SessionInfo {
     /// When the session was first detected as idle (zero delta).
     /// `None` means traffic was seen on the last poll or session is not connected.
     pub idle_since: Option<std::time::Instant>,
+    /// Timestamp of the last auto-reconnect attempt for this config_path.
+    /// Used by stall-driven auto-reconnect to enforce a cooldown window
+    /// (2× delay) and prevent reconnect loops against a persistently dead server.
+    pub auto_reconnect_attempted_at: Option<std::time::Instant>,
     /// Kill-switch firewall rules are active for this session.
     pub kill_switch_active: bool,
 }
@@ -285,6 +289,7 @@ mod tests {
             last_bytes_in: 0,
             last_bytes_out: 0,
             idle_since: None,
+            auto_reconnect_attempted_at: None,
             kill_switch_active: false,
         }
     }
