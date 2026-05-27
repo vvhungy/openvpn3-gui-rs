@@ -94,6 +94,26 @@
       </description>
     </key>
 
+    <key name="auto-reconnect" type="b">
+      <default>false</default>
+      <summary>Auto-reconnect after unexpected disconnect</summary>
+      <description>
+        When enabled, the app automatically attempts to reconnect after an
+        unexpected disconnect (without user interaction). Single attempt only;
+        if it fails, falls through to the standard reconnect notification.
+      </description>
+    </key>
+
+    <key name="auto-reconnect-delay-seconds" type="u">
+      <default>30</default>
+      <range min="5" max="300"/>
+      <summary>Auto-reconnect delay in seconds</summary>
+      <description>
+        How long to wait after an unexpected disconnect before attempting
+        the automatic reconnect. Only used when auto-reconnect is enabled.
+      </description>
+    </key>
+
     <key name="enable-kill-switch" type="b">
       <default>false</default>
       <summary>Enable kill-switch firewall enforcement</summary>
