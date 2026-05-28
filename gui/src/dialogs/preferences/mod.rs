@@ -104,6 +104,9 @@ fn build_preferences_window(
                 } else {
                     0
                 });
+                settings_clone.set_auto_reconnect(gw.auto_reconnect_check.is_active());
+                settings_clone
+                    .set_auto_reconnect_delay_seconds(gw.auto_reconnect_spin.value() as u32);
                 settings_clone
                     .set_warn_on_unexpected_disconnect(sw.warn_disconnect_check.is_active());
                 settings_clone.set_enable_kill_switch(sw.enable_killswitch_check.is_active());

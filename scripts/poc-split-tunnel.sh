@@ -178,11 +178,21 @@ set -euo pipefail
 TABLE_ID="${TABLE_ID:-100}"
 PRIORITY="${PRIORITY:-100}"
 BYPASS_DEST="${BYPASS_DEST:-8.8.8.8/32}"
+# CONTROL_HOST is a separate bypass target reserved for flow-dependent probes
+# (conntrack, MTU). Defaults to 1.1.1.1 — Cloudflare DNS, almost always
+# reachable even on captive portals / iPhone hotspots that block 8.8.8.8.
+# A second ip-rule is installed for CONTROL_HOST during 'test' so conntrack
+# and MTU checks can measure a working flow regardless of BYPASS_DEST.
+CONTROL_HOST="${CONTROL_HOST:-1.1.1.1}"
 STATE_FILE="${STATE_FILE:-/tmp/poc-pre-vpn.env}"
 PRIORITY_SWEEP_LIST="${PRIORITY_SWEEP_LIST:-50,100,32500}"
 MTU_TEST_SIZES="${MTU_TEST_SIZES:-1280,1492,1500}"
 TEST_DNS_RESOLVER="${TEST_DNS_RESOLVER:-8.8.8.8}"
 TEST_BYPASS_V6="${TEST_BYPASS_V6:-2001:4860:4860::8888}"
+
+# Session D-Bus path for test-with-killswitch / automated test-resume.
+# Discovered via FetchAvailableSessions if unset.
+SESSION_PATH="${SESSION_PATH:-}"
 
 RESULTS_FAILED=0
 RESULTS_SKIPPED=0
@@ -371,6 +381,12 @@ install_bypass() {
     ip route flush table "$TABLE_ID" 2>/dev/null || true
     ip route add default via "$PRE_VPN_GATEWAY" dev "$PRE_VPN_IFACE" table "$TABLE_ID"
     ip rule add to "$BYPASS_DEST" lookup "$TABLE_ID" priority "$prio"
+    # Also bypass CONTROL_HOST so flow-dependent checks (conntrack, MTU) can
+    # always measure against a known-reachable target. Same priority — both
+    # rules live or die together with the table.
+    if [[ "${BYPASS_DEST%/*}" != "$CONTROL_HOST" ]]; then
+        ip rule add to "$CONTROL_HOST" lookup "$TABLE_ID" priority "$prio" 2>/dev/null || true
+    fi
 }
 
 remove_bypass() {
@@ -423,10 +439,12 @@ check_conntrack() {
 
     conntrack -F 2>/dev/null || true
 
-    local dst="${BYPASS_DEST%/*}"
-    # Trigger flow via TCP/443 (works on ICMP-blocked networks like iPhone
-    # hotspots). ICMP fallback only if TCP also fails — we still want SOMETHING
-    # in the conntrack table to inspect.
+    # Probe CONTROL_HOST (default 1.1.1.1) instead of BYPASS_DEST. install_bypass
+    # adds an ip-rule for CONTROL_HOST too, so flow pinning is exercised on the
+    # bypass path. CONTROL_HOST is reachable on networks that filter BYPASS_DEST
+    # (e.g. iPhone hotspots blocking 8.8.8.8), so this check no longer SKIPs in
+    # the common environmental cases.
+    local dst="$CONTROL_HOST"
     if ! timeout 2 bash -c "exec 3<>/dev/tcp/$dst/443" >/dev/null 2>&1; then
         ping -c 1 -W 2 "$dst" >/dev/null 2>&1 || true
     fi
@@ -435,11 +453,7 @@ check_conntrack() {
     flow=$(conntrack -L -d "$dst" 2>/dev/null | head -n 1)
 
     if [[ -z "$flow" ]]; then
-        if (( BYPASS_UNREACHABLE )); then
-            result_skip "conntrack — bypass dest $dst unreachable (TCP/443 + ICMP both failed); cannot trigger flow to inspect."
-        else
-            result_skip "conntrack — no flow recorded for $dst (probe may have been dropped before conntrack saw it)"
-        fi
+        result_skip "conntrack — no flow recorded for $dst (TCP/443+ICMP both filtered, or probe lost before conntrack saw it)"
         return
     fi
 
@@ -468,11 +482,14 @@ check_conntrack() {
 
 check_mtu_pmtud() {
     echo "[3/5] MTU / PMTUD"
-    if (( BYPASS_UNREACHABLE )); then
-        result_skip "mtu_pmtud — bypass dest unreachable (ICMP+TCP/443 both failed); MTU probe needs working flow. Re-run with a reachable BYPASS_DEST."
+    # Probe CONTROL_HOST so MTU check works regardless of BYPASS_DEST
+    # reachability. install_bypass adds an ip-rule for CONTROL_HOST to the same
+    # table so the probe exits via PRE_VPN_IFACE.
+    local dst="$CONTROL_HOST"
+    if ! ping -c 1 -W 2 "$dst" >/dev/null 2>&1; then
+        result_skip "mtu_pmtud — CONTROL_HOST $dst unreachable; MTU probe needs ICMP echo. Re-run with a reachable CONTROL_HOST."
         return
     fi
-    local dst="${BYPASS_DEST%/*}"
     local iface_mtu
     iface_mtu=$(ip -o link show "$PRE_VPN_IFACE" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="mtu"){print $(i+1); exit}}')
     echo "        $PRE_VPN_IFACE MTU = ${iface_mtu:-unknown}"
@@ -649,8 +666,9 @@ cmd_test() {
     echo "  curl -s https://ifconfig.me      # should show VPN exit IP (control)"
     echo
     echo "Optional next steps:"
+    echo "  sudo $0 test-with-killswitch    # validate bypass through kill-switch"
     echo "  sudo $0 test-priority-sweep     # validate D2 priority 100"
-    echo "  sudo $0 test-resume             # validate D5 Resume re-capture"
+    echo "  sudo $0 test-resume             # validate D5 Resume re-capture (D-Bus)"
     echo "  sudo $0 teardown                # when done"
 }
 
@@ -713,6 +731,170 @@ snapshot_gateway() {
     }'
 }
 
+# discover_session_path — return the first active session D-Bus path via
+# FetchAvailableSessions on net.openvpn.v3.sessions. Echoes path on stdout,
+# returns nonzero if no session active or gdbus missing.
+discover_session_path() {
+    if ! command -v gdbus >/dev/null 2>&1; then
+        return 1
+    fi
+    # FetchAvailableSessions returns ao (array of object paths). The reply is
+    # printed as `([objectpath '/path/1', objectpath '/path/2'],)`. Extract
+    # the first path with sed.
+    local reply
+    reply=$(gdbus call --system \
+        --dest net.openvpn.v3.sessions \
+        --object-path /net/openvpn/v3/sessions \
+        --method net.openvpn.v3.sessions.FetchAvailableSessions 2>/dev/null) || return 1
+    echo "$reply" | sed -n "s/.*objectpath '\([^']*\)'.*/\1/p" | head -n 1
+}
+
+# discover_tun_iface — return current tunnel iface name (tun*/wg*/ppp*) from
+# the route to CONTROL_HOST. Used by test-with-killswitch to pass the right
+# interface to AddRules.
+discover_tun_iface() {
+    ip route get "$CONTROL_HOST" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
+}
+
+# discover_vpn_server_ip — parse the remote VPN server IP from the active
+# session's last_path/IP property. Falls back to empty (AddRules accepts an
+# empty list, just gives no destination accept rule). Best-effort.
+discover_vpn_server_ip() {
+    # The session object's RemoteHost property carries the server hostname/IP
+    # but it may be a hostname. Resolve to an IPv4 if so. If unset, return "".
+    local sp="$1"
+    if [[ -z "$sp" ]]; then return 0; fi
+    local host
+    host=$(gdbus call --system \
+        --dest net.openvpn.v3.sessions \
+        --object-path "$sp" \
+        --method org.freedesktop.DBus.Properties.Get \
+            net.openvpn.v3.sessions session_name 2>/dev/null \
+        | sed -n "s/.*'\([^']*\)'.*/\1/p" | head -n 1)
+    if [[ -z "$host" ]]; then return 0; fi
+    # Resolve to first v4 if hostname
+    if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$host"
+    else
+        getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}'
+    fi
+}
+
+killswitch_add() {
+    local iface="$1"
+    local server_ip="$2"
+    local ips_arg="[]"
+    if [[ -n "$server_ip" ]]; then
+        ips_arg="['$server_ip']"
+    fi
+    gdbus call --system \
+        --dest net.openvpn.v3.killswitch \
+        --object-path /net/openvpn/v3/killswitch \
+        --method net.openvpn.v3.killswitch.AddRules \
+        "$iface" "$ips_arg" false
+}
+
+killswitch_remove() {
+    gdbus call --system \
+        --dest net.openvpn.v3.killswitch \
+        --object-path /net/openvpn/v3/killswitch \
+        --method net.openvpn.v3.killswitch.RemoveRules
+}
+
+# -----------------------------------------------------------------------------
+# Phase: test-with-killswitch — enables the helper kill-switch BEFORE applying
+# bypass routes, then runs the standard 5-check test. Validates that
+# bypass CIDRs in @bypass_set are accepted before the kill-switch policy-drop
+# fires (i.e. bypass traffic is not collateral damage of the kill-switch).
+# Requires the helper service running on the system bus.
+# -----------------------------------------------------------------------------
+
+cmd_test_with_killswitch() {
+    require_root
+    if ! command -v gdbus >/dev/null 2>&1; then
+        echo "ERROR: gdbus not found (apt install libglib2.0-bin)" >&2
+        exit 1
+    fi
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "ERROR: $STATE_FILE missing. Run 'capture' BEFORE connecting VPN." >&2
+        exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$STATE_FILE"
+
+    require_capture_fresh
+    require_vpn_intercepting
+    echo
+
+    local tun_iface
+    tun_iface=$(discover_tun_iface)
+    if [[ -z "$tun_iface" ]]; then
+        echo "ERROR: cannot determine tunnel iface (no route to $CONTROL_HOST?)." >&2
+        exit 1
+    fi
+
+    local session_path="${SESSION_PATH:-$(discover_session_path || true)}"
+    local server_ip=""
+    if [[ -n "$session_path" ]]; then
+        server_ip=$(discover_vpn_server_ip "$session_path" || true)
+    fi
+
+    # Pre-publish bypass CIDR so helper includes it in @bypass_set when AddRules
+    # builds the nft script. Without this, the bypass dest gets dropped by the
+    # kill-switch policy-drop *before* the ip-rule can divert it.
+    echo "Publishing bypass CIDR $BYPASS_DEST to helper (SetBypassCidrs)..."
+    gdbus call --system \
+        --dest net.openvpn.v3.killswitch \
+        --object-path /net/openvpn/v3/killswitch \
+        --method net.openvpn.v3.killswitch.SetBypassCidrs \
+        "['$BYPASS_DEST', '$CONTROL_HOST/32']" >/dev/null
+
+    echo "Enabling kill-switch (iface=$tun_iface, vpn_server=${server_ip:-<none>})..."
+    if ! killswitch_add "$tun_iface" "$server_ip"; then
+        echo "ERROR: kill-switch AddRules failed. Is the helper running?" >&2
+        echo "       Check: systemctl status net.openvpn.v3.killswitch.service" >&2
+        exit 1
+    fi
+    echo "Kill-switch active. nft ruleset:"
+    nft list table inet openvpn3_killswitch 2>/dev/null | head -n 30 || true
+    echo
+
+    install_bypass "$PRIORITY"
+
+    if probe_bypass_reachable; then
+        BYPASS_UNREACHABLE=0
+        echo "Bypass dest ${BYPASS_DEST%/*} is reachable through kill-switch + bypass."
+    else
+        BYPASS_UNREACHABLE=1
+        echo "WARNING: bypass dest unreachable. Either bypass set is wrong or"
+        echo "         kill-switch is dropping the flow. Flow-dependent checks SKIP."
+    fi
+    echo
+
+    echo "=== Failure-mode checks (D2 / T4) with kill-switch ON ==="
+    echo
+    RESULTS_FAILED=0
+    RESULTS_SKIPPED=0
+    check_rp_filter
+    check_conntrack
+    check_mtu_pmtud
+    check_dns
+    check_ipv6
+    echo
+    echo "Summary: failed=$RESULTS_FAILED  skipped=$RESULTS_SKIPPED  (5 checks total)"
+    echo
+
+    echo "=== Cleanup ==="
+    remove_bypass
+    echo "Removing kill-switch..."
+    killswitch_remove >/dev/null || true
+    gdbus call --system \
+        --dest net.openvpn.v3.killswitch \
+        --object-path /net/openvpn/v3/killswitch \
+        --method net.openvpn.v3.killswitch.ClearBypassCidrs >/dev/null || true
+    echo "Done. If failed=0 above, bypass-through-killswitch is verified."
+}
+
 cmd_test_resume() {
     require_root
     if [[ ! -f "$STATE_FILE" ]]; then
@@ -722,25 +904,59 @@ cmd_test_resume() {
     # shellcheck source=/dev/null
     source "$STATE_FILE"
 
-    echo "=== Resume re-capture test (D5) ==="
+    local session_path="${SESSION_PATH:-$(discover_session_path || true)}"
+    if [[ -z "$session_path" ]]; then
+        echo "ERROR: no active VPN session found via FetchAvailableSessions." >&2
+        echo "       Connect a VPN session first, or set SESSION_PATH=/path/to/session." >&2
+        exit 1
+    fi
+    if ! command -v gdbus >/dev/null 2>&1; then
+        echo "ERROR: gdbus not found (apt install libglib2.0-bin)" >&2
+        exit 1
+    fi
+
+    echo "=== Resume re-capture test (D5) — automated via D-Bus ==="
+    echo "Session: $session_path"
     echo
     echo "Snapshot 1 (now): default route =  $(snapshot_gateway)"
-    echo "Captured pre-VPN: $PRE_VPN_GATEWAY|$PRE_VPN_IFACE"
+    echo "Captured pre-VPN:                  $PRE_VPN_GATEWAY|$PRE_VPN_IFACE"
     echo
-    echo "ACTION REQUIRED: in the OpenVPN3 GUI, Pause the session, wait >=10s,"
-    echo "then Resume. After Resume, press Enter here to continue."
-    read -r
+
+    echo "Sending Pause()..."
+    if ! gdbus call --system \
+        --dest net.openvpn.v3.sessions \
+        --object-path "$session_path" \
+        --method net.openvpn.v3.sessions.Pause "poc-test-resume" >/dev/null; then
+        echo "ERROR: Pause() call failed. Session may already be paused or wrong path." >&2
+        exit 1
+    fi
+    # Pause is async — wait long enough for routes to come down.
+    sleep 5
+    echo "Snapshot 2 (after Pause, +5s): default route =  $(snapshot_gateway)"
     echo
-    echo "Snapshot 2 (after Resume): default route =  $(snapshot_gateway)"
+
+    echo "Sending Resume()..."
+    if ! gdbus call --system \
+        --dest net.openvpn.v3.sessions \
+        --object-path "$session_path" \
+        --method net.openvpn.v3.sessions.Resume >/dev/null; then
+        echo "ERROR: Resume() call failed." >&2
+        exit 1
+    fi
+    # Resume is async — give the tunnel time to come back up and routes to settle.
+    sleep 10
+    echo "Snapshot 3 (after Resume, +10s): default route =  $(snapshot_gateway)"
     echo
-    echo "If Snapshot 1 == Snapshot 2 AND both equal '$PRE_VPN_GATEWAY|$PRE_VPN_IFACE'"
-    echo "(or both equal a tunnel iface — either is fine, what matters is stability),"
-    echo "then D5's idempotent re-capture assumption holds: the captured pre-VPN"
-    echo "gateway survived the Pause/Resume cycle."
+
+    echo "Interpretation:"
+    echo "  Snapshot 1: pre-Pause baseline (typically tunnel iface with redirect-gateway)."
+    echo "  Snapshot 2: during Pause — default may revert to PRE_VPN gateway,"
+    echo "              OR stay as last-known if Pause leaves routes in place."
+    echo "  Snapshot 3: post-Resume — should match Snapshot 1 if D5 holds."
     echo
-    echo "If Snapshot 2 changed unexpectedly (e.g. gateway IP differs), D5 needs"
-    echo "tightening: helper must re-run capture on every Resume, not just on"
-    echo "initial connect."
+    echo "D5 verdict: if Snapshot 1 == Snapshot 3, captured pre-VPN gateway"
+    echo "survived the Pause/Resume cycle and idempotent re-capture is correct."
+    echo "If Snapshot 3 differs, helper must re-run capture on every Resume."
 }
 
 # -----------------------------------------------------------------------------
@@ -769,18 +985,21 @@ cmd_teardown() {
 
 usage() {
     cat <<EOF
-Usage: $0 {capture|test|test-priority-sweep|test-resume|teardown}
+Usage: $0 {capture|test|test-with-killswitch|test-priority-sweep|test-resume|teardown}
 
 Workflow:
   1. (VPN DOWN, kill-switch OFF)  sudo $0 capture
   2. Connect VPN via openvpn3-gui-rs
   3. (VPN UP)                     sudo $0 test
-  4. (optional, VPN UP)           sudo $0 test-priority-sweep
-  5. (optional, INTERACTIVE)      sudo $0 test-resume
-  6.                              sudo $0 teardown
+  4. (optional, VPN UP)           sudo $0 test-with-killswitch
+  5. (optional, VPN UP)           sudo $0 test-priority-sweep
+  6. (optional, VPN UP)           sudo $0 test-resume   # automated via D-Bus
+  7.                              sudo $0 teardown
 
 Optional environment overrides (see script header for full list):
   BYPASS_DEST=8.8.8.8/32
+  CONTROL_HOST=1.1.1.1
+  SESSION_PATH=                  # auto-discovered via FetchAvailableSessions
   TABLE_ID=100
   PRIORITY=100
   PRIORITY_SWEEP_LIST="50,100,32500"
@@ -794,10 +1013,11 @@ EOF
 }
 
 case "${1:-}" in
-    capture)              cmd_capture ;;
-    test)                 cmd_test ;;
-    test-priority-sweep)  cmd_test_priority_sweep ;;
-    test-resume)          cmd_test_resume ;;
-    teardown)             cmd_teardown ;;
-    *)                    usage; exit 1 ;;
+    capture)               cmd_capture ;;
+    test)                  cmd_test ;;
+    test-with-killswitch)  cmd_test_with_killswitch ;;
+    test-priority-sweep)   cmd_test_priority_sweep ;;
+    test-resume)           cmd_test_resume ;;
+    teardown)              cmd_teardown ;;
+    *)                     usage; exit 1 ;;
 esac

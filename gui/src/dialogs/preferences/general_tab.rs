@@ -16,6 +16,8 @@ pub(super) struct GeneralWidgets {
     pub timeout_spin: SpinButton,
     pub stall_check: CheckButton,
     pub stall_spin: SpinButton,
+    pub auto_reconnect_check: CheckButton,
+    pub auto_reconnect_spin: SpinButton,
 }
 
 pub(super) fn build(settings: &Settings, configs: &[ConfigInfo]) -> (GtkBox, GeneralWidgets) {
@@ -176,6 +178,33 @@ pub(super) fn build(settings: &Settings, configs: &[ConfigInfo]) -> (GtkBox, Gen
         });
     }
 
+    let auto_reconnect_check = CheckButton::builder()
+        .label("Auto-reconnect after unexpected disconnect")
+        .active(settings.auto_reconnect())
+        .build();
+    general.append(&auto_reconnect_check);
+
+    let auto_reconnect_row = GtkBox::new(Orientation::Horizontal, 8);
+    auto_reconnect_row.set_margin_start(INDENT);
+    let auto_reconnect_label = Label::builder()
+        .label("Reconnect delay (seconds):")
+        .halign(gtk4::Align::Start)
+        .hexpand(true)
+        .build();
+    let auto_reconnect_spin = SpinButton::with_range(5.0, 300.0, 5.0);
+    auto_reconnect_spin.set_value(settings.auto_reconnect_delay_seconds() as f64);
+    auto_reconnect_spin.set_sensitive(settings.auto_reconnect());
+    auto_reconnect_row.append(&auto_reconnect_label);
+    auto_reconnect_row.append(&auto_reconnect_spin);
+    general.append(&auto_reconnect_row);
+
+    {
+        let spin = auto_reconnect_spin.clone();
+        auto_reconnect_check.connect_toggled(move |btn| {
+            spin.set_sensitive(btn.is_active());
+        });
+    }
+
     let widgets = GeneralWidgets {
         radio_specific,
         radio_recent,
@@ -186,6 +215,8 @@ pub(super) fn build(settings: &Settings, configs: &[ConfigInfo]) -> (GtkBox, Gen
         timeout_spin,
         stall_check,
         stall_spin,
+        auto_reconnect_check,
+        auto_reconnect_spin,
     };
 
     (general, widgets)

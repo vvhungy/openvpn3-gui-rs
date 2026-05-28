@@ -187,6 +187,39 @@ impl Settings {
         }
     }
 
+    /// Auto-reconnect after unexpected disconnect (default false)
+    pub fn auto_reconnect(&self) -> bool {
+        self.settings
+            .as_ref()
+            .map(|s| s.boolean("auto-reconnect"))
+            .unwrap_or(false)
+    }
+
+    pub fn set_auto_reconnect(&self, enabled: bool) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_boolean("auto-reconnect", enabled)
+        {
+            error!("Failed to set auto-reconnect: {}", e);
+        }
+    }
+
+    /// Auto-reconnect delay in seconds (default 30, clamped 5..=300)
+    pub fn auto_reconnect_delay_seconds(&self) -> u32 {
+        self.settings
+            .as_ref()
+            .map(|s| s.uint("auto-reconnect-delay-seconds"))
+            .unwrap_or(30)
+            .clamp(5, 300)
+    }
+
+    pub fn set_auto_reconnect_delay_seconds(&self, secs: u32) {
+        if let Some(settings) = &self.settings
+            && let Err(e) = settings.set_uint("auto-reconnect-delay-seconds", secs.clamp(5, 300))
+        {
+            error!("Failed to set auto-reconnect-delay-seconds: {}", e);
+        }
+    }
+
     /// Check if notifications are enabled
     pub fn show_notifications(&self) -> bool {
         self.settings
@@ -483,6 +516,26 @@ mod tests {
     #[test]
     fn test_set_warn_on_unexpected_disconnect_no_panic() {
         Settings::new_empty().set_warn_on_unexpected_disconnect(false);
+    }
+
+    #[test]
+    fn test_auto_reconnect_default_false() {
+        assert!(!Settings::new_empty().auto_reconnect());
+    }
+
+    #[test]
+    fn test_set_auto_reconnect_no_panic() {
+        Settings::new_empty().set_auto_reconnect(true);
+    }
+
+    #[test]
+    fn test_auto_reconnect_delay_default() {
+        assert_eq!(Settings::new_empty().auto_reconnect_delay_seconds(), 30);
+    }
+
+    #[test]
+    fn test_set_auto_reconnect_delay_no_panic() {
+        Settings::new_empty().set_auto_reconnect_delay_seconds(60);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use crate::settings::Settings;
 
 mod format;
 
-use format::format_log_line;
+use format::{format_export, format_log_line};
 
 /// Per-tab state. Holds the full unfiltered entry vec so search/level
 /// changes can rebuild the visible buffer without re-fetching from the
@@ -39,6 +39,12 @@ struct TabState {
     entries: Rc<RefCell<Vec<log_buffer::LogEntry>>>,
     search_text: Rc<RefCell<String>>,
     level_min: Rc<RefCell<u32>>,
+    export_btn: gtk4::Button,
+}
+
+/// Returns true if any entry in `entries` passes the current filter.
+fn any_passes_filter(entries: &[log_buffer::LogEntry], search: &str, level_min: u32) -> bool {
+    entries.iter().any(|e| passes_filter(e, search, level_min))
 }
 
 /// Returns true if the entry passes the current filter pair (substring
@@ -351,6 +357,7 @@ fn build_log_viewer(
                                 let mut end_iter = tab.buffer.end_iter();
                                 tab.buffer.insert(&mut end_iter, &line);
                                 tab.text_view.scroll_mark_onscreen(&tab.end_mark);
+                                tab.export_btn.set_sensitive(true);
                             }
                         }
                     }
@@ -443,6 +450,12 @@ fn create_tab_for_config(config_name: &str) -> TabState {
         .tooltip_text("Copy visible (filtered) log to clipboard")
         .build();
 
+    let export_btn = gtk4::Button::builder()
+        .label("Export…")
+        .tooltip_text("Save visible (filtered) log entries to a file")
+        .sensitive(!entries.borrow().is_empty())
+        .build();
+
     let strip = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     strip.set_margin_top(6);
     strip.set_margin_bottom(6);
@@ -451,6 +464,7 @@ fn create_tab_for_config(config_name: &str) -> TabState {
     strip.append(&search_entry);
     strip.append(&level_dropdown);
     strip.append(&copy_btn);
+    strip.append(&export_btn);
 
     // --- Wire filter signals ---
     {
@@ -460,6 +474,7 @@ fn create_tab_for_config(config_name: &str) -> TabState {
         let buffer = buffer.clone();
         let text_view = text_view.clone();
         let end_mark = end_mark.clone();
+        let export_btn = export_btn.clone();
         search_entry.connect_changed(move |e| {
             *search_text.borrow_mut() = e.text().to_string();
             rebuild_buffer(
@@ -469,6 +484,11 @@ fn create_tab_for_config(config_name: &str) -> TabState {
                 *level_min.borrow(),
             );
             text_view.scroll_mark_onscreen(&end_mark);
+            export_btn.set_sensitive(any_passes_filter(
+                &entries.borrow(),
+                &search_text.borrow(),
+                *level_min.borrow(),
+            ));
         });
     }
 
@@ -479,6 +499,7 @@ fn create_tab_for_config(config_name: &str) -> TabState {
         let buffer = buffer.clone();
         let text_view = text_view.clone();
         let end_mark = end_mark.clone();
+        let export_btn = export_btn.clone();
         level_dropdown.connect_selected_notify(move |dd| {
             *level_min.borrow_mut() = level_index_to_min(dd.selected());
             rebuild_buffer(
@@ -488,6 +509,11 @@ fn create_tab_for_config(config_name: &str) -> TabState {
                 *level_min.borrow(),
             );
             text_view.scroll_mark_onscreen(&end_mark);
+            export_btn.set_sensitive(any_passes_filter(
+                &entries.borrow(),
+                &search_text.borrow(),
+                *level_min.borrow(),
+            ));
         });
     }
 
@@ -497,6 +523,26 @@ fn create_tab_for_config(config_name: &str) -> TabState {
         copy_btn.connect_clicked(move |_| {
             let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
             text_view.clipboard().set_text(&text);
+        });
+    }
+
+    {
+        let entries = Rc::clone(&entries);
+        let search_text = Rc::clone(&search_text);
+        let level_min = Rc::clone(&level_min);
+        let config_name_owned = config_name.to_string();
+        export_btn.connect_clicked(move |btn| {
+            let parent = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            let visible: Vec<log_buffer::LogEntry> = entries
+                .borrow()
+                .iter()
+                .filter(|e| passes_filter(e, &search_text.borrow(), *level_min.borrow()))
+                .cloned()
+                .collect();
+            if visible.is_empty() {
+                return;
+            }
+            show_export_dialog(parent.as_ref(), config_name_owned.clone(), visible);
         });
     }
 
@@ -512,5 +558,71 @@ fn create_tab_for_config(config_name: &str) -> TabState {
         entries,
         search_text,
         level_min,
+        export_btn,
     }
+}
+
+/// Open a Save-As file chooser and write the export to the selected path.
+fn show_export_dialog(
+    parent: Option<&gtk4::Window>,
+    config_name: String,
+    entries: Vec<log_buffer::LogEntry>,
+) {
+    use gtk4::{FileChooserAction, FileChooserDialog, ResponseType};
+
+    let dialog = FileChooserDialog::builder()
+        .title("Export Logs")
+        .action(FileChooserAction::Save)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Save", ResponseType::Accept);
+
+    let default_name = format!(
+        "openvpn3-gui-{}-{}.log",
+        sanitize_filename(&config_name),
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+    );
+    dialog.set_current_name(&default_name);
+
+    if let Some(p) = parent {
+        dialog.set_transient_for(Some(p));
+    }
+
+    dialog.connect_response(move |dlg, resp| {
+        if resp == ResponseType::Accept
+            && let Some(file) = dlg.file()
+            && let Some(path) = file.path()
+        {
+            let text = format_export(&entries, &config_name, chrono::Local::now());
+            match std::fs::write(&path, text) {
+                Ok(()) => tracing::info!("Exported logs to {:?}", path),
+                Err(e) => {
+                    tracing::warn!("Log export to {:?} failed: {}", path, e);
+                    crate::dialogs::show_error_notification(
+                        "Log Export Failed",
+                        &format!("Could not write to {}: {}", path.display(), e),
+                    );
+                }
+            }
+        }
+        dlg.close();
+    });
+
+    dialog.show();
+}
+
+/// Strip filesystem-unfriendly characters from a config name for use in a
+/// default export filename. Keeps alphanumerics, dash, underscore; replaces
+/// anything else with `_`.
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

@@ -66,6 +66,7 @@ async fn handle_session_created(
                 last_bytes_in: 0,
                 last_bytes_out: 0,
                 idle_since: None,
+                auto_reconnect_attempted_at: None,
                 kill_switch_active: false,
             });
     });
@@ -175,16 +176,56 @@ pub(crate) async fn setup_signal_handlers(
                             // Unexpected drop — keep rules in place; the
                             // notification's Reconnect/Dismiss handlers manage
                             // their lifecycle from here.
-                            info!(
-                                "Unexpected session drop for '{}', showing reconnect notification",
-                                config_name
-                            );
-                            crate::dialogs::show_reconnect_notification(
-                                config_path,
-                                config_name,
-                                action_tx_for_session.clone(),
-                                tray_for_session.clone(),
-                            );
+                            let settings = crate::settings::Settings::new();
+                            if settings.auto_reconnect() {
+                                let delay = settings.auto_reconnect_delay_seconds();
+                                info!(
+                                    "Unexpected session drop for '{}', auto-reconnect in {}s",
+                                    config_name, delay
+                                );
+                                let dbus = dbus_for_session.clone();
+                                let tray = tray_for_session.clone();
+                                let action_tx = action_tx_for_session.clone();
+                                glib::spawn_future_local(async move {
+                                    glib::timeout_future_seconds(delay).await;
+                                    let settings = crate::settings::Settings::new();
+                                    match super::session_ops::connect_to_config(
+                                        &dbus,
+                                        &config_path,
+                                        &tray,
+                                        &settings,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            info!("Auto-reconnect succeeded for '{}'", config_name)
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Auto-reconnect failed for '{}': {}; falling back to notification",
+                                                config_name, e
+                                            );
+                                            crate::dialogs::show_reconnect_notification(
+                                                config_path,
+                                                config_name,
+                                                action_tx,
+                                                tray,
+                                            );
+                                        }
+                                    }
+                                });
+                            } else {
+                                info!(
+                                    "Unexpected session drop for '{}', showing reconnect notification",
+                                    config_name
+                                );
+                                crate::dialogs::show_reconnect_notification(
+                                    config_path,
+                                    config_name,
+                                    action_tx_for_session.clone(),
+                                    tray_for_session.clone(),
+                                );
+                            }
                         }
                     }
                 }

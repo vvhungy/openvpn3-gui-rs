@@ -57,6 +57,18 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.7" date="2026-05-28">
+      <description>
+        <p>Sprint 30: auto-reconnect, log export, statistics dialog, and split-tunnel PoC validation</p>
+        <ul>
+          <li>Auto-reconnect after unexpected disconnect — when enabled, the app waits a configurable delay (5–300s, default 30s) then reconnects automatically. Falls through to the existing reconnect notification if the attempt fails.</li>
+          <li>Auto-reconnect on stall — a connected session that stops moving bytes past the stall threshold is now also treated as an unexpected drop when auto-reconnect is on. Cooldown window prevents reconnect loops against a permanently dead server.</li>
+          <li>Log export to file — new Export button in the log viewer toolbar writes the active tab's filtered entries (respecting search and level filter) as a plain-text file for bug reports or offline analysis.</li>
+          <li>Connection statistics dialog — new per-session Statistics menu item opens a live-refreshing window showing config name, status, connected-since timestamp, duration, tunnel interface, and byte counters. Auto-closes when the session disconnects.</li>
+          <li>Split-tunnel PoC script — conntrack/MTU probes now target a known-reachable control host so they no longer SKIP on networks that filter the bypass destination; new test-with-killswitch command validates bypass traffic through the kill-switch; test-resume automated via D-Bus.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.6" date="2026-05-21">
       <description>
         <p>Sprint 29: dialog lifecycle hygiene, cold-start auth, and About styling</p>
