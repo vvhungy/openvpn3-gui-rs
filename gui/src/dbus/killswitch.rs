@@ -23,21 +23,25 @@ const OBJECT_PATH: &str = "/net/openvpn/v3/killswitch";
 /// Persistent system-bus connection shared across all kill-switch calls.
 /// Kept alive for the GUI process lifetime so the helper's watcher sees
 /// our sender name persist until `RemoveRules` is called or the GUI exits.
-static SYSTEM_BUS: OnceCell<Option<zbus::Connection>> = OnceCell::const_new();
+///
+/// `get_or_try_init` is used (not `get_or_init`) deliberately: it caches
+/// only the `Ok` connection and leaves the cell empty on `Err`, so a
+/// transient bus outage at the first call (boot race, dbus restart) is
+/// retried on the next call rather than permanently caching "absent" and
+/// silently disabling kill-switch enforcement until the GUI restarts.
+static SYSTEM_BUS: OnceCell<zbus::Connection> = OnceCell::const_new();
 
 async fn system_bus() -> Option<&'static zbus::Connection> {
-    SYSTEM_BUS
-        .get_or_init(|| async {
-            match zbus::Connection::system().await {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    warn!("kill-switch: cannot connect to system bus: {}", e);
-                    None
-                }
-            }
-        })
+    match SYSTEM_BUS
+        .get_or_try_init(|| async { zbus::Connection::system().await })
         .await
-        .as_ref()
+    {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            warn!("kill-switch: cannot connect to system bus: {}", e);
+            None
+        }
+    }
 }
 
 #[zbus::proxy(
