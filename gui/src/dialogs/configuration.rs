@@ -56,12 +56,34 @@ where
     });
 }
 
-/// Show configuration import dialog to set a name for the imported config
+/// Show configuration import dialog to set a name for the imported config.
+///
+/// Singleton per file path: a second invocation for the *same* path focuses
+/// the existing window instead of spawning a second one (two Import windows
+/// for the same file racing on the config write would double-import).
+/// Different paths still open concurrently — legitimate multi-import is not
+/// blocked. Routed through `present_keyed` like every other dialog per the
+/// module's lifecycle invariant.
 pub fn show_config_import_dialog<F>(
     parent: Option<&gtk4::Window>,
     path: std::path::PathBuf,
     on_import: F,
 ) where
+    F: Fn(String, std::path::PathBuf) + 'static,
+{
+    let parent = parent.cloned();
+    let key = format!("config_import:{}", path.display());
+    super::singleton::present_keyed(&key, move || {
+        build_config_import_window(parent.as_ref(), path, on_import)
+    });
+}
+
+fn build_config_import_window<F>(
+    parent: Option<&gtk4::Window>,
+    path: std::path::PathBuf,
+    on_import: F,
+) -> gtk4::Window
+where
     F: Fn(String, std::path::PathBuf) + 'static,
 {
     let window = gtk4::Window::builder()
@@ -136,7 +158,7 @@ pub fn show_config_import_dialog<F>(
     ));
 
     window.set_child(Some(&vbox));
-    window.present();
+    window
 }
 
 /// Show configuration removal confirmation dialog
