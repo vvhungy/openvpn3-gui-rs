@@ -615,3 +615,56 @@ goes to backlog gated on user demand (no concrete user report yet).
   user report of metadata exposure concern, or expansion of
   split-tunneling to per-domain entries (which would force a DNS
   solution anyway).
+
+---
+
+# Standing decision: per-app cgroups v2 split-tunneling (Option A)
+
+**Status (S31):** parked. Per-route Option B shipped S22+S23; per-app
+Option A formally rejected for v1 in the S21 T4 spike and has not been
+re-promoted. This section records *why it stays parked* so future
+sprint planning doesn't re-litigate it from scratch.
+
+## What it would add over what we ship
+
+Today's per-route bypass answers *"send 35.186.224.0/20 outside the
+VPN"*. Option A would answer *"send Spotify outside the VPN"* —
+selection by **application** rather than by **destination CIDR**. The
+only need it covers that the shipped feature does not is apps whose IPs
+**migrate** and so cannot be pinned to a stable CIDR.
+
+## Why it stays parked
+
+1. **No trigger.** The backlog gate is a concrete user request for
+   per-app routing. None has arrived across S20→S30. Per CLAUDE.md,
+   trigger-gated backlog is not auto-promoted.
+2. **Already-served common case.** Keeping LAN / conferencing / media
+   CDNs off the tunnel is covered by the shipped per-CIDR bypass. The
+   target user (technical, CIDR-comfortable) is served today.
+3. **Sprint-sized, not task-sized.** Option A is a new helper subsystem
+   (cgroup v2 lifecycle, `cgroup.procs` writes, fwmark coordination,
+   nft `meta cgroupv2` matching) plus a new GUI app-picker dialog, a
+   launcher shim (`systemd-run --slice=` or service template), and
+   packaging for that shim. This is its own multi-task sprint, not a
+   slot in a quality sprint.
+4. **Privilege-boundary cost.** PID→cgroup writes originate in the GUI
+   and fwmark rules land in the root helper. Every new helper D-Bus
+   parameter crossing that boundary needs hostile-input validation
+   (CLAUDE.md). High review surface for a feature with no demand.
+5. **Inherent coverage gaps.** Apps that spawn helper processes before
+   the user moves the parent PID leak those descendants (documented in
+   Option A above). Per-app routing is fundamentally less airtight than
+   per-destination.
+
+## Promotion criteria
+
+Promote only when **all** hold:
+
+- A concrete user request for per-app (not per-CIDR) routing arrives.
+- It gets its **own dedicated sprint** — not a folded-in task.
+- The sprint **re-runs the design spike first.** cgroup v2 / nftables
+  `meta cgroupv2` details and distro defaults may have shifted since the
+  S20 spike; the trade-off table above must be re-validated before any
+  helper code is written.
+
+Until then, the shipped per-route mechanism is the answer.
