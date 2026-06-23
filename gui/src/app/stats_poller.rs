@@ -119,17 +119,16 @@ pub fn apply_stall_detection(
         session.idle_since = Some(std::time::Instant::now());
     }
 
-    // If idle for longer than threshold, keep idle_since set (menu/icon
-    // read it to show warning). The caller already has the timestamp —
-    // no additional action needed here.
-    if let Some(since) = session.idle_since {
-        let idle_secs = since.elapsed().as_secs();
-        if idle_secs < threshold_secs as u64 {
-            // Not yet past threshold — clear so menu doesn't show premature warning
-            session.idle_since = None;
-            // Re-mark so the clock starts from the real first zero-delta poll
-            session.idle_since = Some(since);
-        }
+    // Only surface the idle/warning once the stall threshold is actually
+    // crossed. `idle_since` is stamped at the first zero-delta poll, so
+    // while `elapsed < threshold` it must read as None — menu/icon and the
+    // stall-reconnect check all gate on `idle_since.is_some()`, and a stale
+    // Some would both flip the icon prematurely and let
+    // `should_auto_reconnect_on_stall` fire below threshold.
+    if let Some(since) = session.idle_since
+        && since.elapsed().as_secs() < threshold_secs as u64
+    {
+        session.idle_since = None;
     }
 }
 
@@ -206,12 +205,21 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_delta_starts_idle_timer() {
+    fn test_zero_delta_below_threshold_not_idle() {
         let mut s = make_connected_session();
-        // Same bytes as last poll = zero delta
+        // Same bytes as last poll = zero delta, but no time has elapsed so
+        // we are still below threshold — idle_since must read None so the
+        // icon/menu don't show a premature warning.
         apply_stall_detection(&mut s, 1000, 500, 60);
-        // idle_since is set, but not yet past threshold — the function
-        // keeps it so the next poll can check elapsed time.
+        assert!(s.idle_since.is_none());
+    }
+
+    #[test]
+    fn test_zero_delta_past_threshold_marks_idle() {
+        let mut s = make_connected_session();
+        // Seed an idle stamp older than the threshold, then send zero delta.
+        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        apply_stall_detection(&mut s, 1000, 500, 60);
         assert!(s.idle_since.is_some());
     }
 
