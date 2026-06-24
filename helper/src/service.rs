@@ -21,7 +21,10 @@ use zbus::interface;
 use crate::validation::{split_ips, validate_bypass_cidrs, validate_interface};
 use crate::{bypass, nft, watcher};
 
-const NFT_BIN: &str = "nft";
+// Absolute path — a root system service must not trust ambient `PATH`.
+// `/usr/sbin/nft` is the install location on all target distros (Debian,
+// Fedora/RPM, Arch); `/sbin` is a symlink to `/usr/sbin` under usr-merge.
+const NFT_BIN: &str = "/usr/sbin/nft";
 
 #[derive(Default)]
 struct State {
