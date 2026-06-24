@@ -131,6 +131,17 @@ pub(super) async fn setup_status_handler(
                                 if !was_connected && session.status.is_connected() {
                                     session.last_bytes_in = 0;
                                     session.last_bytes_out = 0;
+                                    session.idle_started_at = None;
+                                    session.idle_since = None;
+                                }
+                                // The idle clock/warning are only meaningful while
+                                // Connected. On any drop out of Connected (Error,
+                                // Disconnected, Paused) clear both — otherwise the stale
+                                // `idle_since` wins the `current_icon()` priority check
+                                // (`error > loading`) and masks the error icon with the
+                                // idle/warning icon.
+                                if was_connected && !session.status.is_connected() {
+                                    session.idle_started_at = None;
                                     session.idle_since = None;
                                 }
                             }
@@ -166,21 +177,31 @@ pub(super) async fn setup_status_handler(
 
                         let attempt = {
                             use super::credential_handler::{AUTH_RETRY_WINDOW_SECS, AuthAttempt};
-                            let mut attempts = super::credential_handler::CREDENTIAL_ATTEMPTS
-                                .lock()
-                                .unwrap();
-                            let entry =
-                                attempts.entry(config_name.clone()).or_insert(AuthAttempt {
-                                    count: 0,
-                                    last_failure: std::time::Instant::now(),
-                                });
-                            // Reset counter if last failure was too long ago
-                            if entry.last_failure.elapsed().as_secs() > AUTH_RETRY_WINDOW_SECS {
-                                entry.count = 0;
+                            // Poison-tolerant: a prior panic in a holder of
+                            // this lock must not brick auth-retry bookkeeping.
+                            // Treat a poisoned lock as a fresh attempt (count 1).
+                            if let Ok(mut attempts) =
+                                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
+                            {
+                                let entry =
+                                    attempts.entry(config_name.clone()).or_insert(AuthAttempt {
+                                        count: 0,
+                                        last_failure: std::time::Instant::now(),
+                                    });
+                                // Reset counter if last failure was too long ago
+                                if entry.last_failure.elapsed().as_secs() > AUTH_RETRY_WINDOW_SECS {
+                                    entry.count = 0;
+                                }
+                                entry.count += 1;
+                                entry.last_failure = std::time::Instant::now();
+                                entry.count
+                            } else {
+                                warn!(
+                                    "CREDENTIAL_ATTEMPTS lock poisoned — \
+                                     treating as first attempt"
+                                );
+                                1
                             }
-                            entry.count += 1;
-                            entry.last_failure = std::time::Instant::now();
-                            entry.count
                         };
 
                         if attempt < super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
@@ -196,11 +217,18 @@ pub(super) async fn setup_status_handler(
                                 &format!("{}: Authentication Failed", config_name),
                                 &format!("Wrong credentials for '{}'. Retrying...", config_name,),
                             );
-                            // Mark old session so SessDestroyed won't show reconnect prompt
-                            super::session_ops::USER_DISCONNECTED
-                                .lock()
-                                .unwrap()
-                                .insert(session_path.clone());
+                            // Mark old session so SessDestroyed won't show reconnect prompt.
+                            // Poison-tolerant: a poisoned lock must not skip this bookkeeping
+                            // (best-effort insert; worst case SessDestroyed shows a redundant
+                            // reconnect prompt, which is safe).
+                            if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
+                                set.insert(session_path.clone());
+                            } else {
+                                warn!(
+                                    "USER_DISCONNECTED lock poisoned — \
+                                     SessDestroyed may show reconnect prompt"
+                                );
+                            }
                             let tray_for_retry = tray_for_status.clone();
                             let settings = crate::settings::Settings::new();
                             let sp_for_disconnect = session_path;
@@ -364,6 +392,7 @@ pub(super) async fn setup_status_handler(
                                     bytes_out: 0,
                                     last_bytes_in: 0,
                                     last_bytes_out: 0,
+                                    idle_started_at: None,
                                     idle_since: None,
                                     auto_reconnect_attempted_at: None,
                                     kill_switch_active: false,

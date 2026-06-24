@@ -56,13 +56,29 @@ pub(super) async fn send_dbus_notification(
     }
 }
 
-/// Fire-and-forget notification with replaces_id=0 (always a fresh toast).
+/// Fire-and-forget notification, deduped on `summary`. A second call with the
+/// same summary replaces the prior toast instead of stacking. The dedup key is
+/// the summary (the title) because info/error toasts are categorized by title
+/// (e.g. "Import Failed", "Clear Credentials Failed"); repeated failures of the
+/// same kind should coalesce, not pile up. Per CLAUDE.md every notification
+/// must route through the `NOTIFICATION_IDS` dedup map — these generic toasts
+/// previously bypassed it.
 pub(super) fn send_notification(summary: &str, body: &str, urgency: u8) {
     let summary = summary.to_string();
     let body = body.to_string();
+    let key = summary.clone();
+    let replaces_id = NOTIFICATION_IDS
+        .lock()
+        .map(|m| *m.get(&key).unwrap_or(&0))
+        .unwrap_or(0);
     glib::spawn_future_local(async move {
-        if let Err(e) = send_dbus_notification(&summary, &body, urgency, 0).await {
-            warn!("Failed to send notification: {}", e);
+        match send_dbus_notification(&summary, &body, urgency, replaces_id).await {
+            Ok(new_id) => {
+                if let Ok(mut map) = NOTIFICATION_IDS.lock() {
+                    map.insert(key, new_id);
+                }
+            }
+            Err(e) => warn!("Failed to send notification: {}", e),
         }
     });
 }

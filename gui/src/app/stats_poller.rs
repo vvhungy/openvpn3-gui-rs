@@ -109,28 +109,33 @@ pub fn apply_stall_detection(
     session.last_bytes_out = bytes_out;
 
     if threshold_secs == 0 {
+        session.idle_started_at = None;
         session.idle_since = None;
         return;
     }
 
     if delta_in > 0 || delta_out > 0 {
+        // Traffic resumed — reset both the start-clock and the warning flag.
+        session.idle_started_at = None;
         session.idle_since = None;
-    } else if session.idle_since.is_none() {
-        session.idle_since = Some(std::time::Instant::now());
+        return;
     }
 
-    // If idle for longer than threshold, keep idle_since set (menu/icon
-    // read it to show warning). The caller already has the timestamp —
-    // no additional action needed here.
-    if let Some(since) = session.idle_since {
-        let idle_secs = since.elapsed().as_secs();
-        if idle_secs < threshold_secs as u64 {
-            // Not yet past threshold — clear so menu doesn't show premature warning
-            session.idle_since = None;
-            // Re-mark so the clock starts from the real first zero-delta poll
-            session.idle_since = Some(since);
-        }
-    }
+    // Zero delta: start the idle clock on the first such poll and let it
+    // accumulate across subsequent polls (`idle_started_at` persists).
+    let started = *session
+        .idle_started_at
+        .get_or_insert_with(std::time::Instant::now);
+
+    // Only surface the idle/stall warning once the threshold is actually
+    // crossed. `idle_since.is_some()` is the warning flag read by the menu,
+    // icon, and `should_auto_reconnect_on_stall`; keep it `None` while below
+    // threshold so a single zero-delta poll never flips the icon prematurely.
+    session.idle_since = if started.elapsed().as_secs() >= threshold_secs as u64 {
+        Some(started)
+    } else {
+        None
+    };
 }
 
 /// Decide whether a stalled session should trigger an auto-reconnect.
@@ -189,6 +194,7 @@ mod tests {
             bytes_out: 500,
             last_bytes_in: 1000,
             last_bytes_out: 500,
+            idle_started_at: None,
             idle_since: None,
             auto_reconnect_attempted_at: None,
             kill_switch_active: false,
@@ -206,13 +212,38 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_delta_starts_idle_timer() {
+    fn test_zero_delta_below_threshold_not_idle() {
         let mut s = make_connected_session();
-        // Same bytes as last poll = zero delta
+        // Same bytes as last poll = zero delta, but no time has elapsed so
+        // we are still below threshold — idle_since must read None so the
+        // icon/menu don't show a premature warning.
         apply_stall_detection(&mut s, 1000, 500, 60);
-        // idle_since is set, but not yet past threshold — the function
-        // keeps it so the next poll can check elapsed time.
+        assert!(s.idle_since.is_none());
+    }
+
+    #[test]
+    fn test_zero_delta_past_threshold_marks_idle() {
+        let mut s = make_connected_session();
+        // Seed the start-clock older than the threshold, then send zero delta.
+        s.idle_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        apply_stall_detection(&mut s, 1000, 500, 60);
         assert!(s.idle_since.is_some());
+    }
+
+    #[test]
+    fn test_idle_clock_accumulates_across_polls() {
+        // Regression: the start-clock must persist across consecutive
+        // zero-delta polls so elapsed idle time accumulates. A poll that
+        // re-stamps the clock every cycle would never cross the threshold.
+        let mut s = make_connected_session();
+        apply_stall_detection(&mut s, 1000, 500, 60); // first zero-delta poll
+        let started = s.idle_started_at.expect("start-clock set on first poll");
+        apply_stall_detection(&mut s, 1000, 500, 60); // second zero-delta poll
+        assert_eq!(
+            s.idle_started_at,
+            Some(started),
+            "start-clock must not be reset on subsequent polls"
+        );
     }
 
     #[test]

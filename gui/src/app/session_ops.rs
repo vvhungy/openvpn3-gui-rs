@@ -129,6 +129,7 @@ pub(crate) async fn connect_to_config(
                 bytes_out: 0,
                 last_bytes_in: 0,
                 last_bytes_out: 0,
+                idle_started_at: None,
                 idle_since: None,
                 auto_reconnect_attempted_at: None,
                 kill_switch_active: false,
@@ -241,11 +242,14 @@ pub(crate) async fn disconnect_with_message(
     if let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock() {
         attempts.remove(config_name);
     }
-    // Mark as user-initiated to suppress the SessDestroyed reconnect notification
-    USER_DISCONNECTED
-        .lock()
-        .unwrap()
-        .insert(session_path.to_string());
+    // Mark as user-initiated to suppress the SessDestroyed reconnect notification.
+    // Poison-tolerant: matches the rest of session_ops; worst case is a redundant
+    // reconnect prompt, never a panic that blocks the disconnect.
+    if let Ok(mut set) = USER_DISCONNECTED.lock() {
+        set.insert(session_path.to_string());
+    } else {
+        warn!("USER_DISCONNECTED lock poisoned — SessDestroyed may show reconnect prompt");
+    }
     if let Err(e) = session_action(dbus, session_path, "disconnect").await {
         error!("Failed to disconnect session {}: {}", session_path, e);
     }

@@ -63,8 +63,14 @@ pub struct SessionInfo {
     /// Previous poll cycle byte counts — used for stall detection
     pub last_bytes_in: u64,
     pub last_bytes_out: u64,
-    /// When the session was first detected as idle (zero delta).
-    /// `None` means traffic was seen on the last poll or session is not connected.
+    /// When zero-delta polling first started (the idle start-clock). Persists
+    /// across polls so elapsed idle time accumulates. `None` means traffic was
+    /// seen on the last poll or the session is not connected.
+    pub idle_started_at: Option<std::time::Instant>,
+    /// Set to the idle start time only once the stall threshold is crossed —
+    /// `is_some()` is the "show idle/stall warning" flag for icon and label.
+    /// `None` while still below threshold, so a single zero-delta poll never
+    /// surfaces the warning prematurely.
     pub idle_since: Option<std::time::Instant>,
     /// Timestamp of the last auto-reconnect attempt for this config_path.
     /// Used by stall-driven auto-reconnect to enforce a cooldown window
@@ -289,6 +295,7 @@ mod tests {
             bytes_out: 0,
             last_bytes_in: 0,
             last_bytes_out: 0,
+            idle_started_at: None,
             idle_since: None,
             auto_reconnect_attempted_at: None,
             kill_switch_active: false,

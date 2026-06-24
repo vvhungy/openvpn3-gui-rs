@@ -57,6 +57,20 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.8" date="2026-06-23">
+      <description>
+        <p>Sprint 31: GUI correctness and robustness hardening (no new features)</p>
+        <ul>
+          <li>Idle/stall warning now respects the configured threshold — a single zero-delta poll no longer surfaces the warning icon prematurely.</li>
+          <li>Idle detection now accumulates correctly across polls — the stall timer is no longer reset every cycle, so the warning icon, idle label, and stall-driven auto-reconnect actually fire once a tunnel goes quiet past the threshold.</li>
+          <li>Error state always takes priority over the idle warning — an errored session shows the error icon even if it was previously idle.</li>
+          <li>Poison-tolerant locks — a panic while holding a global lock no longer bricks later disconnect and auth bookkeeping.</li>
+          <li>System-bus reconnection recovery — a transient system-bus outage at startup no longer requires a GUI restart for the kill-switch helper to reconnect.</li>
+          <li>Config-import dialog now routes through the shared singleton path; generic notifications route through the dedup map to prevent stacking.</li>
+          <li>Internal: gsettings and log-viewer modules split for headroom under the size threshold.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.7" date="2026-05-28">
       <description>
         <p>Sprint 30: auto-reconnect, log export, statistics dialog, and split-tunnel PoC validation</p>

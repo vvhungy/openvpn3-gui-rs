@@ -24,9 +24,11 @@ use zbus::message::Type as MessageType;
 use crate::app::log_buffer;
 use crate::settings::Settings;
 
+mod export;
 mod format;
 
-use format::{format_export, format_log_line};
+use export::show_export_dialog;
+use format::format_log_line;
 
 /// Per-tab state. Holds the full unfiltered entry vec so search/level
 /// changes can rebuild the visible buffer without re-fetching from the
@@ -560,69 +562,4 @@ fn create_tab_for_config(config_name: &str) -> TabState {
         level_min,
         export_btn,
     }
-}
-
-/// Open a Save-As file chooser and write the export to the selected path.
-fn show_export_dialog(
-    parent: Option<&gtk4::Window>,
-    config_name: String,
-    entries: Vec<log_buffer::LogEntry>,
-) {
-    use gtk4::{FileChooserAction, FileChooserDialog, ResponseType};
-
-    let dialog = FileChooserDialog::builder()
-        .title("Export Logs")
-        .action(FileChooserAction::Save)
-        .modal(true)
-        .build();
-    dialog.add_button("Cancel", ResponseType::Cancel);
-    dialog.add_button("Save", ResponseType::Accept);
-
-    let default_name = format!(
-        "openvpn3-gui-{}-{}.log",
-        sanitize_filename(&config_name),
-        chrono::Local::now().format("%Y%m%d-%H%M%S"),
-    );
-    dialog.set_current_name(&default_name);
-
-    if let Some(p) = parent {
-        dialog.set_transient_for(Some(p));
-    }
-
-    dialog.connect_response(move |dlg, resp| {
-        if resp == ResponseType::Accept
-            && let Some(file) = dlg.file()
-            && let Some(path) = file.path()
-        {
-            let text = format_export(&entries, &config_name, chrono::Local::now());
-            match std::fs::write(&path, text) {
-                Ok(()) => tracing::info!("Exported logs to {:?}", path),
-                Err(e) => {
-                    tracing::warn!("Log export to {:?} failed: {}", path, e);
-                    crate::dialogs::show_error_notification(
-                        "Log Export Failed",
-                        &format!("Could not write to {}: {}", path.display(), e),
-                    );
-                }
-            }
-        }
-        dlg.close();
-    });
-
-    dialog.show();
-}
-
-/// Strip filesystem-unfriendly characters from a config name for use in a
-/// default export filename. Keeps alphanumerics, dash, underscore; replaces
-/// anything else with `_`.
-fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
