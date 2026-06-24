@@ -122,9 +122,31 @@ impl KillSwitch {
                     if let Err(e) = run_nft(nft::remove_rules_script()).await {
                         error!(err = ?e, "auto-cleanup nft failed");
                     }
-                    let mut state = state_arc.lock().expect("state mutex poisoned");
-                    state.sender = None;
-                    state.watcher = None;
+                    // Firewall down before routing down (apply order reversed).
+                    // If bypass routing was applied, tear it down too — otherwise
+                    // table 100, the priority-100 ip-rules, and loose rp_filter
+                    // survive the GUI crash and the user is left in a degraded
+                    // forwarding state. Restore rp_filter first, then teardown.
+                    let rpf = {
+                        let mut state = state_arc.lock().expect("state mutex poisoned");
+                        let rpf = if state.bypass_routes_applied {
+                            state.bypass_routes_applied = false;
+                            state.rp_filter_original.take()
+                        } else {
+                            None
+                        };
+                        state.sender = None;
+                        state.watcher = None;
+                        rpf
+                    };
+                    if let Some((iface, value)) = rpf {
+                        if let Err(e) = bypass::restore_rp_filter(&iface, &value).await {
+                            warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
+                        }
+                        if let Err(e) = bypass::teardown_routing().await {
+                            error!(err = ?e, "auto-cleanup bypass routing failed");
+                        }
+                    }
                 }
                 Err(e) => error!(err = ?e, "watcher errored"),
             }
@@ -300,9 +322,10 @@ impl KillSwitch {
 }
 
 /// Best-effort cleanup of both firewall *and* routing state, called from
-/// the SIGTERM/SIGINT handler in main. Per D4 the watcher and explicit
-/// `remove_rules` deliberately do NOT touch routing — only shutdown clears
-/// everything (the helper is going away, no one will clean up otherwise).
+/// the SIGTERM/SIGINT handler in main. The explicit `remove_rules` path
+/// deliberately leaves routing alone (the GUI owns its teardown); the
+/// watcher (GUI-crash path) and this shutdown handler both clear routing
+/// too, since no one else will (the helper is going away / the GUI is gone).
 pub async fn cleanup_rules() {
     if let Err(e) = run_nft(nft::remove_rules_script()).await {
         warn!(err = ?e, "shutdown cleanup nft failed (often expected)");
