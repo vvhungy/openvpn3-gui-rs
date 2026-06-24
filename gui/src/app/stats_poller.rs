@@ -109,27 +109,33 @@ pub fn apply_stall_detection(
     session.last_bytes_out = bytes_out;
 
     if threshold_secs == 0 {
+        session.idle_started_at = None;
         session.idle_since = None;
         return;
     }
 
     if delta_in > 0 || delta_out > 0 {
+        // Traffic resumed — reset both the start-clock and the warning flag.
+        session.idle_started_at = None;
         session.idle_since = None;
-    } else if session.idle_since.is_none() {
-        session.idle_since = Some(std::time::Instant::now());
+        return;
     }
 
-    // Only surface the idle/warning once the stall threshold is actually
-    // crossed. `idle_since` is stamped at the first zero-delta poll, so
-    // while `elapsed < threshold` it must read as None — menu/icon and the
-    // stall-reconnect check all gate on `idle_since.is_some()`, and a stale
-    // Some would both flip the icon prematurely and let
-    // `should_auto_reconnect_on_stall` fire below threshold.
-    if let Some(since) = session.idle_since
-        && since.elapsed().as_secs() < threshold_secs as u64
-    {
-        session.idle_since = None;
-    }
+    // Zero delta: start the idle clock on the first such poll and let it
+    // accumulate across subsequent polls (`idle_started_at` persists).
+    let started = *session
+        .idle_started_at
+        .get_or_insert_with(std::time::Instant::now);
+
+    // Only surface the idle/stall warning once the threshold is actually
+    // crossed. `idle_since.is_some()` is the warning flag read by the menu,
+    // icon, and `should_auto_reconnect_on_stall`; keep it `None` while below
+    // threshold so a single zero-delta poll never flips the icon prematurely.
+    session.idle_since = if started.elapsed().as_secs() >= threshold_secs as u64 {
+        Some(started)
+    } else {
+        None
+    };
 }
 
 /// Decide whether a stalled session should trigger an auto-reconnect.
@@ -188,6 +194,7 @@ mod tests {
             bytes_out: 500,
             last_bytes_in: 1000,
             last_bytes_out: 500,
+            idle_started_at: None,
             idle_since: None,
             auto_reconnect_attempted_at: None,
             kill_switch_active: false,
@@ -217,10 +224,26 @@ mod tests {
     #[test]
     fn test_zero_delta_past_threshold_marks_idle() {
         let mut s = make_connected_session();
-        // Seed an idle stamp older than the threshold, then send zero delta.
-        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        // Seed the start-clock older than the threshold, then send zero delta.
+        s.idle_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
         apply_stall_detection(&mut s, 1000, 500, 60);
         assert!(s.idle_since.is_some());
+    }
+
+    #[test]
+    fn test_idle_clock_accumulates_across_polls() {
+        // Regression: the start-clock must persist across consecutive
+        // zero-delta polls so elapsed idle time accumulates. A poll that
+        // re-stamps the clock every cycle would never cross the threshold.
+        let mut s = make_connected_session();
+        apply_stall_detection(&mut s, 1000, 500, 60); // first zero-delta poll
+        let started = s.idle_started_at.expect("start-clock set on first poll");
+        apply_stall_detection(&mut s, 1000, 500, 60); // second zero-delta poll
+        assert_eq!(
+            s.idle_started_at,
+            Some(started),
+            "start-clock must not be reset on subsequent polls"
+        );
     }
 
     #[test]

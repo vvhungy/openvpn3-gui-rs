@@ -131,14 +131,17 @@ pub(super) async fn setup_status_handler(
                                 if !was_connected && session.status.is_connected() {
                                     session.last_bytes_in = 0;
                                     session.last_bytes_out = 0;
+                                    session.idle_started_at = None;
                                     session.idle_since = None;
                                 }
-                                // `idle_since` is only meaningful while Connected.
-                                // On any drop out of Connected (Error, Disconnected,
-                                // Paused) clear it — otherwise the stale value wins the
-                                // `current_icon()` priority check (`error > loading`)
-                                // and masks the error icon with the idle/warning icon.
+                                // The idle clock/warning are only meaningful while
+                                // Connected. On any drop out of Connected (Error,
+                                // Disconnected, Paused) clear both — otherwise the stale
+                                // `idle_since` wins the `current_icon()` priority check
+                                // (`error > loading`) and masks the error icon with the
+                                // idle/warning icon.
                                 if was_connected && !session.status.is_connected() {
+                                    session.idle_started_at = None;
                                     session.idle_since = None;
                                 }
                             }
@@ -389,6 +392,7 @@ pub(super) async fn setup_status_handler(
                                     bytes_out: 0,
                                     last_bytes_in: 0,
                                     last_bytes_out: 0,
+                                    idle_started_at: None,
                                     idle_since: None,
                                     auto_reconnect_attempted_at: None,
                                     kill_switch_active: false,
