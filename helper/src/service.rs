@@ -240,9 +240,21 @@ impl KillSwitch {
             .await
             .map_err(|e| fdo::Error::Failed(format!("rp_filter set: {e}")))?;
         let (applied, failed) = bypass::install_rules(&cidrs).await;
-        bypass::populate_table(&net)
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("populate table: {e}")))?;
+        // From here rp_filter is loose (2). `populate_table` is the only step
+        // after `set_rp_filter_loose` that can return Err, so it is the lone
+        // mid-chain failure point. Fail-closed (S32 T1): restore rp_filter
+        // AND tear down any partial ip-rules before surfacing the error, so a
+        // failed apply never leaves the iface stuck loose or orphan rules
+        // behind. `teardown_routing` + `restore_rp_filter` are both idempotent.
+        if let Err(e) = bypass::populate_table(&net).await {
+            if let Err(te) = bypass::teardown_routing().await {
+                warn!(err = ?te, "teardown after apply failure failed");
+            }
+            if let Err(re) = bypass::restore_rp_filter(&net.iface, &original_rpf).await {
+                warn!(iface = %net.iface, err = ?re, "rp_filter restore after apply failure failed (iface gone?)");
+            }
+            return Err(fdo::Error::Failed(format!("populate table: {e}")));
+        }
         // conntrack flush is defence-in-depth — return value intentionally
         // discarded (failure logged inside flush_conntrack_scoped). Use
         // `applied` so we don't burn cycles on CIDRs that never got a rule.
