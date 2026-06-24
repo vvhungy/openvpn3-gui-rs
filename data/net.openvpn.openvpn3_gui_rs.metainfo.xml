@@ -62,6 +62,7 @@
         <p>Sprint 31: GUI correctness and robustness hardening (no new features)</p>
         <ul>
           <li>Idle/stall warning now respects the configured threshold — a single zero-delta poll no longer surfaces the warning icon prematurely.</li>
+          <li>Idle detection now accumulates correctly across polls — the stall timer is no longer reset every cycle, so the warning icon, idle label, and stall-driven auto-reconnect actually fire once a tunnel goes quiet past the threshold.</li>
           <li>Error state always takes priority over the idle warning — an errored session shows the error icon even if it was previously idle.</li>
           <li>Poison-tolerant locks — a panic while holding a global lock no longer bricks later disconnect and auth bookkeeping.</li>
           <li>System-bus reconnection recovery — a transient system-bus outage at startup no longer requires a GUI restart for the kill-switch helper to reconnect.</li>
