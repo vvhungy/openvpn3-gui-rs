@@ -57,6 +57,12 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.9" date="2026-06-24">
+      <description>
+        <p>Kill-switch fail-closed fixes: rp_filter is now restored if bypass-route apply fails mid-chain; bypass routing is torn down when the GUI crashes (not just the firewall); re-applying rules no longer opens a no-enforcement window (the teardown and rebuild run in one atomic nft transaction).</p>
+        <p>Helper hardening: nft, ip and conntrack are invoked via absolute paths so a root service never trusts ambient PATH; conntrack CIDR-flush semantics verified and documented; the routing-teardown loop cap is now tied to the single bypass-CIDR limit constant.</p>
+      </description>
+    </release>
     <release version="0.3.8" date="2026-06-23">
       <description>
         <p>Sprint 31: GUI correctness and robustness hardening (no new features)</p>

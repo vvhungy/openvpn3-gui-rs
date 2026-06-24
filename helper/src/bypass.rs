@@ -11,6 +11,7 @@
 //! holds the caller's `std::sync::Mutex<State>` lock across `.await` — that
 //! is the caller's responsibility.
 
+use crate::validation::MAX_BYPASS_CIDRS;
 use anyhow::{Context, Result, bail};
 use std::net::IpAddr;
 use std::process::Stdio;
@@ -21,6 +22,12 @@ pub const TABLE_ID: u32 = 100;
 pub const TABLE_NAME: &str = "openvpn3-bypass";
 pub const RULE_PRIORITY: u32 = 100;
 pub const RT_TABLES_FILE: &str = "/etc/iproute2/rt_tables.d/openvpn3-bypass.conf";
+
+// Absolute tool paths — a root service must not trust ambient `PATH` (matches
+// `NFT_BIN` in service.rs). `/usr/sbin` is the install location on all target
+// distros; `/sbin` is a usr-merge symlink to it.
+const IP_BIN: &str = "/usr/sbin/ip";
+const CONNTRACK_BIN: &str = "/usr/sbin/conntrack";
 
 /// Captured pre-VPN network attachment. v6 fields are optional — many
 /// networks are v4-only, in which case `gateway_v6` is `None` and the v6
@@ -75,7 +82,7 @@ pub async fn capture_default_gateway() -> Result<CapturedNet> {
 }
 
 async fn capture_default_one_family(v6: bool) -> Result<Option<(String, String)>> {
-    let mut cmd = Command::new("ip");
+    let mut cmd = Command::new(IP_BIN);
     if v6 {
         cmd.arg("-6");
     }
@@ -167,7 +174,7 @@ pub async fn install_rules(cidrs: &[String]) -> (Vec<String>, Vec<(String, Strin
 }
 
 async fn ip_rule_add(cidr: &str, v6: bool) -> Result<()> {
-    let mut cmd = Command::new("ip");
+    let mut cmd = Command::new(IP_BIN);
     if v6 {
         cmd.arg("-6");
     }
@@ -189,7 +196,7 @@ async fn ip_rule_add(cidr: &str, v6: bool) -> Result<()> {
 /// `net.gateway_v6` is `Some` — many networks are v4-only.
 pub async fn populate_table(net: &CapturedNet) -> Result<()> {
     if let Some(gw) = &net.gateway_v4 {
-        let mut cmd = Command::new("ip");
+        let mut cmd = Command::new(IP_BIN);
         cmd.args([
             "route",
             "add",
@@ -204,7 +211,7 @@ pub async fn populate_table(net: &CapturedNet) -> Result<()> {
         run_ip(cmd, "ip route add default v4").await?;
     }
     if let Some(gw) = &net.gateway_v6 {
-        let mut cmd = Command::new("ip");
+        let mut cmd = Command::new(IP_BIN);
         cmd.args([
             "-6",
             "route",
@@ -227,9 +234,14 @@ pub async fn populate_table(net: &CapturedNet) -> Result<()> {
 /// deleted" on a no-op, which is fine. We swallow non-zero exit because
 /// conntrack may be unavailable on minimal systems — defence-in-depth
 /// failure here should not block route apply.
+///
+/// `-d` accepts a CIDR prefix directly: conntrack-tools implies `--mask-dst`
+/// when the argument is in CIDR notation (verified against v1.4.8, the
+/// version on all current target distros), so a `/N` prefix matches every
+/// flow whose destination falls in that range. No per-host expansion needed.
 pub async fn flush_conntrack_scoped(cidrs: &[String]) {
     for cidr in cidrs {
-        let mut cmd = Command::new("conntrack");
+        let mut cmd = Command::new(CONNTRACK_BIN);
         cmd.args(["-D", "-d", cidr]);
         match cmd.output().await {
             Ok(o) if o.status.success() => {}
@@ -253,8 +265,8 @@ pub async fn teardown_routing() -> Result<()> {
         // Repeated `ip rule del` removes one rule at a time; loop until exit
         // status is non-zero ("No such rule"). Cap at MAX_BYPASS_CIDRS*2 so
         // we don't spin forever if `ip` ever changes its semantics.
-        for _ in 0..256 {
-            let mut cmd = Command::new("ip");
+        for _ in 0..(MAX_BYPASS_CIDRS * 2) {
+            let mut cmd = Command::new(IP_BIN);
             if v6 {
                 cmd.arg("-6");
             }
@@ -275,7 +287,7 @@ pub async fn teardown_routing() -> Result<()> {
     // Flush both families' default routes from table 100. Errors here are
     // expected on a clean system (table already empty).
     for v6 in [false, true] {
-        let mut cmd = Command::new("ip");
+        let mut cmd = Command::new(IP_BIN);
         if v6 {
             cmd.arg("-6");
         }

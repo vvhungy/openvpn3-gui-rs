@@ -13,7 +13,7 @@ const IFNAMSIZ_MAX: usize = 15; // Linux IFNAMSIZ - 1 (NUL terminator)
 /// caps user-visible list length in the Preferences editor; this constant
 /// is defence-in-depth at the trust boundary. Kept well below the kernel
 /// `ip rule` O(n)-per-packet cost knee.
-const MAX_BYPASS_CIDRS: usize = 128;
+pub const MAX_BYPASS_CIDRS: usize = 128;
 
 pub(crate) fn validate_interface(name: &str) -> Result<()> {
     if name.is_empty() {

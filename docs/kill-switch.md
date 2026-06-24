@@ -49,7 +49,15 @@ isolates them from ufw/firewalld and means cleanup is a single
 
 **`AddRules(interface, vpn_server_ips, allow_lan)` emits:**
 
+The script is an **atomic replace**: nft applies a whole `-f` input as one
+transaction, so `AddRules` prepends an ensure-exists + teardown of any prior
+table before rebuilding. This eliminates the no-enforcement window a separate
+remove-then-add pair would leave on every re-apply (reconnect, mid-session
+toggle, auto-reconnect). On first apply the teardown is a no-op.
+
 ```nft
+add table inet openvpn3_killswitch          # ensure-exists so delete can't fail
+delete table inet openvpn3_killswitch       # clear any prior sets/chains
 table inet openvpn3_killswitch {
     chain output {
         type filter hook output priority 0; policy drop;

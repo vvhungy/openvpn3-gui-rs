@@ -32,6 +32,15 @@ pub fn add_rules_script(
     bypass_cidrs_v6: &[&str],
 ) -> String {
     let mut s = String::new();
+    // Atomic replace: nft applies a whole `-f` script as one transaction, so
+    // emitting the teardown + rebuild in a single script eliminates the
+    // no-enforcement window that a separate remove-then-add call pair leaves.
+    // `add table` is an idempotent ensure-exists, so the following `delete`
+    // never fails on first apply (no prior table) — then the table (with all
+    // its sets/chains) is rebuilt fresh. The whole thing commits or rolls back
+    // as a unit; there is no instant where the table is absent.
+    let _ = writeln!(s, "add table inet {TABLE}");
+    let _ = writeln!(s, "delete table inet {TABLE}");
     let _ = writeln!(s, "table inet {TABLE} {{");
 
     // Bypass named-set declarations live in the table preamble. `flags
@@ -116,6 +125,20 @@ mod tests {
             remove_rules_script(),
             "delete table inet openvpn3_killswitch\n"
         );
+    }
+
+    #[test]
+    fn add_script_is_self_contained_atomic_replace() {
+        // The script must tear down any prior table and rebuild within one
+        // nft transaction — no dependency on a prior remove_rules call, so
+        // re-apply has no no-enforcement window. Ensure-exists `add table`
+        // precedes the `delete table` so first-apply (no prior table) works.
+        let s = add_rules_script("tun0", &["1.2.3.4"], &[], false, &[], &[]);
+        let add_pos = s.find("add table inet openvpn3_killswitch").unwrap();
+        let del_pos = s.find("delete table inet openvpn3_killswitch").unwrap();
+        let build_pos = s.find("table inet openvpn3_killswitch {").unwrap();
+        assert!(add_pos < del_pos, "ensure-exists must precede delete");
+        assert!(del_pos < build_pos, "delete must precede rebuild");
     }
 
     #[test]

@@ -21,7 +21,10 @@ use zbus::interface;
 use crate::validation::{split_ips, validate_bypass_cidrs, validate_interface};
 use crate::{bypass, nft, watcher};
 
-const NFT_BIN: &str = "nft";
+// Absolute path — a root system service must not trust ambient `PATH`.
+// `/usr/sbin/nft` is the install location on all target distros (Debian,
+// Fedora/RPM, Arch); `/sbin` is a symlink to `/usr/sbin` under usr-merge.
+const NFT_BIN: &str = "/usr/sbin/nft";
 
 #[derive(Default)]
 struct State {
@@ -91,8 +94,9 @@ impl KillSwitch {
             &bypass_v6_refs,
         );
 
-        // Replace any existing rules; ignore "no such table" on first run.
-        let _ = run_nft(nft::remove_rules_script()).await;
+        // Atomic replace: the script itself tears down any prior table and
+        // rebuilds in one nft transaction (no no-enforcement window). On
+        // first apply the embedded teardown is a no-op (ensure-exists guard).
         run_nft(&script)
             .await
             .map_err(|e| fdo::Error::Failed(format!("nft add: {e}")))?;
@@ -122,9 +126,31 @@ impl KillSwitch {
                     if let Err(e) = run_nft(nft::remove_rules_script()).await {
                         error!(err = ?e, "auto-cleanup nft failed");
                     }
-                    let mut state = state_arc.lock().expect("state mutex poisoned");
-                    state.sender = None;
-                    state.watcher = None;
+                    // Firewall down before routing down (apply order reversed).
+                    // If bypass routing was applied, tear it down too — otherwise
+                    // table 100, the priority-100 ip-rules, and loose rp_filter
+                    // survive the GUI crash and the user is left in a degraded
+                    // forwarding state. Restore rp_filter first, then teardown.
+                    let rpf = {
+                        let mut state = state_arc.lock().expect("state mutex poisoned");
+                        let rpf = if state.bypass_routes_applied {
+                            state.bypass_routes_applied = false;
+                            state.rp_filter_original.take()
+                        } else {
+                            None
+                        };
+                        state.sender = None;
+                        state.watcher = None;
+                        rpf
+                    };
+                    if let Some((iface, value)) = rpf {
+                        if let Err(e) = bypass::restore_rp_filter(&iface, &value).await {
+                            warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
+                        }
+                        if let Err(e) = bypass::teardown_routing().await {
+                            error!(err = ?e, "auto-cleanup bypass routing failed");
+                        }
+                    }
                 }
                 Err(e) => error!(err = ?e, "watcher errored"),
             }
@@ -240,9 +266,21 @@ impl KillSwitch {
             .await
             .map_err(|e| fdo::Error::Failed(format!("rp_filter set: {e}")))?;
         let (applied, failed) = bypass::install_rules(&cidrs).await;
-        bypass::populate_table(&net)
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("populate table: {e}")))?;
+        // From here rp_filter is loose (2). `populate_table` is the only step
+        // after `set_rp_filter_loose` that can return Err, so it is the lone
+        // mid-chain failure point. Fail-closed (S32 T1): restore rp_filter
+        // AND tear down any partial ip-rules before surfacing the error, so a
+        // failed apply never leaves the iface stuck loose or orphan rules
+        // behind. `teardown_routing` + `restore_rp_filter` are both idempotent.
+        if let Err(e) = bypass::populate_table(&net).await {
+            if let Err(te) = bypass::teardown_routing().await {
+                warn!(err = ?te, "teardown after apply failure failed");
+            }
+            if let Err(re) = bypass::restore_rp_filter(&net.iface, &original_rpf).await {
+                warn!(iface = %net.iface, err = ?re, "rp_filter restore after apply failure failed (iface gone?)");
+            }
+            return Err(fdo::Error::Failed(format!("populate table: {e}")));
+        }
         // conntrack flush is defence-in-depth — return value intentionally
         // discarded (failure logged inside flush_conntrack_scoped). Use
         // `applied` so we don't burn cycles on CIDRs that never got a rule.
@@ -288,9 +326,10 @@ impl KillSwitch {
 }
 
 /// Best-effort cleanup of both firewall *and* routing state, called from
-/// the SIGTERM/SIGINT handler in main. Per D4 the watcher and explicit
-/// `remove_rules` deliberately do NOT touch routing — only shutdown clears
-/// everything (the helper is going away, no one will clean up otherwise).
+/// the SIGTERM/SIGINT handler in main. The explicit `remove_rules` path
+/// deliberately leaves routing alone (the GUI owns its teardown); the
+/// watcher (GUI-crash path) and this shutdown handler both clear routing
+/// too, since no one else will (the helper is going away / the GUI is gone).
 pub async fn cleanup_rules() {
     if let Err(e) = run_nft(nft::remove_rules_script()).await {
         warn!(err = ?e, "shutdown cleanup nft failed (often expected)");
