@@ -91,8 +91,9 @@ impl KillSwitch {
             &bypass_v6_refs,
         );
 
-        // Replace any existing rules; ignore "no such table" on first run.
-        let _ = run_nft(nft::remove_rules_script()).await;
+        // Atomic replace: the script itself tears down any prior table and
+        // rebuilds in one nft transaction (no no-enforcement window). On
+        // first apply the embedded teardown is a no-op (ensure-exists guard).
         run_nft(&script)
             .await
             .map_err(|e| fdo::Error::Failed(format!("nft add: {e}")))?;
