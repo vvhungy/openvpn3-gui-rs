@@ -1,3 +1,155 @@
+# Sprint 33 Tasks
+
+**Theme:** Kill-switch fail-closed completion + one GUI correctness race. The S31+S32 post-merge code review found that S32's "fail-closed fidelity" theme was **incomplete** — two `rp_filter` restore paths it should have closed were missed. Both are real leaks on a root kill-switch helper: (T1) helper shutdown never restores `rp_filter`; (T2) a routine re-apply silently overwrites the stored original so the eventual teardown restores to "loose" instead of the true pre-apply value. T3 closes the one substantive GUI race the review surfaced — `apply_stall_detection` re-arming the idle flag after the session has left Connected, masking the error icon (the exact regression S31's status-handler clearing set out to fix). Small, surgical sprint; patch release.
+**Branch:** `sprint-33/all-tasks` (created at sprint start per S25 retro rule).
+**Pre-sprint check:** `find {gui,helper}/src -name '*.rs' | xargs wc -l | awk '$1>=800'` — empty expected. S32 end-state: helper `bypass.rs` ~458, `service.rs` ~340; GUI `routing_tab.rs`/`logs/mod.rs` 565 (the watch-list pair). T1 adds ~10 LOC to `service.rs` + ~5 to `main.rs`; T2 is a 2-line guard; T3 adds ~3 LOC to `stats_poller.rs`. No file projected to cross 800. No new watch-list entries.
+**Assessment provenance:** Findings from a `/code-review` of `v0.3.7..v0.3.8` (S31) and `v0.3.8..v0.3.9` (S32), run 2026-06-24 after S32 shipped. Three parallel finder agents (correctness line-scan, removed-behaviour/cross-file tracer, CLAUDE.md-conventions) per dimension; headline bugs re-verified directly against the src (file:line + enclosing function) before being written in — not taken on the agents' word. The two `rp_filter` gaps were independently corroborated by two finders each.
+
+1. ~~**T1 — Fail-closed: restore `rp_filter` on helper shutdown (SIGTERM/SIGINT).**~~ ✅ Done (commit `300e4fc`, co-committed with T2 — T1 alone restored a clobbered value; T2 made T1 actually restore the true original).
+- **Symptom:** `helper/src/service.rs::cleanup_rules` (the SIGTERM/SIGINT handler) calls `run_nft(remove_rules_script())` then `bypass::teardown_routing()`, but **never restores `rp_filter`**. `teardown_routing()` only deletes the priority-100 ip-rules and flushes table 100 — it does not touch `/proc/sys/net/ipv4/conf/<iface>/rp_filter`. The watcher GUI-crash path (`service.rs:~134-153`) and the normal `remove_bypass_routes` path (`service.rs:~307-325`) both restore `rp_filter` from `State.rp_filter_original`; the shutdown path cannot because `cleanup_rules` is a free `pub async fn` with no access to `State`. If bypass routing is active when the helper receives SIGTERM (session up, user reboots / stops the service / package upgrade), the physical iface's `rp_filter` is left at `2` (loose) **until reboot or manual `sysctl`** — a forwarding-state leak that outlives the helper. The root cause is architectural: `cleanup_rules` predates bypass routing and was never threaded the `rp_filter` dimension that the other two teardown paths grew. (Related backlog item "Helper `systemd ExecStopPost` tidy" covers the *kernel* state surviving `kill -9`; this task covers the *graceful* SIGTERM path, which is in scope and trivially fixable.)
+- **Design:** give `cleanup_rules` access to `State.rp_filter_original`. Cleanest: convert it from a free fn to a method on `KillSwitch` (which owns `self.state`), matching `remove_bypass_routes`'s shape. Then in the body, after nft removal and before/after `teardown_routing`, `take()` `rp_filter_original` and best-effort `restore_rp_filter` (iface may have vanished — log + continue, same idiom as `remove_bypass_routes:313-318`). Update the call site in `main.rs` (the signal handler) to reach it via the `KillSwitch` instance rather than the free fn. If the signal handler can't borrow the instance cleanly (lifetime across the signal hook), the fallback is a module-level `OnceCell<Arc<KillSwitch>>` or passing a cloned `Arc` into the handler — pick whichever matches how `main.rs` already wires the handler; do not introduce a second static-state owner.
+- **State × behaviour matrix:**
+  - SIGTERM, no bypass active: `rp_filter_original` is `None` → no restore attempted. `nft -` + routing teardown run as today. Unchanged.
+  - SIGTERM, bypass active: **T1 fix** — `nft -`, routing teardown, AND `rp_filter` restored to original. No leak.
+  - Graceful GUI disconnect (normal path): existing `remove_bypass_routes`. Unchanged.
+  - `kill -9` of helper: out of scope (kernel state persists regardless) — covered by the standing backlog item, not this task.
+- **Critical files:** `helper/src/service.rs` (`cleanup_rules` ~L333-340, and the `KillSwitch` struct/`State`), `helper/src/main.rs` (signal-handler call site), `helper/src/bypass.rs` (`restore_rp_filter` — exists, reused).
+- **Tests:** unit-test the ordering decision if it extracts cleanly; otherwise a documented manual repro — apply bypass, send the helper `SIGTERM`, assert `/proc/sys/net/ipv4/conf/<iface>/rp_filter` back to the pre-apply value and `ip rule show` has no priority-100 entries. Add a regression note.
+- **Acceptance:** a SIGTERM with bypass active leaves no `rp_filter`/routing/nft state behind. `make check` clean.
+
+2. ~~**T2 — Fail-closed: don't clobber the stored `rp_filter_original` on re-apply.**~~ ✅ Done (commit `300e4fc`). Guarded the store on `state.rp_filter_original.is_none()` so only the first apply records the original; re-applies see the already-loose "2" but no longer overwrite the true "1". `set_rp_filter_loose`'s existing no-op fast-path keeps re-apply idempotent. User-verified: reconnect → kill helper → `rp_filter` returns to pre-apply value, no priority-100 ip-rules remain. `make check` clean (200 GUI + 60 helper + smoke).
+- **Symptom:** `apply_bypass_routes` (`service.rs:~240-300`) unconditionally stores `state.rp_filter_original = Some((iface, val))` on success, where `val` is whatever `set_rp_filter_loose` returned. On a **second apply** (bypass list change, VPN reconnect, or S30 auto-reconnect — all routine; the GUI calls `ApplyBypassRoutes` on every `on_connected` via `killswitch_glue.rs:78` with no intervening `RemoveBypassRoutes`), `set_rp_filter_loose` reads the iface's current `rp_filter`, which is **already `2`** from the first apply, and returns `"2"`. Line ~292 then overwrites the stored original `("eth0","1")` with `("eth0","2")`, discarding the true pre-apply value. When the user eventually disconnects, `remove_bypass_routes` → `restore_rp_filter` writes `"2"` — a no-op — and `rp_filter` is stuck at loose for the rest of the session (until the process exits and T1's shutdown restore fires, but only if T1 lands). The deeper issue: `set_rp_filter_loose`'s contract ("read current, return original") is only correct on the **first** apply; on re-apply "current" is the value *we* set, not the user's original.
+- **Design:** only record the original on the **first** apply. Gate the store: `if state.rp_filter_original.is_none() { state.rp_filter_original = Some((iface, val)); }`. This preserves the true original across any number of re-applies; `set_rp_filter_loose`'s no-op fast path (it already skips the write when `original == "2"`) keeps re-apply idempotent. Do **not** change `set_rp_filter_loose` itself — its read-current-then-write behaviour is correct for the first-apply case and the idempotency guard already handles re-entry.
+- **State × behaviour matrix:**
+  - First apply (strict→loose): store original `"1"`. Unchanged from today.
+  - Re-apply while already loose: **T2 fix** — store skipped, original `"1"` retained. Eventual teardown restores `"1"`.
+  - Apply fails mid-chain (S32 T1 path): `rp_filter_original` never set (failure happens before the store) + S32 T1's inline restore fires. Unchanged.
+  - Disconnect after first apply: teardown restores `"1"`. Unchanged.
+- **Critical files:** `helper/src/service.rs` (`apply_bypass_routes` success tail ~L290-295), `helper/src/bypass.rs` (`set_rp_filter_loose` — no change; rely on existing idempotent write-skip).
+- **Tests:** add a unit test asserting a second `apply_bypass_routes` does not overwrite a stored `rp_filter_original`. If the apply path isn't unit-testable without heavy mocking, assert the invariant via the state field directly after two simulated applies, or via a manual repro (apply → apply → remove → assert `rp_filter` == original strict value).
+- **Acceptance:** after N re-applies starting from `rp_filter=1`, a `RemoveBypassRoutes` restores `rp_filter` to `1`. `make check` clean.
+
+3. ~~**T3 — GUI correctness: gate `apply_stall_detection` on Connected (close the error-icon masking race).**~~ ✅ Done (commit `d373420`). Guarded the idle-flag assignment on `session.status.is_connected()`; non-Connected → clear both flags + return (counters still update). Added `test_non_connected_session_never_marked_idle`. `make check` clean (201 GUI + 60 helper + smoke).
+- **Symptom:** `gui/src/app/stats_poller.rs::apply_stall_detection` (L97-138) sets `session.idle_since` based purely on zero byte-delta + elapsed ≥ threshold — it never checks `session.status.is_connected()`. The stats poll loop (`stats_poller.rs:39-67`) captures `connected=true`, then `await`s `session.statistics()` (L47), **yielding the main loop**. During that await a `StatusChange` can fire (e.g. tunnel errors) → `status_handler/mod.rs:143-146` clears both `idle_since` and `idle_started_at`. Control returns to the poller, whose `tray.update` now runs `apply_stall_detection` on the now-**Error** session: zero delta + `idle_started_at` re-seeded (`get_or_insert_with`) + elapsed ≥ threshold → `idle_since = Some`. `current_icon` (`tray/indicator.rs:~191-196`) sees `idle_since.is_some()`, sets `has_loading = true` and `continue`s, **skipping the err classification** — the session renders the loading/idle icon instead of the error icon. This is the exact regression S31's status-handler clearing was added to prevent; the clearing is racy because the poller can re-arm the flag after the clear. Narrow window (poll cycle must straddle the transition) but real, and the regression is user-visible (errored session looks "loading").
+- **Design:** guard the idle-flag assignment inside `apply_stall_detection` (or the whole stall block) on `session.status.is_connected()`. When not Connected, clear both `idle_started_at` and `idle_since` and return early (matching the threshold==0 / traffic-resumed reset shape already there). This makes the status-handler clear authoritative for any non-Connected state — the poller can never re-arm a flag on a session it shouldn't be classifying as idle. Keep the byte-counter updates (lines 106-109) unconditional — the counters are state, not classification.
+- **State × behaviour matrix:**
+  - Connected + stalled past threshold: `idle_since` set, W icon, auto-reconnect eligible. Unchanged.
+  - Connected + traffic flowing: both flags cleared. Unchanged.
+  - Connected→Error during a poll's await, then poller resumes: **T3 fix** — `is_connected()` false → flags cleared, no re-arm → `current_icon` classifies Error. Correct icon.
+  - Disconnected/Paused session in the poll map: the `if !connected { continue }` (L40) already skips these at the loop level, but the await-straddle case (captured Connected, resumed Error) is now also covered.
+- **Critical files:** `gui/src/app/stats_poller.rs` (`apply_stall_detection` L97-138), `gui/src/tray/indicator.rs` (`current_icon` — no change, verify the fix resolves its input).
+- **Tests:** add `apply_stall_detection` unit test: session with `status = Error` (or Disconnected) + zero delta + elapsed ≥ threshold → assert `idle_since` stays `None`. The function is already extracted as pure logic (S31) so this is a direct unit test, no mocking.
+- **Acceptance:** an errored session never shows the loading/idle icon via the poller path. `make check` clean (200+ GUI tests).
+
+4. ~~**T4 — Note-only verification (no code): teardown-loop cap proof + `/usr/sbin` distro matrix.**~~ ✅ Done (commit `2507f7a`, doc-only). (a) `teardown_routing` cap invariant documented: `install_rules` emits exactly one rule per CIDR (v4 or v6 via `cidr_is_v6`, never both), so max rules-per-family = `MAX_BYPASS_CIDRS` (128); per-family cap = `MAX_BYPASS_CIDRS*2` (256) is always ≥ the apply ceiling — never truncates, never leaves orphans. (b) `IP_BIN`/`CONNTRACK_BIN` distro matrix recorded inline: `/usr/sbin` resolves on Debian ≥bookworm, Fedora, Arch (all usr-merge, `/sbin`→`/usr/sbin` symlink); bullseye (non-merge, `ip` at `/sbin/ip`) unsupported, EOL June 2026. No `make check` delta.
+- **Symptom (from review, both Low/Note-only):** (a) `teardown_routing`'s loop cap is `MAX_BYPASS_CIDRS * 2` (=256) applied **per family**; `install_rules` creates at most one rule per CIDR per family, so the max rules-per-family (128) is well under the per-family cap (256) — safe, but the bound's correctness isn't asserted anywhere. (b) S32 T4 hardcoded `/usr/sbin/{ip,nft,conntrack}`; on non-usr-merge Debian bullseye (EOL June 2026) `ip` lives at `/sbin/ip`. `nft` was already `/usr/sbin/nft` pre-S32, so the move is consistent — but the distro assumption should be recorded, not just held in a comment.
+- **Design:** read-only. (a) Add a doc comment to `teardown_routing` stating the invariant "cap = 2 × MAX_BYPASS_CIDRS per family ≥ max rules-per-family (MAX_BYPASS_CIDRS)"; optionally a `debug_assert!`-style note. (b) Record in `docs/kill-switch.md` (or the `IP_BIN`/`NFT_BIN` comment) the explicit distro matrix: usr-merge distros (Debian ≥bookworm, Fedora, Arch) symlink `/sbin → /usr/sbin`, so `/usr/sbin/*` resolves everywhere supported; bullseye is EOL and unsupported. No code change.
+- **Acceptance:** decisions recorded in-task. No `make check` delta. If either turns out to need code (cap provably too small, or a supported non-merge distro exists), promote to a real task — otherwise close as documented.
+
+5. **T5 — Sprint-end hygiene + v0.3.10 release.**
+- **Dep audit:** T1–T4 add zero deps (T1–T3 are guards/restructuring; T4 is docs). Re-grep all deps at sprint end.
+- **800-LOC re-check:** confirm no helper or GUI file crossed 800. Empty result expected (largest `bypass.rs` ~458, `service.rs` ~355 post-T1/T2; GUI `routing_tab.rs`/`logs/mod.rs` 565).
+- **README:** no user-visible feature change — skip.
+- **metainfo:** `<release version="0.3.10">` via `scripts/prepend-metainfo-release.sh`. Body: "Kill-switch fail-closed completion: rp_filter now restored on helper shutdown; re-apply no longer loses the original rp_filter value. GUI fix: errored session no longer masked by the stall/idle icon."
+- **Version bump:** `make bump-version V=0.3.10` (patch — correctness sprint). Verify all 6 files (gui/Cargo.toml, helper/Cargo.toml, Cargo.lock, pkg/aur/PKGBUILD, pkg/aur-helper/PKGBUILD, metainfo).
+- **Tag + release verification:** `git tag v0.3.10 && git push origin v0.3.10` after PR merge. Verify GitHub Release lists 4 artifacts (2 deb + 2 rpm) per S26 retro rule.
+
+---
+
+## Backlog (trigger-gated, do NOT auto-promote)
+(Carried from S32 backlog. T1 absorbs the graceful-SIGTERM half of the "ExecStopPost tidy" item; the `kill -9`/kernel-state half remains trigger-gated below.)
+- **nft bypass-set drift detection** — S26/S27 deferred. Trigger = real user report of bypass-set drift.
+- **DNS leak on bypassed-host queries (per-domain split-DNS)** — S27 T4 finding. Trigger = real user report of metadata-exposure concern.
+- **Per-app split-tunneling cgroups v2 variant** — S20 backlog item; **permanently parked** per the standing decision in `docs/split-tunneling.md` (S31). Do not re-litigate.
+- **Helper kernel-state tidy on `kill -9`** — T1 (S33) closes the graceful-SIGTERM `rp_filter` restore; a `systemd ExecStopPost`/tidy unit is still needed for the `kill -9` case where kernel state (nft table, ip-rules, loose rp_filter) survives helper death. Trigger = real user report of lockout/stale-state after a helper crash or package upgrade.
+
+---
+
+# Sprint 32 Tasks
+
+**Theme:** Helper-crate fail-closed correctness + command hygiene. Companion to S31; every task traces to a verified finding from the S30→S31 `helper/` re-assessment. The helper is a root-running D-Bus service whose entire purpose is a kill-switch — so the dominant theme is **fail-closed fidelity**: three findings where the current code leaks state or opens a window, contradicting the kill-switch contract. Runs **after** S31 ships, on its own branch + release.
+
+**Branch:** `sprint-32/all-tasks` (to be created at sprint start per S25 retro rule).
+
+**Pre-sprint check:** `find {gui,helper}/src -name '*.rs' | xargs wc -l | awk '$1>=800'` — confirmed empty (helper files: `bypass.rs` 446, `service.rs` 330, `validation.rs` 308, `nft.rs` 245, `watcher.rs` 68, `main.rs` 48). No watch-list entries. T1 adds ~10 LOC to `service.rs` (error-path restore); T2 adds ~8 LOC (routing teardown in watcher); T3 is a refactor of similar size. No file projected to cross 800.
+
+**Assessment provenance + verification note:** Findings come from a parallel sub-agent read of all 6 helper files + D-Bus policy. The agent's headline "HIGH — no D-Bus policy conf shipped, any local user can call the helper" was **investigated and rejected**: `data/net.openvpn.v3.killswitch.conf` ships a `<policy group="netdev">` + `<policy group="sudo">` allowlist and the Cargo install config deploys it to `/etc/dbus-1/system.d/`. The remaining findings below were each re-verified directly against the source (file:line + surrounding code) before being written in — not taken on the agent's word.
+
+---
+
+1. ~~**T1 — Fail-closed: restore `rp_filter` on mid-chain apply failure.**~~ ✅ Done (commit `4808821`). `populate_table` (sole `?`-step after `set_rp_filter_loose`) now wrapped: on Err, restores `rp_filter` to captured original + runs idempotent `teardown_routing` to clear partial ip-rules before surfacing error. `restore_rp_filter` best-effort (iface may vanish) + logged, matching `remove_bypass_routes`. `make check` clean (200 GUI + 59 helper tests). Manual repro documented below per acceptance.
+
+   - **Original brief:**
+   - **Symptom:** `service.rs` `apply_bypass_routes` is a sequential chain of `?`-propagating calls: `teardown_routing` → `rt_tables register` → `gateway capture` → `set_rp_filter_loose` → `populate_table` → `install_rules`. `set_rp_filter_loose` switches the physical interface's `rp_filter` to `2` (loose) and returns the original value. If a *later* step (`populate_table` / `install_rules`) fails, the `?` returns `Err` immediately — `restore_rp_filter` is never called in that path, and the original value is lost. The interface is left stuck at loose mode, and the captured original is gone (restore depends on `rp_filter_original` being stored, which happens only on full success). On a kill-switch helper this is a fail-open-leaning leak: a failed apply leaves the host in a looser forwarding state than before.
+   - **Design:** make the apply path transactional w.r.t. `rp_filter`. Capture the original returned by `set_rp_filter_loose` into a local; on *any* `Err` after that point, call `restore_rp_filter(iface, &orig)` before returning. Store `rp_filter_original` into state only after the full chain succeeds (current behavior) so the watcher/teardown path still owns the restore in the success case. Use a guard/RAII or an explicit `if let Err` cleanup — match the style already used.
+   - **State × behaviour matrix:**
+     - Full apply succeeds: `rp_filter` loose during session, restored on teardown. Unchanged.
+     - Apply fails before `set_rp_filter_loose`: no state touched. Unchanged.
+     - Apply fails *after* `set_rp_filter_loose` (the bug): **T1 fix** — restore `rp_filter` to original before returning Err, return Err. Interface not left loose.
+   - **Critical files:** `helper/src/service.rs` (`apply_bypass_routes` chain), `helper/src/bypass.rs` (`set_rp_filter_loose` / `restore_rp_filter` — already exist, no change).
+   - **Tests:** unit-test the pure ordering decision if extractable; otherwise an integration-style test mocking the failing step is heavy — cover via a documented manual repro (force `populate_table` failure → assert `/proc/sys/net/ipv4/conf/<iface>/rp_filter` back to original). Add a regression note.
+   - **Acceptance:** a failed `apply_bypass_routes` never leaves `rp_filter` at `2`; original value survives the failure.
+
+2. ~~**T2 — Fail-closed: watcher disappearance must tear down bypass routing, not just nft.**~~ ✅ Done (commit `403a7ac`). Watcher disappearance branch now, after nft removal, restores `rp_filter` + runs `teardown_routing` when `bypass_routes_applied` (both idempotent, mirroring `remove_bypass_routes`); clears flag + `rp_filter_original`. Firewall-down-before-routing-down order; lock not held across `.await`. Stale D4 doc comment on `cleanup_rules` updated. `make check` clean (200 GUI + 59 helper). User-tested: GUI kill leaves no priority-100 ip-rules and `rp_filter` restored.
+   - **Symptom:** `service.rs:121-127` — the watcher task's `wait_for_disappearance` handler runs only `run_nft(nft::remove_rules_script())` when the GUI vanishes. It does **not** call `remove_bypass_routes` / `teardown_routing`. If `bypass_routes_applied == true` at crash time, the bypass routing layer (secondary table 100, the priority-100 ip-rules, and the loose `rp_filter`) all survive the GUI crash and persist until the helper process itself is stopped. This directly contradicts the module doc comment ("rules are auto-removed so the user is never locked out of the network") and the GUI-crash safety property the watcher exists to provide.
+   - **Design:** in the disappearance branch, after the nft removal, check `state.bypass_routes_applied`; if true, call `remove_bypass_routes` (which restores `rp_filter`, flushes table 100, deletes the ip-rules — all idempotent) and clear the flag + `rp_filter_original`. Keep the nft removal first (firewall down before routing down matches the apply order reversed). Guard with the state lock the same way the success path does; do not hold the lock across `.await`.
+   - **State × behaviour matrix:**
+     - GUI vanishes, kill-switch only (no bypass applied): nft removed. Unchanged.
+     - GUI vanishes, bypass applied: **T2 fix** — nft removed AND routing torn down (rp_filter restored, table/rules gone). No leftover state.
+     - Clean GUI disconnect (normal path): existing `remove_rules` + explicit teardown. Unchanged.
+     - Helper killed -9: out of scope (kernel state persists regardless; documented limitation — a systemd `ExecStopPost`/tidy is a separate hardening item, not this task).
+   - **Critical files:** `helper/src/service.rs` (watcher task body ~L118-131), `helper/src/bypass.rs` (`teardown_routing` — exists, reused).
+   - **Tests:** manual repro — apply bypass, kill GUI process, assert `ip rule show` has no priority-100 `openvpn3-bypass` entries and `rp_filter` restored. Add regression note.
+   - **Acceptance:** GUI crash with bypass active leaves no routing-layer state behind.
+
+3. ~~**T3 — Fail-closed: atomic re-apply (eliminate the no-table window).**~~ ✅ Done (commit `420c18a`). Chose option (B): `add_rules_script` now prepends `add table` (ensure-exists) + `delete table` before the rebuild, all in one `nft -f` script applied as a single atomic transaction — no instant where the table is absent. Dropped the separate `remove_rules_script()` call in `service.rs::add_rules`; first-apply teardown is a no-op. Added `add_script_is_self_contained_atomic_replace` (asserts add→delete→rebuild ordering). `docs/kill-switch.md` updated to document the atomic-replace design. `make check` clean (200 GUI + 60 helper). User-tested OK.
+   - **Symptom:** `service.rs:94-98` `add_rules` uses replace semantics: `let _ = run_nft(remove_rules_script()).await;` then `run_nft(&script).await`. Between the remove succeeding and the add succeeding there is a window in which the `openvpn3_killswitch` table does not exist — i.e. **no kill-switch is enforced**. For a firewall whose job is to drop traffic, a transient "everything allowed" window on every re-apply is the wrong failure mode. Triggered on every reconnect/re-apply (S30 auto-reconnect makes this more frequent).
+   - **Design:** eliminate the window. Options, pick one and justify:
+     - (A) **Build-under-temp-then-swap:** create the new rules under a temp table name, then atomically swap via `nft` table rename / `delete` old + `add` new in a single `nft -f` transaction (nft applies a full script in one atomic transaction, so a single script that flushes+rebuilds within the table is already atomic — verify whether the current two-call split is even necessary, or whether a single `add_rules_script` that includes the flush is sufficient and atomic).
+     - (B) **Single-transaction script:** fold the remove+add into one `nft -f` input so nft commits it atomically. Likely the minimal change if nft treats the whole stdin script as one transaction.
+   - Re-verify against `docs/kill-switch.md` (the locked rule-set design doc) that the chosen approach matches the documented design intent; update the doc if the design moves.
+   - **State × behaviour matrix:**
+     - Re-apply during connected session: no window where table is absent. **T3 fix.**
+     - First-ever apply (no prior table): remove is a no-op (ignored), add applies. Unchanged.
+     - `nft add` itself fails: table absent — but this is a genuine apply failure, surfaced as `Err`, not a silent window. Acceptable (caller sees the error).
+   - **Critical files:** `helper/src/service.rs` (`add_rules` ~L94-98), `helper/src/nft.rs` (`add_rules_script` / `remove_rules_script` — may merge), `docs/kill-switch.md` (design doc — verify/update).
+   - **Tests:** unit test that the generated script is self-contained/atomic (no dependency on a prior remove call); assert ordering within the script. Manual: rapid re-apply under load, observe no drop-window via a parallel ping (best-effort).
+   - **Acceptance:** a `tcpdump`/ping during re-apply shows no "all traffic allowed" gap attributable to the remove/add split.
+
+4. ~~**T4 — Command & teardown hygiene bundle.**~~ ✅ Done (commit `a7d9a3a`). (a) `NFT_BIN` now `/usr/sbin/nft`; extended the same PATH-trust hardening to `ip`/`conntrack` in `bypass.rs` (`IP_BIN`/`CONNTRACK_BIN` constants, all 8 call sites swapped). (b) conntrack `-d` with CIDR verified to imply `--mask-dst` on v1.4.8 (all target distros) — documented in `flush_conntrack_scoped` doc comment, no per-host expansion needed. (c) teardown loop cap tied to `validation::MAX_BYPASS_CIDRS` (now `pub`) * 2 instead of hardcoded `256`. (d) debounce skipped (optional per design): GUI gates `add_rules` on `ConnConnected` transition, thrash risk low; noted. `make check` clean (200 GUI + 60 helper).
+   - **Symptom (four small hardening items, bundled because each is <15 LOC):**
+     - (a) `service.rs:24` `const NFT_BIN: &str = "nft"` — resolved via `PATH`. A root system service should not trust ambient `PATH`; hardcode `/usr/sbin/nft` (verify the path across Debian/RPM/AUR targets — fall back to a build-time or documented path if it differs).
+     - (b) `bypass.rs:225-244` conntrack flush uses `conntrack -D -d <cidr>`. The `-d` flag historically takes a destination *address*; behavior on a network/prefix is version-dependent. Verify against the conntrack-tools version in target distros (accept prefix? or must we expand?). If prefix unsupported, flush per-host or document the limitation in the doc comment rather than silently no-op'ing.
+     - (c) `bypass.rs` teardown loop cap is a hardcoded `256` with a comment referencing `MAX_BYPASS_CIDRS*2`, but the constant isn't imported at that site. Import `validation::MAX_BYPASS_CIDRS` (or expose it) so the cap and the cap-comment stay in sync.
+     - (d) `service.rs` `add_rules` has no rate-limit/debounce — a spammy/buggy GUI caller can thrash `nft` (2 spawns per call). Add a minimal guard (e.g. ignore re-applies with identical args within N ms, or a short cooldown). Low severity; only if it composes cleanly.
+   - **Design:** each item is a local, behavior-preserving hardening. (d) is optional — implement only if it doesn't add a state field that complicates the watcher lifecycle; otherwise defer to backlog with a note.
+   - **Critical files:** `helper/src/service.rs` (NFT_BIN, debounce), `helper/src/bypass.rs` (conntrack verify, teardown cap), `helper/src/validation.rs` (expose `MAX_BYPASS_CIDRS` if needed).
+   - **Tests:** (c) covered by existing teardown test once the constant is wired; (a)/(b)/(d) manual + doc.
+   - **Acceptance:** `nft` invoked via absolute path; conntrack behavior documented-or-correct; teardown cap tied to the single source constant; no unbounded re-apply thrash.
+
+5. ~~**T5 — Sprint-end hygiene + v0.3.9 release.**~~ ✅ Done. PR #32 merged to `main` 2026-06-24 10:20 (merge commit `4958631`); tag `v0.3.9` on remote; GitHub Release published 10:31 with **4/4 artifacts** (`openvpn3-gui-rs` deb+rpm, `openvpn3-killswitch-helper` deb+rpm). Pre-release verification recorded below.
+   - **Dep audit:** T1–T4 add zero deps. Re-grep all deps at sprint end.
+   - **800-LOC re-check:** confirm no helper file crossed 800; confirm no `gui/` regression from S31. Empty result expected.
+   - **D-Bus policy re-verification:** confirm `data/net.openvpn.v3.killswitch.conf` is installed to `/etc/dbus-1/system.d/` by the packaging (deb depends / rpm requires / AUR) and that the `<policy>` allowlist is intact. *Explicitly record* that the S30→S31 assessment's "no policy shipped" claim was false, so a future sprint doesn't re-investigate it. (Optional: review whether `netdev` group granularity is appropriate for the target distros — note-only, no change unless a concrete concern surfaces.)
+   - **Verified (pre-release):** dep audit clean (zero new deps). 800-LOC recheck empty — largest helper `bypass.rs` (458), no `gui/` regression (largest `routing_tab.rs`/`logs/mod.rs` 565). D-Bus policy confirmed shipped + installed to `/etc/dbus-1/system.d/` by **all three** packagers: `helper/Cargo.toml` cargo-deb asset (L41) + generate-rpm asset (L60-62) + `pkg/aur-helper/PKGBUILD` (L31-32). Allowlist intact: root owns `net.openvpn.v3.killswitch`; `netdev` + `sudo` `<allow send_destination>`. **S30→S31 "no policy shipped" claim was false** — recorded; do not re-investigate.
+   - **README:** no user-visible feature change — skip.
+   - **metainfo:** `<release version="0.3.9">` via `scripts/prepend-metainfo-release.sh`. Body: "Kill-switch fail-closed fixes: rp_filter restored on apply failure; bypass routing now torn down when the GUI crashes; re-apply no longer opens a no-enforcement window. Helper hardening: absolute nft path, conntrack semantics verified."
+   - **Version bump:** `make bump-version V=0.3.9` (patch — correctness/security sprint). Verify all 6 files.
+   - **Tag + release verification:** `git tag v0.3.9 && git push origin v0.3.9` after PR merge. Verify 4 artifacts (2 deb + 2 rpm) per S26 retro rule.
+
+---
+
+## Backlog (trigger-gated, do NOT auto-promote)
+
+(Carried from S31 backlog. No new helper findings promoted — T1–T5 above address every verified non-Low finding.)
+
+- **nft bypass-set drift detection** — S26/S27 deferred. Trigger = real user report of bypass-set drift.
+- **DNS leak on bypassed-host queries (per-domain split-DNS)** — S27 T4 finding. Trigger = real user report of metadata-exposure concern.
+- **Per-app split-tunneling cgroups v2 variant** — S20 backlog item; **permanently parked** per the standing decision in `docs/split-tunneling.md` (S31). Do not re-litigate.
+- **Helper `systemd ExecStopPost` tidy** — kernel state survives `kill -9` of the helper (out of scope for S32 T2, which only covers graceful watcher-triggered teardown). Trigger = real user report of lockout after a helper crash/upgrade.
+
+---
+
 # Sprint 31 Tasks
 
 **Theme:** GUI correctness & robustness hardening. No new features — every task traces to a finding from the S30→S31 `gui/` code assessment. Two HIGH correctness bugs in the tray-icon priority logic (both rooted in `idle_since` lifecycle), one structural split (two watch-list files in the 600-LOC band), and mutex-poison / dialog-lifecycle / notification-dedup hygiene. First of a two-sprint split: S31 = `gui/`, S32 = `helper/`.
@@ -81,91 +233,6 @@
 - **nft bypass-set drift detection** — S26/S27 deferred. Trigger = real user report of bypass-set drift.
 - **DNS leak on bypassed-host queries (per-domain split-DNS)** — S27 T4 finding. Trigger = real user report of metadata-exposure concern.
 - **Per-app split-tunneling cgroups v2 variant** — S20 backlog item; **permanently parked** per the standing decision appended to `docs/split-tunneling.md` (S31). Do not re-litigate; promotion criteria recorded there.
-
----
-
-# Sprint 32 Tasks
-
-**Theme:** Helper-crate fail-closed correctness + command hygiene. Companion to S31; every task traces to a verified finding from the S30→S31 `helper/` re-assessment. The helper is a root-running D-Bus service whose entire purpose is a kill-switch — so the dominant theme is **fail-closed fidelity**: three findings where the current code leaks state or opens a window, contradicting the kill-switch contract. Runs **after** S31 ships, on its own branch + release.
-
-**Branch:** `sprint-32/all-tasks` (to be created at sprint start per S25 retro rule).
-
-**Pre-sprint check:** `find {gui,helper}/src -name '*.rs' | xargs wc -l | awk '$1>=800'` — confirmed empty (helper files: `bypass.rs` 446, `service.rs` 330, `validation.rs` 308, `nft.rs` 245, `watcher.rs` 68, `main.rs` 48). No watch-list entries. T1 adds ~10 LOC to `service.rs` (error-path restore); T2 adds ~8 LOC (routing teardown in watcher); T3 is a refactor of similar size. No file projected to cross 800.
-
-**Assessment provenance + verification note:** Findings come from a parallel sub-agent read of all 6 helper files + D-Bus policy. The agent's headline "HIGH — no D-Bus policy conf shipped, any local user can call the helper" was **investigated and rejected**: `data/net.openvpn.v3.killswitch.conf` ships a `<policy group="netdev">` + `<policy group="sudo">` allowlist and the Cargo install config deploys it to `/etc/dbus-1/system.d/`. The remaining findings below were each re-verified directly against the source (file:line + surrounding code) before being written in — not taken on the agent's word.
-
----
-
-1. ~~**T1 — Fail-closed: restore `rp_filter` on mid-chain apply failure.**~~ ✅ Done (commit `4808821`). `populate_table` (sole `?`-step after `set_rp_filter_loose`) now wrapped: on Err, restores `rp_filter` to captured original + runs idempotent `teardown_routing` to clear partial ip-rules before surfacing error. `restore_rp_filter` best-effort (iface may vanish) + logged, matching `remove_bypass_routes`. `make check` clean (200 GUI + 59 helper tests). Manual repro documented below per acceptance.
-
-   - **Original brief:**
-   - **Symptom:** `service.rs` `apply_bypass_routes` is a sequential chain of `?`-propagating calls: `teardown_routing` → `rt_tables register` → `gateway capture` → `set_rp_filter_loose` → `populate_table` → `install_rules`. `set_rp_filter_loose` switches the physical interface's `rp_filter` to `2` (loose) and returns the original value. If a *later* step (`populate_table` / `install_rules`) fails, the `?` returns `Err` immediately — `restore_rp_filter` is never called in that path, and the original value is lost. The interface is left stuck at loose mode, and the captured original is gone (restore depends on `rp_filter_original` being stored, which happens only on full success). On a kill-switch helper this is a fail-open-leaning leak: a failed apply leaves the host in a looser forwarding state than before.
-   - **Design:** make the apply path transactional w.r.t. `rp_filter`. Capture the original returned by `set_rp_filter_loose` into a local; on *any* `Err` after that point, call `restore_rp_filter(iface, &orig)` before returning. Store `rp_filter_original` into state only after the full chain succeeds (current behavior) so the watcher/teardown path still owns the restore in the success case. Use a guard/RAII or an explicit `if let Err` cleanup — match the style already used.
-   - **State × behaviour matrix:**
-     - Full apply succeeds: `rp_filter` loose during session, restored on teardown. Unchanged.
-     - Apply fails before `set_rp_filter_loose`: no state touched. Unchanged.
-     - Apply fails *after* `set_rp_filter_loose` (the bug): **T1 fix** — restore `rp_filter` to original before returning Err, return Err. Interface not left loose.
-   - **Critical files:** `helper/src/service.rs` (`apply_bypass_routes` chain), `helper/src/bypass.rs` (`set_rp_filter_loose` / `restore_rp_filter` — already exist, no change).
-   - **Tests:** unit-test the pure ordering decision if extractable; otherwise an integration-style test mocking the failing step is heavy — cover via a documented manual repro (force `populate_table` failure → assert `/proc/sys/net/ipv4/conf/<iface>/rp_filter` back to original). Add a regression note.
-   - **Acceptance:** a failed `apply_bypass_routes` never leaves `rp_filter` at `2`; original value survives the failure.
-
-2. ~~**T2 — Fail-closed: watcher disappearance must tear down bypass routing, not just nft.**~~ ✅ Done (commit `403a7ac`). Watcher disappearance branch now, after nft removal, restores `rp_filter` + runs `teardown_routing` when `bypass_routes_applied` (both idempotent, mirroring `remove_bypass_routes`); clears flag + `rp_filter_original`. Firewall-down-before-routing-down order; lock not held across `.await`. Stale D4 doc comment on `cleanup_rules` updated. `make check` clean (200 GUI + 59 helper). User-tested: GUI kill leaves no priority-100 ip-rules and `rp_filter` restored.
-   - **Symptom:** `service.rs:121-127` — the watcher task's `wait_for_disappearance` handler runs only `run_nft(nft::remove_rules_script())` when the GUI vanishes. It does **not** call `remove_bypass_routes` / `teardown_routing`. If `bypass_routes_applied == true` at crash time, the bypass routing layer (secondary table 100, the priority-100 ip-rules, and the loose `rp_filter`) all survive the GUI crash and persist until the helper process itself is stopped. This directly contradicts the module doc comment ("rules are auto-removed so the user is never locked out of the network") and the GUI-crash safety property the watcher exists to provide.
-   - **Design:** in the disappearance branch, after the nft removal, check `state.bypass_routes_applied`; if true, call `remove_bypass_routes` (which restores `rp_filter`, flushes table 100, deletes the ip-rules — all idempotent) and clear the flag + `rp_filter_original`. Keep the nft removal first (firewall down before routing down matches the apply order reversed). Guard with the state lock the same way the success path does; do not hold the lock across `.await`.
-   - **State × behaviour matrix:**
-     - GUI vanishes, kill-switch only (no bypass applied): nft removed. Unchanged.
-     - GUI vanishes, bypass applied: **T2 fix** — nft removed AND routing torn down (rp_filter restored, table/rules gone). No leftover state.
-     - Clean GUI disconnect (normal path): existing `remove_rules` + explicit teardown. Unchanged.
-     - Helper killed -9: out of scope (kernel state persists regardless; documented limitation — a systemd `ExecStopPost`/tidy is a separate hardening item, not this task).
-   - **Critical files:** `helper/src/service.rs` (watcher task body ~L118-131), `helper/src/bypass.rs` (`teardown_routing` — exists, reused).
-   - **Tests:** manual repro — apply bypass, kill GUI process, assert `ip rule show` has no priority-100 `openvpn3-bypass` entries and `rp_filter` restored. Add regression note.
-   - **Acceptance:** GUI crash with bypass active leaves no routing-layer state behind.
-
-3. ~~**T3 — Fail-closed: atomic re-apply (eliminate the no-table window).**~~ ✅ Done (commit `420c18a`). Chose option (B): `add_rules_script` now prepends `add table` (ensure-exists) + `delete table` before the rebuild, all in one `nft -f` script applied as a single atomic transaction — no instant where the table is absent. Dropped the separate `remove_rules_script()` call in `service.rs::add_rules`; first-apply teardown is a no-op. Added `add_script_is_self_contained_atomic_replace` (asserts add→delete→rebuild ordering). `docs/kill-switch.md` updated to document the atomic-replace design. `make check` clean (200 GUI + 60 helper). User-tested OK.
-   - **Symptom:** `service.rs:94-98` `add_rules` uses replace semantics: `let _ = run_nft(remove_rules_script()).await;` then `run_nft(&script).await`. Between the remove succeeding and the add succeeding there is a window in which the `openvpn3_killswitch` table does not exist — i.e. **no kill-switch is enforced**. For a firewall whose job is to drop traffic, a transient "everything allowed" window on every re-apply is the wrong failure mode. Triggered on every reconnect/re-apply (S30 auto-reconnect makes this more frequent).
-   - **Design:** eliminate the window. Options, pick one and justify:
-     - (A) **Build-under-temp-then-swap:** create the new rules under a temp table name, then atomically swap via `nft` table rename / `delete` old + `add` new in a single `nft -f` transaction (nft applies a full script in one atomic transaction, so a single script that flushes+rebuilds within the table is already atomic — verify whether the current two-call split is even necessary, or whether a single `add_rules_script` that includes the flush is sufficient and atomic).
-     - (B) **Single-transaction script:** fold the remove+add into one `nft -f` input so nft commits it atomically. Likely the minimal change if nft treats the whole stdin script as one transaction.
-   - Re-verify against `docs/kill-switch.md` (the locked rule-set design doc) that the chosen approach matches the documented design intent; update the doc if the design moves.
-   - **State × behaviour matrix:**
-     - Re-apply during connected session: no window where table is absent. **T3 fix.**
-     - First-ever apply (no prior table): remove is a no-op (ignored), add applies. Unchanged.
-     - `nft add` itself fails: table absent — but this is a genuine apply failure, surfaced as `Err`, not a silent window. Acceptable (caller sees the error).
-   - **Critical files:** `helper/src/service.rs` (`add_rules` ~L94-98), `helper/src/nft.rs` (`add_rules_script` / `remove_rules_script` — may merge), `docs/kill-switch.md` (design doc — verify/update).
-   - **Tests:** unit test that the generated script is self-contained/atomic (no dependency on a prior remove call); assert ordering within the script. Manual: rapid re-apply under load, observe no drop-window via a parallel ping (best-effort).
-   - **Acceptance:** a `tcpdump`/ping during re-apply shows no "all traffic allowed" gap attributable to the remove/add split.
-
-4. ~~**T4 — Command & teardown hygiene bundle.**~~ ✅ Done (commit `a7d9a3a`). (a) `NFT_BIN` now `/usr/sbin/nft`; extended the same PATH-trust hardening to `ip`/`conntrack` in `bypass.rs` (`IP_BIN`/`CONNTRACK_BIN` constants, all 8 call sites swapped). (b) conntrack `-d` with CIDR verified to imply `--mask-dst` on v1.4.8 (all target distros) — documented in `flush_conntrack_scoped` doc comment, no per-host expansion needed. (c) teardown loop cap tied to `validation::MAX_BYPASS_CIDRS` (now `pub`) * 2 instead of hardcoded `256`. (d) debounce skipped (optional per design): GUI gates `add_rules` on `ConnConnected` transition, thrash risk low; noted. `make check` clean (200 GUI + 60 helper).
-   - **Symptom (four small hardening items, bundled because each is <15 LOC):**
-     - (a) `service.rs:24` `const NFT_BIN: &str = "nft"` — resolved via `PATH`. A root system service should not trust ambient `PATH`; hardcode `/usr/sbin/nft` (verify the path across Debian/RPM/AUR targets — fall back to a build-time or documented path if it differs).
-     - (b) `bypass.rs:225-244` conntrack flush uses `conntrack -D -d <cidr>`. The `-d` flag historically takes a destination *address*; behavior on a network/prefix is version-dependent. Verify against the conntrack-tools version in target distros (accept prefix? or must we expand?). If prefix unsupported, flush per-host or document the limitation in the doc comment rather than silently no-op'ing.
-     - (c) `bypass.rs` teardown loop cap is a hardcoded `256` with a comment referencing `MAX_BYPASS_CIDRS*2`, but the constant isn't imported at that site. Import `validation::MAX_BYPASS_CIDRS` (or expose it) so the cap and the cap-comment stay in sync.
-     - (d) `service.rs` `add_rules` has no rate-limit/debounce — a spammy/buggy GUI caller can thrash `nft` (2 spawns per call). Add a minimal guard (e.g. ignore re-applies with identical args within N ms, or a short cooldown). Low severity; only if it composes cleanly.
-   - **Design:** each item is a local, behavior-preserving hardening. (d) is optional — implement only if it doesn't add a state field that complicates the watcher lifecycle; otherwise defer to backlog with a note.
-   - **Critical files:** `helper/src/service.rs` (NFT_BIN, debounce), `helper/src/bypass.rs` (conntrack verify, teardown cap), `helper/src/validation.rs` (expose `MAX_BYPASS_CIDRS` if needed).
-   - **Tests:** (c) covered by existing teardown test once the constant is wired; (a)/(b)/(d) manual + doc.
-   - **Acceptance:** `nft` invoked via absolute path; conntrack behavior documented-or-correct; teardown cap tied to the single source constant; no unbounded re-apply thrash.
-
-5. **T5 — Sprint-end hygiene + v0.3.9 release.**
-   - **Dep audit:** T1–T4 add zero deps. Re-grep all deps at sprint end.
-   - **800-LOC re-check:** confirm no helper file crossed 800; confirm no `gui/` regression from S31. Empty result expected.
-   - **D-Bus policy re-verification:** confirm `data/net.openvpn.v3.killswitch.conf` is installed to `/etc/dbus-1/system.d/` by the packaging (deb depends / rpm requires / AUR) and that the `<policy>` allowlist is intact. *Explicitly record* that the S30→S31 assessment's "no policy shipped" claim was false, so a future sprint doesn't re-investigate it. (Optional: review whether `netdev` group granularity is appropriate for the target distros — note-only, no change unless a concrete concern surfaces.)
-   - **Verified (pre-release):** dep audit clean (zero new deps). 800-LOC recheck empty — largest helper `bypass.rs` (458), no `gui/` regression (largest `routing_tab.rs`/`logs/mod.rs` 565). D-Bus policy confirmed shipped + installed to `/etc/dbus-1/system.d/` by **all three** packagers: `helper/Cargo.toml` cargo-deb asset (L41) + generate-rpm asset (L60-62) + `pkg/aur-helper/PKGBUILD` (L31-32). Allowlist intact: root owns `net.openvpn.v3.killswitch`; `netdev` + `sudo` `<allow send_destination>`. **S30→S31 "no policy shipped" claim was false** — recorded; do not re-investigate.
-   - **README:** no user-visible feature change — skip.
-   - **metainfo:** `<release version="0.3.9">` via `scripts/prepend-metainfo-release.sh`. Body: "Kill-switch fail-closed fixes: rp_filter restored on apply failure; bypass routing now torn down when the GUI crashes; re-apply no longer opens a no-enforcement window. Helper hardening: absolute nft path, conntrack semantics verified."
-   - **Version bump:** `make bump-version V=0.3.9` (patch — correctness/security sprint). Verify all 6 files.
-   - **Tag + release verification:** `git tag v0.3.9 && git push origin v0.3.9` after PR merge. Verify 4 artifacts (2 deb + 2 rpm) per S26 retro rule.
-
----
-
-## Backlog (trigger-gated, do NOT auto-promote)
-
-(Carried from S31 backlog. No new helper findings promoted — T1–T5 above address every verified non-Low finding.)
-
-- **nft bypass-set drift detection** — S26/S27 deferred. Trigger = real user report of bypass-set drift.
-- **DNS leak on bypassed-host queries (per-domain split-DNS)** — S27 T4 finding. Trigger = real user report of metadata-exposure concern.
-- **Per-app split-tunneling cgroups v2 variant** — S20 backlog item; **permanently parked** per the standing decision in `docs/split-tunneling.md` (S31). Do not re-litigate.
-- **Helper `systemd ExecStopPost` tidy** — kernel state survives `kill -9` of the helper (out of scope for S32 T2, which only covers graceful watcher-triggered teardown). Trigger = real user report of lockout after a helper crash/upgrade.
 
 ---
 

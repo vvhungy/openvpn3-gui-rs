@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
         .context("connect to system bus")?
         .name(BUS_NAME)
         .context("claim bus name")?
-        .serve_at(OBJECT_PATH, KillSwitch::default())
+        .serve_at(OBJECT_PATH, KillSwitch::new())
         .context("register service")?
         .build()
         .await

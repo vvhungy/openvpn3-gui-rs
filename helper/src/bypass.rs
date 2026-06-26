@@ -25,7 +25,11 @@ pub const RT_TABLES_FILE: &str = "/etc/iproute2/rt_tables.d/openvpn3-bypass.conf
 
 // Absolute tool paths — a root service must not trust ambient `PATH` (matches
 // `NFT_BIN` in service.rs). `/usr/sbin` is the install location on all target
-// distros; `/sbin` is a usr-merge symlink to it.
+// distros (Debian ≥bookworm, Fedora, Arch): under usr-merge `/sbin` is a
+// symlink to `/usr/sbin`, so `/usr/sbin/{ip,conntrack}` resolves everywhere
+// supported. Debian bullseye (non-usr-merge) keeps `ip` at `/sbin/ip` and is
+// unsupported (EOL June 2026). If a future target is non-usr-merge, these
+// constants need a runtime path probe — do not hardcode a second path.
 const IP_BIN: &str = "/usr/sbin/ip";
 const CONNTRACK_BIN: &str = "/usr/sbin/conntrack";
 
@@ -265,6 +269,14 @@ pub async fn teardown_routing() -> Result<()> {
         // Repeated `ip rule del` removes one rule at a time; loop until exit
         // status is non-zero ("No such rule"). Cap at MAX_BYPASS_CIDRS*2 so
         // we don't spin forever if `ip` ever changes its semantics.
+        //
+        // Cap invariant: `install_rules` emits exactly one rule per bypass
+        // CIDR (classified v4 or v6 via `cidr_is_v6`, never both), so the max
+        // rules per family is MAX_BYPASS_CIDRS. The per-family cap here is
+        // MAX_BYPASS_CIDRS*2 (2× headroom) — always ≥ the most rules any apply
+        // could have created, so teardown never truncates and leaves orphans.
+        // If a future change makes one CIDR create >1 rule per family, raise
+        // this cap to match.
         for _ in 0..(MAX_BYPASS_CIDRS * 2) {
             let mut cmd = Command::new(IP_BIN);
             if v6 {

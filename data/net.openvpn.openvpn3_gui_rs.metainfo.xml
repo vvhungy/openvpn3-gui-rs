@@ -57,6 +57,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.10" date="2026-06-26">
+      <description>
+        <p>Sprint 33: kill-switch fail-closed completion and one GUI correctness fix (no new features).</p>
+        <ul>
+          <li>The helper now restores the physical interface's rp_filter to its pre-apply value when it shuts down (SIGTERM/SIGINT). Previously a shutdown with bypass routing active left rp_filter stuck at loose mode until reboot.</li>
+          <li>Re-applying bypass routes (on reconnect or bypass-list change) no longer overwrites the stored original rp_filter value, so the eventual teardown restores the true original instead of a no-op.</li>
+          <li>An errored VPN session is no longer masked by the stall/idle warning icon: stall detection is now gated on the Connected status, closing a race where the stats poller re-armed the idle flag after a status transition had cleared it.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.9" date="2026-06-24">
       <description>
         <p>Kill-switch fail-closed fixes: rp_filter is now restored if bypass-route apply fails mid-chain; bypass routing is torn down when the GUI crashes (not just the firewall); re-applying rules no longer opens a no-enforcement window (the teardown and rebuild run in one atomic nft transaction).</p>

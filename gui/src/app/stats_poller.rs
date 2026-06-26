@@ -121,6 +121,19 @@ pub fn apply_stall_detection(
         return;
     }
 
+    // The idle clock/warning are only meaningful while Connected. The stats
+    // poll loop captures `connected` then `await`s `statistics()`; a
+    // StatusChange (e.g. tunnel errors) can fire during that await, and
+    // `status_handler` clears the flags. Without this gate the poller resumes
+    // and re-arms `idle_since` on the now-Error session, and `current_icon`'s
+    // `idle_since.is_some()` branch masks the error icon with the idle one —
+    // the exact regression the status-handler clearing exists to prevent.
+    if !session.status.is_connected() {
+        session.idle_started_at = None;
+        session.idle_since = None;
+        return;
+    }
+
     // Zero delta: start the idle clock on the first such poll and let it
     // accumulate across subsequent polls (`idle_started_at` persists).
     let started = *session
@@ -259,6 +272,30 @@ mod tests {
         s.idle_since = Some(std::time::Instant::now());
         apply_stall_detection(&mut s, 1000, 500, 0);
         assert!(s.idle_since.is_none());
+    }
+
+    #[test]
+    fn test_non_connected_session_never_marked_idle() {
+        // Regression: the stats poller captures `connected` then awaits
+        // statistics(); a StatusChange to Error during that await clears the
+        // flags via status_handler, but the poller resumes and must NOT
+        // re-arm idle_since on the now-non-Connected session — otherwise
+        // current_icon's idle branch masks the error icon.
+        let mut s = make_connected_session();
+        // Transition to Error (status_handler would have cleared flags; here
+        // we leave a stale idle_started_at to prove the gate clears it too).
+        s.status.minor = StatusMinor::ConnFailed;
+        s.idle_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        apply_stall_detection(&mut s, 1000, 500, 60);
+        assert!(s.idle_since.is_none(), "idle flag cleared on non-Connected");
+        assert!(
+            s.idle_started_at.is_none(),
+            "idle clock cleared on non-Connected"
+        );
+        // Counters still update regardless of status.
+        assert_eq!(s.bytes_in, 1000);
+        assert_eq!(s.bytes_out, 500);
     }
 
     #[test]

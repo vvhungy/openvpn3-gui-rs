@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
@@ -46,6 +46,29 @@ struct State {
 #[derive(Default)]
 pub struct KillSwitch {
     state: Arc<Mutex<State>>,
+}
+
+/// Process-wide handle to the service's state, so the SIGTERM/SIGINT handler
+/// in `main` can reach the bypass-routing state the service recorded. zbus
+/// owns the `KillSwitch` instance after `serve_at`, so `main` has no direct
+/// reference; `SHARED_STATE` hands the shutdown path the same `Arc` the live
+/// service mutates. Set once at startup.
+static SHARED_STATE: OnceLock<Arc<Mutex<State>>> = OnceLock::new();
+
+impl KillSwitch {
+    /// Construct the service and register its state in `SHARED_STATE` so the
+    /// shutdown handler can restore bypass-routing state. `main` must use this
+    /// instead of `KillSwitch::default()` — otherwise `SHARED_STATE` stays empty
+    /// and `cleanup_rules` can't reach the recorded `rp_filter_original`.
+    pub fn new() -> Self {
+        let state = Arc::new(Mutex::new(State::default()));
+        // `new` is called exactly once at startup; a set failure means a
+        // second construction, which is a programming error — surface it.
+        if SHARED_STATE.set(Arc::clone(&state)).is_err() {
+            warn!("SHARED_STATE already set — KillSwitch::new called twice?");
+        }
+        Self { state }
+    }
 }
 
 #[interface(name = "net.openvpn.v3.killswitch")]
@@ -289,7 +312,15 @@ impl KillSwitch {
         {
             let mut state = self.state.lock().expect("state mutex poisoned");
             state.bypass_routes_applied = true;
-            state.rp_filter_original = Some((net.iface.clone(), original_rpf));
+            // Record the pre-apply rp_filter only on the FIRST apply — a
+            // re-apply (bypass list change, VPN reconnect, S30 auto-reconnect)
+            // sees rp_filter already at "2" because *we* set it, so
+            // `original_rpf` would be "2" and the eventual restore would be a
+            // no-op, leaving the iface stuck at loose. Guard on the slot
+            // being empty so the true original survives across N re-applies.
+            if state.rp_filter_original.is_none() {
+                state.rp_filter_original = Some((net.iface.clone(), original_rpf));
+            }
         }
         info!(
             applied = applied.len(),
@@ -325,12 +356,31 @@ impl KillSwitch {
     }
 }
 
-/// Best-effort cleanup of both firewall *and* routing state, called from
-/// the SIGTERM/SIGINT handler in main. The explicit `remove_rules` path
-/// deliberately leaves routing alone (the GUI owns its teardown); the
-/// watcher (GUI-crash path) and this shutdown handler both clear routing
-/// too, since no one else will (the helper is going away / the GUI is gone).
+/// Best-effort cleanup of firewall *and* routing state, called from the
+/// SIGTERM/SIGINT handler in `main`. Mirrors `remove_bypass_routes`: restore
+/// `rp_filter` from the value captured at apply time (best-effort — the iface
+/// may have vanished), then tear down the ip-rules + table 100, then drop the
+/// nft table. zbus owns the live `KillSwitch`, so this reaches the recorded
+/// state via `SHARED_STATE`; if `KillSwitch::new` wasn't used (or no bypass
+/// routing was ever applied) there is nothing to restore and only the nft +
+/// routing teardown runs.
 pub async fn cleanup_rules() {
+    // rp_filter restore must run before routing teardown — `teardown_routing`
+    // only deletes ip-rules and flushes table 100, it never writes rp_filter.
+    // Without this the physical iface stays at loose (2) until reboot.
+    let rpf = match SHARED_STATE.get() {
+        Some(state) => state
+            .lock()
+            .expect("state mutex poisoned")
+            .rp_filter_original
+            .take(),
+        None => None,
+    };
+    if let Some((iface, value)) = rpf
+        && let Err(e) = bypass::restore_rp_filter(&iface, &value).await
+    {
+        warn!(iface = %iface, err = ?e, "shutdown rp_filter restore failed (iface gone?)");
+    }
     if let Err(e) = run_nft(nft::remove_rules_script()).await {
         warn!(err = ?e, "shutdown cleanup nft failed (often expected)");
     }
