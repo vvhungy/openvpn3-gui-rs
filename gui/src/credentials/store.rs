@@ -178,6 +178,14 @@ impl CredentialStore {
 
         let keyring = Keyring::new().await.context("Failed to open keyring")?;
 
+        // Unlock before searching. On a locked DBus collection search_items
+        // returns no/locked items, so without this a remove-time wipe would
+        // silently no-op and the config's credentials would orphan — exactly
+        // the locked-keyring gap the read path already closes. Noop on the
+        // file backend. Mirrors the unlock the read path does in
+        // credential_handler::request_credentials.
+        ensure_unlocked(&keyring).await?;
+
         let attributes = search_attrs_for_config(config_id);
         let items = keyring
             .search_items(&attributes)

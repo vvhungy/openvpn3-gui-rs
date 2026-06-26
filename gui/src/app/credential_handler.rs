@@ -354,6 +354,10 @@ fn show_credentials_with_slots(
                             // cleared by status_handler when is_connected() fires.
                             // Save only storable credentials (username/password, not OTP)
                             let store = crate::credentials::CredentialStore::default();
+                            // Fire the "save failed" notification at most once per submit:
+                            // a locked keyring fails every label, but the user only needs
+                            // one toast for the single root cause.
+                            let mut save_failure_notified = false;
                             for (label, value) in &values {
                                 let mask = slots
                                     .iter()
@@ -367,23 +371,27 @@ fn show_credentials_with_slots(
                                     if let Err(e) = store.set_async(&ck, label, value).await {
                                         // A failed "remember" must not be silent —
                                         // the user believes credentials were saved
-                                        // when they weren't. Surface once per submit;
-                                        // classify so the message distinguishes
-                                        // "locked" from a generic keyring failure.
+                                        // when they weren't. classify so the message
+                                        // distinguishes "locked" from a generic keyring
+                                        // failure.
                                         warn!(
                                             "Failed to save credential '{}' to keyring: {}",
                                             label, e
                                         );
-                                        let hint = if crate::credentials::store::is_locked_error(&e)
-                                        {
-                                            "Keyring is locked — credentials could not be saved."
-                                        } else {
-                                            "Could not save credentials to the keyring."
-                                        };
-                                        crate::dialogs::show_error_notification(
-                                            "Credential Save Failed",
-                                            hint,
-                                        );
+                                        if !save_failure_notified {
+                                            save_failure_notified = true;
+                                            let hint = if crate::credentials::store::is_locked_error(
+                                                &e,
+                                            ) {
+                                                "Keyring is locked — credentials could not be saved."
+                                            } else {
+                                                "Could not save credentials to the keyring."
+                                            };
+                                            crate::dialogs::show_error_notification(
+                                                "Credential Save Failed",
+                                                hint,
+                                            );
+                                        }
                                     }
                                 } else {
                                     if let Err(e) = store.delete_async(&ck, label).await {
