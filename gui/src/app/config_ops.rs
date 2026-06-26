@@ -71,10 +71,17 @@ pub(crate) async fn import_config(
     Ok(())
 }
 
-/// Remove a configuration
+/// Remove a configuration, then best-effort wipe its stored credentials.
+///
+/// `config_name` is the keyring key (the name shown in the confirm dialog) —
+/// passed in rather than re-resolved so the credential cleanup matches the
+/// identity the user confirmed. A keyring failure here must NOT block removal:
+/// the config is already gone from openvpn3, so leftover secrets are at worst
+/// stale, not dangerous. Log + continue.
 pub(crate) async fn remove_config(
     dbus: &zbus::Connection,
     config_path_str: &str,
+    config_name: &str,
 ) -> anyhow::Result<()> {
     let config_path = OwnedObjectPath::try_from(config_path_str)?;
     let config = ConfigurationProxy::builder(dbus)
@@ -83,5 +90,15 @@ pub(crate) async fn remove_config(
         .await?;
     config.Remove().await?;
     info!("Configuration removed: {}", config_path_str);
+
+    // Best-effort credential cleanup — don't let a keyring hiccup fail a
+    // removal that already succeeded on the openvpn3 side.
+    let store = crate::credentials::CredentialStore::default();
+    match store.delete_for_config_async(config_name).await {
+        Ok(n) if n > 0 => info!("Wiped {n} stored credential(s) for '{config_name}'"),
+        Ok(_) => info!("No stored credentials to wipe for '{config_name}'"),
+        Err(e) => warn!("Config '{config_name}' removed, but credential cleanup failed: {e}"),
+    }
+
     Ok(())
 }

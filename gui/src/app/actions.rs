@@ -147,6 +147,9 @@ pub(crate) fn handle_tray_action(
                 .unwrap_or_else(|| "Unknown".to_string());
 
             let parent = parent.clone();
+            // Clone for the closure: the dialog borrows `name` for its label,
+            // and the Fn closure (may fire repeatedly) must own its own copy.
+            let name_for_closure = name.clone();
             crate::dialogs::show_config_remove_dialog(
                 Some(parent.upcast_ref()),
                 &config_path.clone(),
@@ -155,8 +158,9 @@ pub(crate) fn handle_tray_action(
                     let dbus = dbus.clone();
                     let config_path = config_path.clone();
                     let tray = tray.clone();
+                    let name = name_for_closure.clone();
                     glib::spawn_future_local(async move {
-                        match remove_config(&dbus, &config_path).await {
+                        match remove_config(&dbus, &config_path, &name).await {
                             Ok(_) => {
                                 crate::dialogs::show_info_notification(
                                     "Configuration Removed",
