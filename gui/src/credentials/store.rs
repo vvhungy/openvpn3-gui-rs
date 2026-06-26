@@ -7,6 +7,47 @@ use anyhow::{Context, Result};
 /// Application identifier for the secret collection
 const APP_ID: &str = "net.openvpn.openvpn3-gui-rs";
 
+/// Classify whether a credential error is "the collection is locked".
+///
+/// Walks the anyhow error chain (which includes the store methods' own
+/// `.context()` wrappers) looking for the Secret Service locked-collection
+/// signal: `oo7::Error::DBus(oo7::dbus::Error::Service(oo7::dbus::ServiceError::IsLocked(_)))`.
+///
+/// Pure (no I/O) so the chain-walk + variant match is unit-testable without a
+/// keyring — callers use it to pick a user-facing message ("keyring locked")
+/// over a generic one.
+pub(crate) fn is_locked_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause.downcast_ref::<oo7::Error>().is_some_and(|o| {
+            matches!(
+                o,
+                oo7::Error::DBus(oo7::dbus::Error::Service(
+                    oo7::dbus::ServiceError::IsLocked(_)
+                ))
+            )
+        })
+    })
+}
+
+/// Ensure the keyring collection is unlocked before reading or writing.
+///
+/// `Keyring::unlock` is a noop on the file backend, so flatpak/sandboxed runs
+/// are unaffected. On the DBus backend it triggers the Secret Service
+/// `Service.Unlock` call, which surfaces the system prompt (GNOME Keyring
+/// login dialog) and awaits the user; unlocking an already-unlocked collection
+/// is a spec'd noop (no prompt). We call `unlock` unconditionally rather than
+/// gating on a lock check — oo7 0.4.3 exposes no `Keyring::is_locked` (only
+/// `Item::is_locked`), and the round-trip is cheap. Errors (user dismissed
+/// the prompt, no secret service running) propagate to the caller, which must
+/// NOT treat a locked/refused keyring as fatal — pre-fill is a convenience,
+/// not a gate.
+pub(crate) async fn ensure_unlocked(keyring: &oo7::Keyring) -> Result<()> {
+    keyring
+        .unlock()
+        .await
+        .context("Failed to unlock keyring (dismissed or no secret service)")
+}
+
 /// Attribute map for the per-config delete query: `application` + `config-id`,
 /// deliberately **without** the `key` field, so a single config's whole set of
 /// stored labels is matched. This is what makes `delete_for_config_async` the
@@ -46,12 +87,20 @@ impl Default for CredentialStore {
 
 /// Async functions for credential operations
 impl CredentialStore {
-    /// Get a credential asynchronously
-    pub async fn get_async(&self, config_id: &str, key: &str) -> Result<Option<String>> {
-        use oo7::Keyring;
+    /// Get a credential using a **caller-opened** keyring handle.
+    ///
+    /// Lets a caller open one `oo7::Keyring`, unlock it once via
+    /// [`ensure_unlocked`], then loop reads against the same handle — so the
+    /// unlock state is shared and we avoid N separate `Keyring::new()` opens
+    /// for N labels. Errors propagate (callers must NOT conflate error with
+    /// absent — see the read loop in `credential_handler::request_credentials`).
+    pub(crate) async fn get_with_keyring(
+        &self,
+        keyring: &oo7::Keyring,
+        config_id: &str,
+        key: &str,
+    ) -> Result<Option<String>> {
         use std::collections::HashMap;
-
-        let keyring = Keyring::new().await.context("Failed to open keyring")?;
 
         let mut attributes = HashMap::new();
         attributes.insert("application", APP_ID);
@@ -215,5 +264,39 @@ mod tests {
         );
         // Both still share the application scope.
         assert_eq!(a.get("application"), b.get("application"));
+    }
+
+    #[test]
+    fn is_locked_error_detects_islocked_variant() {
+        // The exact shape the Secret Service produces when a collection is locked,
+        // wrapped in anyhow as the store methods return it.
+        let err: anyhow::Error = anyhow::Error::new(oo7::Error::DBus(oo7::dbus::Error::Service(
+            oo7::dbus::ServiceError::IsLocked("/org/freedesktop/secrets/collection/default".into()),
+        )));
+        assert!(is_locked_error(&err));
+    }
+
+    #[test]
+    fn is_locked_error_walks_anyhow_context_chain() {
+        // Store methods add `.context()` on top of the raw oo7 error. The
+        // classifier must find IsLocked through the wrapped chain.
+        let raw = oo7::Error::DBus(oo7::dbus::Error::Service(
+            oo7::dbus::ServiceError::IsLocked("default".into()),
+        ));
+        let wrapped: anyhow::Error = anyhow::Error::new(raw).context("get_with_keyring failed");
+        assert!(
+            is_locked_error(&wrapped),
+            "must detect locked state through an anyhow context chain"
+        );
+    }
+
+    #[test]
+    fn is_locked_error_rejects_non_locked_error() {
+        // A dismissed prompt, a transport error, a missing service — none of these
+        // mean "locked". The classifier must return false so the UI shows a
+        // generic failure message, not the unlock hint.
+        let dismissed: anyhow::Error =
+            anyhow::Error::new(oo7::Error::DBus(oo7::dbus::Error::Dismissed));
+        assert!(!is_locked_error(&dismissed));
     }
 }

@@ -189,14 +189,54 @@ pub(crate) async fn request_credentials(
             labels_to_try.push(variant.to_string());
         }
     }
+
+    // Open ONE keyring handle for the whole resolution and unlock it once.
+    // Previously each get_async opened its own Keyring::new() — N labels meant
+    // N opens, and none shared unlock state, so a locked collection left every
+    // field blank with no signal. Unlock before the loop so the system prompt
+    // fires before our dialog, not under it.
+    let keyring = match oo7::Keyring::new().await {
+        Ok(k) => Some(k),
+        Err(e) => {
+            warn!("Failed to open keyring — saved credentials unavailable: {e}");
+            crate::dialogs::show_error_notification(
+                "Saved Credentials Unavailable",
+                "Could not open the keyring. Enter credentials manually.",
+            );
+            None
+        }
+    };
+    if let Some(k) = &keyring
+        && let Err(e) = crate::credentials::store::ensure_unlocked(k).await
+    {
+        warn!("Failed to unlock keyring — pre-fill disabled: {e}");
+        let hint = if crate::credentials::store::is_locked_error(&e) {
+            "Keyring is locked. Enter credentials manually."
+        } else {
+            "Could not unlock the keyring. Enter credentials manually."
+        };
+        crate::dialogs::show_error_notification("Saved Credentials Unavailable", hint);
+    }
+
     for label in labels_to_try {
         if resolved.contains_key(&label) {
             continue;
         }
-        if is_storable_field(&label, true)
-            && let Some(val) = cred_store.get_async(&cred_key, &label).await.ok().flatten()
-        {
-            resolved.insert(label, val);
+        if !is_storable_field(&label, true) {
+            continue;
+        }
+        // Read against the single unlocked handle. Classify the outcome instead
+        // of the old `.ok().flatten()`, which conflated *locked/error* with
+        // *absent* and silently blanked fields.
+        if let Some(k) = keyring.as_ref() {
+            match cred_store.get_with_keyring(k, &cred_key, &label).await {
+                Ok(Some(val)) => {
+                    resolved.insert(label, val);
+                }
+                Ok(None) => {} // genuinely absent — leave blank
+                Err(e) => warn!("Failed to read saved credential '{label}': {e}"),
+            }
+            // No keyring — already notified above; leave field blank.
         }
     }
 
@@ -325,9 +365,24 @@ fn show_credentials_with_slots(
                                 }
                                 if remember {
                                     if let Err(e) = store.set_async(&ck, label, value).await {
+                                        // A failed "remember" must not be silent —
+                                        // the user believes credentials were saved
+                                        // when they weren't. Surface once per submit;
+                                        // classify so the message distinguishes
+                                        // "locked" from a generic keyring failure.
                                         warn!(
                                             "Failed to save credential '{}' to keyring: {}",
                                             label, e
+                                        );
+                                        let hint = if crate::credentials::store::is_locked_error(&e)
+                                        {
+                                            "Keyring is locked — credentials could not be saved."
+                                        } else {
+                                            "Could not save credentials to the keyring."
+                                        };
+                                        crate::dialogs::show_error_notification(
+                                            "Credential Save Failed",
+                                            hint,
                                         );
                                     }
                                 } else {
@@ -336,6 +391,9 @@ fn show_credentials_with_slots(
                                             "Failed to delete credential '{}' from keyring: {}",
                                             label, e
                                         );
+                                        // Delete failure is lower-stakes than save
+                                        // failure (worst case: a stale entry), so a
+                                        // bare warn suffices — no notification.
                                     }
                                 }
                             }
