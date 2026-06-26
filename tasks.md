@@ -46,13 +46,14 @@
 - **Design:** read-only. (a) Add a doc comment to `teardown_routing` stating the invariant "cap = 2 × MAX_BYPASS_CIDRS per family ≥ max rules-per-family (MAX_BYPASS_CIDRS)"; optionally a `debug_assert!`-style note. (b) Record in `docs/kill-switch.md` (or the `IP_BIN`/`NFT_BIN` comment) the explicit distro matrix: usr-merge distros (Debian ≥bookworm, Fedora, Arch) symlink `/sbin → /usr/sbin`, so `/usr/sbin/*` resolves everywhere supported; bullseye is EOL and unsupported. No code change.
 - **Acceptance:** decisions recorded in-task. No `make check` delta. If either turns out to need code (cap provably too small, or a supported non-merge distro exists), promote to a real task — otherwise close as documented.
 
-5. **T5 — Sprint-end hygiene + v0.3.10 release.**
-- **Dep audit:** T1–T4 add zero deps (T1–T3 are guards/restructuring; T4 is docs). Re-grep all deps at sprint end.
-- **800-LOC re-check:** confirm no helper or GUI file crossed 800. Empty result expected (largest `bypass.rs` ~458, `service.rs` ~355 post-T1/T2; GUI `routing_tab.rs`/`logs/mod.rs` 565).
-- **README:** no user-visible feature change — skip.
-- **metainfo:** `<release version="0.3.10">` via `scripts/prepend-metainfo-release.sh`. Body: "Kill-switch fail-closed completion: rp_filter now restored on helper shutdown; re-apply no longer loses the original rp_filter value. GUI fix: errored session no longer masked by the stall/idle icon."
-- **Version bump:** `make bump-version V=0.3.10` (patch — correctness sprint). Verify all 6 files (gui/Cargo.toml, helper/Cargo.toml, Cargo.lock, pkg/aur/PKGBUILD, pkg/aur-helper/PKGBUILD, metainfo).
-- **Tag + release verification:** `git tag v0.3.10 && git push origin v0.3.10` after PR merge. Verify GitHub Release lists 4 artifacts (2 deb + 2 rpm) per S26 retro rule.
+5. ~~**T5 — Sprint-end hygiene + v0.3.10 release.**~~ ✅ Done (commit `0347a90`).
+   - **Dep audit:** zero Cargo.toml/Cargo.lock dependency deltas since v0.3.9 (T1–T4 are guards/docs — verified via `git diff v0.3.9..HEAD -- Cargo.toml **/Cargo.toml Cargo.lock`).
+   - **800-LOC re-check:** empty. Largest `routing_tab.rs`/`logs/mod.rs` 565; `status_handler/mod.rs` 467; `gsettings.rs` 439; helper `bypass.rs` 470 / `service.rs` 419. No file near 800.
+   - **README:** no user-visible feature change — skipped.
+   - **metainfo:** `<release version="0.3.10" date="2026-06-26">` body filled (3 bullets: shutdown rp_filter restore, re-apply clobber guard, stall-gate error-icon fix).
+   - **Version bump:** `make bump-version V=0.3.10`. All 6 surfaces at 0.3.10 (gui+helper Cargo.toml, Cargo.lock, pkg/aur + pkg/aur-helper PKGBUILD, metainfo). Binary reports 0.3.10.
+   - **`make check` clean:** 201 GUI + 60 helper + smoke.
+   - **Tag + release verification:** PR #33 merged (`962c589`); tag `v0.3.10` → `0347a90` pushed. GitHub Release verified — 4 artifacts present: `openvpn3-gui-rs_0.3.10-1_amd64.deb`, `openvpn3-gui-rs-0.3.10-1.x86_64.rpm`, `openvpn3-killswitch-helper_0.3.10-1_amd64.deb`, `openvpn3-killswitch-helper-0.3.10-1.x86_64.rpm` (2 deb + 2 rpm per S26 retro rule).
 
 ---
 
