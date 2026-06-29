@@ -1,8 +1,9 @@
 //! Username / password credential request flow
 //!
-//! No testable pure surface here — pure logic (label mapping, storability)
-//! lives in `crate::credentials::policy` with its own unit tests. This file
-//! is async D-Bus dispatch + retry orchestration.
+//! The one pure surface is [`next_attempt`] (auth-failure counter + window
+//! reset), unit-tested below; everything else is async D-Bus dispatch + retry
+//! orchestration. Label-mapping / storability helpers live in
+//! `crate::credentials::policy` with their own unit tests.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -105,11 +106,13 @@ fn label_matches_category(label: &str, standard_label: &str) -> bool {
 pub(crate) async fn request_credentials(
     dbus: &zbus::Connection,
     session_path: &str,
+    config_path: &str,
     config_name: &str,
     prefilled: HashMap<String, String>,
 ) {
     let dbus = dbus.clone();
     let session_path = session_path.to_string();
+    let config_path = config_path.to_string();
     let config_name = config_name.to_string();
 
     let session_path_obj = match OwnedObjectPath::try_from(session_path.as_str()) {
@@ -178,7 +181,11 @@ pub(crate) async fn request_credentials(
     // Resolve for actual queue slots, standard field labels, AND common label
     // variants (OpenVPN3 servers use varying labels like "Username" vs
     // "Enter username" — all map to the same keyring attribute).
-    let cred_key = config_name.clone();
+    //
+    // Key the store on the unique config PATH (#2 fix) — not the display name,
+    // which two configs may share. config_name is passed to get_with_keyring
+    // solely as the legacy key for the read-on-miss migration.
+    let cred_key = config_path.clone();
     let cred_store = crate::credentials::CredentialStore::default();
     let mut resolved = prefilled;
     let mut labels_to_try: Vec<String> = slots.iter().map(|(_, _, _, l, _)| l.clone()).collect();
@@ -195,7 +202,7 @@ pub(crate) async fn request_credentials(
     // N opens, and none shared unlock state, so a locked collection left every
     // field blank with no signal. Unlock before the loop so the system prompt
     // fires before our dialog, not under it.
-    let keyring = match oo7::Keyring::new().await {
+    let mut keyring = match oo7::Keyring::new().await {
         Ok(k) => Some(k),
         Err(e) => {
             warn!("Failed to open keyring — saved credentials unavailable: {e}");
@@ -216,6 +223,11 @@ pub(crate) async fn request_credentials(
             "Could not unlock the keyring. Enter credentials manually."
         };
         crate::dialogs::show_error_notification("Saved Credentials Unavailable", hint);
+        // Drop the handle so the read loop below short-circuits. Otherwise it
+        // stays `Some` and every label logs its own read-failure `warn!` (N
+        // near-identical lines for one root cause). One notification + one log
+        // line above is enough; pre-fill is simply blank.
+        keyring = None;
     }
 
     for label in labels_to_try {
@@ -229,7 +241,10 @@ pub(crate) async fn request_credentials(
         // of the old `.ok().flatten()`, which conflated *locked/error* with
         // *absent* and silently blanked fields.
         if let Some(k) = keyring.as_ref() {
-            match cred_store.get_with_keyring(k, &cred_key, &label).await {
+            match cred_store
+                .get_with_keyring(k, &cred_key, &config_name, &label)
+                .await
+            {
                 Ok(Some(val)) => {
                     resolved.insert(label, val);
                 }
@@ -241,7 +256,14 @@ pub(crate) async fn request_credentials(
     }
 
     // Delegate to the dialog loop — never re-queries D-Bus or keyring
-    show_credentials_with_slots(dbus, session_path, config_name, &slots, &resolved);
+    show_credentials_with_slots(
+        dbus,
+        session_path,
+        config_path,
+        config_name,
+        &slots,
+        &resolved,
+    );
 }
 
 /// Show the credentials dialog with a **pre-built** slot list.
@@ -252,12 +274,16 @@ pub(crate) async fn request_credentials(
 fn show_credentials_with_slots(
     dbus: zbus::Connection,
     session_path: String,
+    config_path: String,
     config_name: String,
     slots: &[(u32, u32, u32, String, bool)],
     prefilled: &HashMap<String, String>,
 ) {
-    // Use config_name as credential store key (stable across sessions)
-    let cred_key = config_name.clone();
+    // Key the credential store on the config's unique D-Bus PATH, not its
+    // display name: two configs may share a name (verified real-device, S35
+    // T1), and keying by name would cross-wipe. `config_name` is kept as the
+    // legacy key for the read-on-miss migration from pre-0.3.11 stores.
+    let cred_key = config_path.clone();
 
     // Build dialog fields: always show all 3 standard fields so the user
     // sees a consistent UI regardless of which slots are currently in the
@@ -334,6 +360,7 @@ fn show_credentials_with_slots(
         {
             let dbus = dbus.clone();
             let sp = session_path.clone();
+            let cp = config_path.clone();
             let cn = config_name.clone();
             let slots = slots.to_vec();
             let ck = cred_key.clone();
@@ -342,6 +369,7 @@ fn show_credentials_with_slots(
             move |values, remember| {
                 let dbus = dbus.clone();
                 let sp = sp.clone();
+                let cp = cp.clone();
                 let cn = cn.clone();
                 let slots = slots.clone();
                 let ck = ck.clone();
@@ -415,7 +443,7 @@ fn show_credentials_with_slots(
                                 .chain(values.into_iter().filter(|(_, v)| !v.is_empty()))
                                 .collect();
 
-                            show_credentials_with_slots(dbus, sp, cn, &slots, &merged);
+                            show_credentials_with_slots(dbus, sp, cp, cn, &slots, &merged);
                         }
                         Err(e) => {
                             let err_str = format!("{}", e);
@@ -424,6 +452,7 @@ fn show_credentials_with_slots(
                                 super::credential_handler::request_credentials(
                                     &dbus,
                                     &sp,
+                                    &cp,
                                     &cn,
                                     Default::default(),
                                 )

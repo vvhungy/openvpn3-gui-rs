@@ -8,7 +8,7 @@ use gtk4::{Box as GtkBox, Orientation, Separator};
 use gtk4::{Entry, FileChooserAction, FileChooserDialog, Grid, Label, ResponseType};
 use tracing::info;
 
-use super::layout::{CONTENT_MARGIN, GRID_SPACING, make_button_row};
+use super::layout::{BTN_MIN_WIDTH, CONTENT_MARGIN, GRID_SPACING, make_button_row};
 
 /// Show file chooser dialog for selecting an OpenVPN configuration file
 pub fn show_config_select_dialog<F>(parent: Option<&gtk4::Window>, on_select: F)
@@ -73,7 +73,11 @@ pub fn show_config_import_dialog<F>(
 {
     let parent = parent.cloned();
     let key = format!("config_import:{}", path.display());
-    super::singleton::present_keyed(&key, move || {
+    // Bypass the modal-funnel: this fires from the FileChooser response
+    // callback, where the chooser is still mapped (its close is deferred).
+    // `present_keyed` would route to that chooser and never build the
+    // name-entry window — wizard step 2 must always surface.
+    super::singleton::present_keyed_system(&key, move || {
         build_config_import_window(parent.as_ref(), path, on_import)
     });
 }
@@ -226,6 +230,97 @@ where
             }
         },
     ));
+
+    window.set_child(Some(&vbox));
+    window
+}
+
+/// Show the import result modal — always-shown confirmation of an import's
+/// outcome, independent of the desktop-notification setting (which gates only
+/// the success toast). `success` picks the title/body; `detail` carries the
+/// daemon error on failure. Single OK dismisses.
+///
+/// Keyed on a fixed global key so a rapid second import reuses/raises the one
+/// window instead of stacking — matching how the success/failure desktop
+/// notifications coalesce via `NOTIFICATION_IDS`.
+pub fn show_import_result_dialog(
+    parent: Option<&gtk4::Window>,
+    success: bool,
+    name: &str,
+    detail: Option<&str>,
+) {
+    let parent = parent.cloned();
+    let (title, body) = if success {
+        (
+            "Import Successful",
+            format!("Configuration '{}' has been imported.", name),
+        )
+    } else {
+        (
+            "Import Failed",
+            match detail {
+                Some(d) => format!("Could not import configuration '{}':\n{}", name, d),
+                None => format!("Could not import configuration '{}'.", name),
+            },
+        )
+    };
+    // Bypass the modal-funnel: the result dialog must always surface even
+    // if the (closing) import window or another modal is still mapped when
+    // this fires. `present_global` would route to that modal and never build.
+    super::singleton::present_keyed_system("import_result", move || {
+        build_import_result_window(parent.as_ref(), title, &body)
+    });
+}
+
+fn build_import_result_window(
+    parent: Option<&gtk4::Window>,
+    title: &str,
+    body: &str,
+) -> gtk4::Window {
+    let window = gtk4::Window::builder()
+        .title(title)
+        .modal(true)
+        .default_width(360)
+        .resizable(false)
+        .build();
+
+    if let Some(p) = parent {
+        window.set_transient_for(Some(p));
+    }
+
+    let vbox = GtkBox::new(Orientation::Vertical, 0);
+
+    let label = Label::builder()
+        .label(body)
+        .margin_top(CONTENT_MARGIN)
+        .margin_bottom(CONTENT_MARGIN)
+        .margin_start(CONTENT_MARGIN)
+        .margin_end(CONTENT_MARGIN)
+        .wrap(true)
+        .build();
+    vbox.append(&label);
+
+    // Single OK button (no cancel). Match make_button_row's right-aligned,
+    // margin-padded row so the result dialog is visually consistent with the
+    // other config dialogs.
+    let btn_box = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk4::Align::End)
+        .margin_top(8)
+        .margin_bottom(12)
+        .margin_start(CONTENT_MARGIN)
+        .margin_end(CONTENT_MARGIN)
+        .build();
+    let ok_btn = gtk4::Button::with_label("OK");
+    ok_btn.set_width_request(BTN_MIN_WIDTH);
+    ok_btn.add_css_class("suggested-action");
+    {
+        let window = window.clone();
+        ok_btn.connect_clicked(move |_| window.close());
+    }
+    btn_box.append(&ok_btn);
+    vbox.append(&btn_box);
 
     window.set_child(Some(&vbox));
     window

@@ -190,22 +190,38 @@ pub(crate) fn handle_tray_action(
                 let dbus = dbus.clone();
                 let tray = tray.clone();
                 let p = p_import.clone();
+                let p_dialog = p.clone();
                 crate::dialogs::show_config_import_dialog(
-                    Some(p.upcast_ref()),
+                    Some(p_dialog.upcast_ref()),
                     path,
                     move |name, path| {
                         let dbus = dbus.clone();
                         let tray = tray.clone();
+                        // Clone per closure invocation: the outer closure is Fn
+                        // (may fire several times), but the async block consumes
+                        // its captures once.
+                        let p_result = p.clone();
                         glib::spawn_future_local(async move {
+                            let parent: Option<&gtk4::Window> = Some(p_result.upcast_ref());
                             match import_config(&dbus, &name, &path).await {
                                 Ok(_) => {
                                     refresh_configs(&dbus, &tray).await;
+                                    crate::dialogs::show_import_result_dialog(
+                                        parent, true, &name, None,
+                                    );
                                 }
                                 Err(e) => {
                                     error!("Failed to import config: {}", e);
+                                    let detail = format!("{e}");
                                     crate::dialogs::show_error_notification(
                                         "Import Failed",
-                                        &format!("Could not import configuration: {}", e),
+                                        &format!("Could not import configuration: {}", detail),
+                                    );
+                                    crate::dialogs::show_import_result_dialog(
+                                        parent,
+                                        false,
+                                        &name,
+                                        Some(&detail),
                                     );
                                 }
                             }

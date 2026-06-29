@@ -3,6 +3,7 @@
 //! Provides secure storage for VPN credentials using the freedesktop Secret Service API.
 
 use anyhow::{Context, Result};
+use tracing::{info, warn};
 
 /// Application identifier for the secret collection
 const APP_ID: &str = "net.openvpn.openvpn3-gui-rs";
@@ -62,6 +63,106 @@ fn search_attrs_for_config(config_id: &str) -> std::collections::HashMap<&str, S
     attributes
 }
 
+/// Attribute map for a single legacy (pre-0.3.11) secret, keyed by the config
+/// **display name** — the scheme the #2 fix migrates away from, because two
+/// configs can share a name and collide. Used only by [`migrate_legacy_secret`]
+/// for the one-time read-on-miss upgrade path; new writes never use it.
+///
+/// Pure (no keyring I/O) so the legacy attribute contract is unit-testable.
+fn legacy_search_attrs(
+    config_name: &str,
+    key: &str,
+) -> std::collections::HashMap<&'static str, String> {
+    let mut attributes = std::collections::HashMap::new();
+    attributes.insert("application", APP_ID.to_string());
+    attributes.insert("config-id", config_name.to_string());
+    attributes.insert("key", key.to_string());
+    attributes
+}
+
+/// One-time migration of a single secret from the legacy name-keyed scheme to
+/// the path-keyed scheme, run on a read-miss under the new key.
+///
+/// Pre-0.3.11 the keyring `config-id` was the config display name; #2 (S34
+/// review) showed two configs may share a name and cross-wipe, so the key is
+/// now the unique D-Bus path. This bridges existing users: if a secret is
+/// found under the old name key, re-store it under the path key and delete the
+/// legacy item.
+///
+/// Best-effort and **never lossy**: any error (legacy item missing, keyring
+/// write/delete failure) returns `Ok(None)` and leaves the legacy item intact,
+/// so a subsequent read can retry and the secret is never destroyed. Only a
+/// confirmed successful re-store + legacy delete returns the migrated value.
+async fn migrate_legacy_secret(
+    keyring: &oo7::Keyring,
+    config_id: &str,
+    legacy_config_name: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    // Don't migrate from a sentinel name — the old scheme let the "Unknown"
+    // fallback (#6) flow in as a real query, so the legacy item set is
+    // unreliable for those. Treat as absent.
+    if legacy_config_name == "Unknown" || legacy_config_name.is_empty() {
+        return Ok(None);
+    }
+
+    let legacy_attrs = legacy_search_attrs(legacy_config_name, key);
+    let legacy_items = match keyring.search_items(&legacy_attrs).await {
+        Ok(items) => items,
+        Err(e) => {
+            // Unreliable search — don't claim absence; just skip migration.
+            warn!(
+                "Legacy credential migration: search failed for '{legacy_config_name}/{key}': {e}"
+            );
+            return Ok(None);
+        }
+    };
+    let Some(legacy_item) = legacy_items.first() else {
+        return Ok(None); // nothing to migrate
+    };
+
+    let secret = match legacy_item.secret().await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!("Legacy credential migration: read failed for '{legacy_config_name}/{key}': {e}");
+            return Ok(None);
+        }
+    };
+    let password = match String::from_utf8(secret.to_vec()) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                "Legacy credential migration: invalid UTF-8 for '{legacy_config_name}/{key}': {e}"
+            );
+            return Ok(None);
+        }
+    };
+
+    // Re-store under the new path key before deleting the legacy item — if the
+    // create fails, the old secret survives.
+    let mut new_attrs = search_attrs_for_config(config_id);
+    new_attrs.insert("key", key.to_string());
+    let label = format!("OpenVPN3 GUI: {} - {}", config_id, key);
+    if let Err(e) = keyring
+        .create_item(&label, &new_attrs, password.as_bytes(), true)
+        .await
+    {
+        warn!("Legacy credential migration: re-store failed for '{config_id}/{key}': {e}");
+        return Ok(None);
+    }
+
+    // Legacy delete is last — best-effort; a leftover stale item is harmless
+    // (never read again once the path key is populated) and must not undo a
+    // successful migration.
+    if let Err(e) = legacy_item.delete().await {
+        warn!(
+            "Legacy credential migration: legacy delete failed for '{legacy_config_name}/{key}': {e}"
+        );
+    }
+    info!("Migrated legacy credential '{legacy_config_name}/{key}' -> path key '{config_id}'");
+    Ok(Some(password))
+}
+
 /// Credential storage using Secret Service
 pub struct CredentialStore {
     // Keyring is created lazily when needed
@@ -89,6 +190,18 @@ impl Default for CredentialStore {
 impl CredentialStore {
     /// Get a credential using a **caller-opened** keyring handle.
     ///
+    /// `config_id` is the config's **unique D-Bus object path** (not the
+    /// display name) — see the #2 fix: two configs may share a name, so the
+    /// keyring namespace is keyed by the path to keep their secrets isolated.
+    ///
+    /// On a miss under the path key, attempts a **one-time migration** from
+    /// the pre-0.3.11 name-keyed scheme via [`migrate_legacy_secret`]:
+    /// `legacy_config_name` is the old display-name key. If a secret is found
+    /// there it is re-stored under the path key and the legacy item deleted,
+    /// so existing users don't lose saved credentials on upgrade. Migration is
+    /// best-effort — on any error the legacy item is left intact (returning
+    /// `None`) so a later read can retry and the secret is never lost.
+    ///
     /// Lets a caller open one `oo7::Keyring`, unlock it once via
     /// [`ensure_unlocked`], then loop reads against the same handle — so the
     /// unlock state is shared and we avoid N separate `Keyring::new()` opens
@@ -98,6 +211,7 @@ impl CredentialStore {
         &self,
         keyring: &oo7::Keyring,
         config_id: &str,
+        legacy_config_name: &str,
         key: &str,
     ) -> Result<Option<String>> {
         use std::collections::HashMap;
@@ -115,13 +229,16 @@ impl CredentialStore {
         if let Some(item) = items.first() {
             let secret = item.secret().await.context("Failed to retrieve secret")?;
             let password = String::from_utf8(secret.to_vec()).context("Invalid UTF-8 in secret")?;
-            Ok(Some(password))
-        } else {
-            Ok(None)
+            return Ok(Some(password));
         }
+
+        // Miss under the path key — try migrating from the legacy name-keyed
+        // scheme before reporting absence.
+        migrate_legacy_secret(keyring, config_id, legacy_config_name, key).await
     }
 
-    /// Store a credential asynchronously
+    /// Store a credential asynchronously. `config_id` is the config's unique
+    /// D-Bus object path (post-#2 keying; the display name is legacy-only).
     pub async fn set_async(&self, config_id: &str, key: &str, value: &str) -> Result<()> {
         use oo7::Keyring;
         use std::collections::HashMap;
@@ -166,8 +283,17 @@ impl CredentialStore {
         Ok(count)
     }
 
-    /// Delete every credential stored for one config (by `config-id`),
-    /// leaving other configs' credentials intact.
+    /// Delete every credential stored for one config (by `config-id`), leaving
+    /// other configs' credentials intact.
+    ///
+    /// `config_id` is the config's unique D-Bus object path — so a removal
+    /// wipes only that config's path-keyed secrets, even if another config
+    /// shares its display name (the #2 fix: previously keyed by name, a
+    /// same-named sibling would cross-wipe). Legacy pre-0.3.11 name-keyed
+    /// items are deliberately NOT matched here: a name is not unique, so
+    /// deleting by name reintroduces the cross-wipe. Such orphans are
+    /// harmless (never read again once the path key is populated; migrated on
+    /// read otherwise) and age out with [`clear_all_async`].
     ///
     /// The middle ground between [`delete_async`] (one label, full triple) and
     /// [`clear_all_async`] (every config, by `application` only). Used when a
@@ -272,6 +398,37 @@ mod tests {
         );
         // Both still share the application scope.
         assert_eq!(a.get("application"), b.get("application"));
+    }
+
+    #[test]
+    fn search_attrs_for_config_isolates_same_named_configs() {
+        // The #2 fix core: two configs that SHARE a display name must still
+        // get distinct keyring namespaces, because the key is now the unique
+        // D-Bus path, not the name. A remove-time wipe of one must not match
+        // the other's stored secrets (the cross-wipe the finding predicted).
+        // Daemon permits duplicate names — verified real-device in S35 T1.
+        let path_a = "/net/openvpn/v3/configuration/cfg/1";
+        let path_b = "/net/openvpn/v3/configuration/cfg/2";
+        let a = search_attrs_for_config(path_a);
+        let b = search_attrs_for_config(path_b);
+        assert_ne!(
+            a.get("config-id"),
+            b.get("config-id"),
+            "same-named configs MUST have distinct path-keyed queries, or removing one wipes both"
+        );
+    }
+
+    #[test]
+    fn legacy_search_attrs_pins_pre_migration_scheme() {
+        // The legacy (pre-0.3.11) scheme keyed by display NAME + key, used
+        // only for the one-time read-on-miss migration. Pin its shape so a
+        // future refactor can't silently break the upgrade path for existing
+        // users: application + config-id(name) + key.
+        let attrs = legacy_search_attrs("work-vpn", "Username");
+        assert_eq!(attrs.get("application").map(|s| s.as_str()), Some(APP_ID));
+        assert_eq!(attrs.get("config-id").map(|s| s.as_str()), Some("work-vpn"));
+        assert_eq!(attrs.get("key").map(|s| s.as_str()), Some("Username"));
+        assert_eq!(attrs.len(), 3, "legacy query is the full triple");
     }
 
     #[test]
