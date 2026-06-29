@@ -240,9 +240,11 @@ where
 /// the success toast). `success` picks the title/body; `detail` carries the
 /// daemon error on failure. Single OK dismisses.
 ///
-/// Keyed on a fixed global key so a rapid second import reuses/raises the one
-/// window instead of stacking — matching how the success/failure desktop
-/// notifications coalesce via `NOTIFICATION_IDS`.
+/// Keyed on a fixed key so a second import before the first window is
+/// dismissed reuses/raises the existing window rather than stacking. Note
+/// this does NOT refresh the body (unlike the desktop notification, which
+/// replaces its text) — the first window's result stays visible. A second
+/// import's outcome is still conveyed by its toast + the log line.
 pub fn show_import_result_dialog(
     parent: Option<&gtk4::Window>,
     success: bool,
