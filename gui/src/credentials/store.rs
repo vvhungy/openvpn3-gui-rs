@@ -99,10 +99,15 @@ async fn migrate_legacy_secret(
     legacy_config_name: &str,
     key: &str,
 ) -> Result<Option<String>> {
-    // Don't migrate from a sentinel name — the old scheme let the "Unknown"
-    // fallback (#6) flow in as a real query, so the legacy item set is
-    // unreliable for those. Treat as absent.
-    if legacy_config_name == "Unknown" || legacy_config_name.is_empty() {
+    // Guard against sentinel identities: when the caller couldn't resolve a
+    // real config (tray miss → fallback name, empty path), the config_id we'd
+    // migrate *to* is empty and the legacy name is a fallback string
+    // ("VPN Connection"/"VPN"). Migrating under an empty path key would
+    // re-key a legit legacy entry to a bogus target, and on a later real
+    // import the bogus one could shadow the real secret. Treat as absent.
+    // Guard on the PATH (the migration target), not the display name — the
+    // path is the unique key and is empty precisely when identity is unknown.
+    if config_id.is_empty() {
         return Ok(None);
     }
 

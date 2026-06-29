@@ -1,6 +1,6 @@
 //! Configuration D-Bus operations
 //!
-//! No testable pure surface — async D-Bus wrappers only.
+//! Testable pure surface: `validate_method_missing` (+ its test).
 
 use tracing::{error, info, warn};
 use zbus::proxy::CacheProperties;
@@ -8,6 +8,36 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::dbus::configuration::{ConfigurationManagerProxy, ConfigurationProxy};
 use crate::tray::{ConfigInfo, VpnTray};
+
+/// The D-Bus error names that mean "the method does not exist on this
+/// interface" — i.e. the daemon predates v22 and has no `Validate()`.
+const MISSING_METHOD_ERROR_NAMES: &[&str] = &[
+    "org.freedesktop.DBus.Error.UnknownMethod",
+    "org.freedesktop.DBus.Error.NoReply",
+];
+
+/// True when `name` is one of the D-Bus error names signalling a missing
+/// method (a pre-v22 daemon with no `Validate()`).
+///
+/// Pure (testable) half of [`validate_method_missing`].
+fn is_missing_method_error_name(name: &str) -> bool {
+    MISSING_METHOD_ERROR_NAMES.contains(&name)
+}
+
+/// True when a `Validate()` error means the daemon is too old to expose the
+/// method (pre-v22), so import should skip validation rather than reject.
+///
+/// Match the D-Bus error *name*, never the human message: a real parse
+/// failure ("file does not exist", "No such interface option") can carry the
+/// same substrings and must not be mis-classified as a missing method.
+fn validate_method_missing(err: &zbus::Error) -> bool {
+    match err {
+        zbus::Error::MethodError(name, _, _) => is_missing_method_error_name(name.as_str()),
+        // Other variants (Timeout, UnknownInterface on the proxy path, etc.)
+        // are never a "missing method" — treat as a real failure.
+        _ => false,
+    }
+}
 
 /// Refresh the config list in the tray
 pub(crate) async fn refresh_configs(
@@ -80,24 +110,31 @@ pub(crate) async fn import_config(
     match config.Validate().await {
         Ok(()) => info!("Configuration validated: {}", config_path),
         Err(e) => {
-            let err_str = e.to_string();
-            // Pre-v22 daemons lack Validate() — don't reject on legacy installs.
-            if err_str.contains("UnknownMethod")
-                || err_str.contains("NoSuchMethod")
-                || err_str.contains("not exist")
-                || err_str.contains("No such interface")
-            {
+            // Pre-v22 daemons lack the Validate() method — skip rather than
+            // reject on legacy installs. Match the D-Bus error *name*, not a
+            // substring of the message: a genuine parse failure's human text
+            // (e.g. "referenced file does not exist") can contain "not exist"
+            // / "No such interface" and would otherwise be mis-classified as
+            // "legacy daemon", leaving the malformed config stored as success.
+            if validate_method_missing(&e) {
                 warn!("Validate() unsupported by daemon, skipping: {}", e);
             } else {
                 warn!("Config '{}' failed validation: {}", config_path, e);
                 // Remove the junk config we just added so it doesn't linger.
+                // Surface a Remove() failure in the bail message too, so a
+                // lingering junk config isn't hidden behind a clean error.
                 if let Err(rm_err) = config.Remove().await {
                     warn!(
                         "Failed to remove invalid config {}: {}",
                         config_path, rm_err
                     );
+                    anyhow::bail!(
+                        "configuration failed validation: {e} \
+                         (and removing the rejected config failed: {rm_err})"
+                    );
+                } else {
+                    anyhow::bail!("configuration failed validation: {}", e);
                 }
-                anyhow::bail!("configuration failed validation: {}", e);
             }
         }
     }
@@ -148,4 +185,32 @@ pub(crate) async fn remove_config(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_method_name_matches_unknown_method_only() {
+        // Missing method on a pre-v22 daemon → skip validation.
+        assert!(is_missing_method_error_name(
+            "org.freedesktop.DBus.Error.UnknownMethod"
+        ));
+        assert!(is_missing_method_error_name(
+            "org.freedesktop.DBus.Error.NoReply"
+        ));
+
+        // A genuine openvpn3 parse/validation failure carries a domain error
+        // name — even though its human text says "does not exist", the NAME
+        // is what matters and must NOT be treated as a missing method.
+        assert!(!is_missing_method_error_name(
+            "net.openvpn.v3.error.ConfigError"
+        ));
+        assert!(!is_missing_method_error_name(
+            "net.openvpn.v3.configuration.Error"
+        ));
+        // No name at all → never a missing method.
+        assert!(!is_missing_method_error_name(""));
+    }
 }
