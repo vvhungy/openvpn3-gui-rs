@@ -1,8 +1,9 @@
 //! Username / password credential request flow
 //!
-//! No testable pure surface here — pure logic (label mapping, storability)
-//! lives in `crate::credentials::policy` with its own unit tests. This file
-//! is async D-Bus dispatch + retry orchestration.
+//! The one pure surface is [`next_attempt`] (auth-failure counter + window
+//! reset), unit-tested below; everything else is async D-Bus dispatch + retry
+//! orchestration. Label-mapping / storability helpers live in
+//! `crate::credentials::policy` with their own unit tests.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -37,6 +38,35 @@ pub(crate) struct AuthAttempt {
 pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<String, AuthAttempt>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Record one auth failure for `config_name` and return the running attempt count.
+///
+/// Pure bookkeeping over the supplied `state` map, with `now` injected so the
+/// window-reset branch is unit-testable without sleeping. Behaviour:
+/// - a brand-new config starts at count 1;
+/// - a repeat failure within `AUTH_RETRY_WINDOW_SECS` increments;
+/// - a failure more than the window after the previous one resets to 1.
+///
+/// The returned count is **not** capped here — callers compare it against
+/// [`MAX_CREDENTIAL_ATTEMPTS`] to decide whether to retry or disconnect. The
+/// cap lives at the call site, not in this function.
+pub(crate) fn next_attempt(
+    state: &mut HashMap<String, AuthAttempt>,
+    now: std::time::Instant,
+    config_name: &str,
+) -> u32 {
+    let entry = state.entry(config_name.to_string()).or_insert(AuthAttempt {
+        count: 0,
+        last_failure: now,
+    });
+    // Reset counter if the previous failure was too long ago.
+    if now.saturating_duration_since(entry.last_failure).as_secs() > AUTH_RETRY_WINDOW_SECS {
+        entry.count = 0;
+    }
+    entry.count += 1;
+    entry.last_failure = now;
+    entry.count
+}
 
 /// Common D-Bus label variants seen from different OpenVPN3 servers.
 /// Used to probe the keyring when the actual queue slot label doesn't
@@ -76,11 +106,13 @@ fn label_matches_category(label: &str, standard_label: &str) -> bool {
 pub(crate) async fn request_credentials(
     dbus: &zbus::Connection,
     session_path: &str,
+    config_path: &str,
     config_name: &str,
     prefilled: HashMap<String, String>,
 ) {
     let dbus = dbus.clone();
     let session_path = session_path.to_string();
+    let config_path = config_path.to_string();
     let config_name = config_name.to_string();
 
     let session_path_obj = match OwnedObjectPath::try_from(session_path.as_str()) {
@@ -149,7 +181,11 @@ pub(crate) async fn request_credentials(
     // Resolve for actual queue slots, standard field labels, AND common label
     // variants (OpenVPN3 servers use varying labels like "Username" vs
     // "Enter username" — all map to the same keyring attribute).
-    let cred_key = config_name.clone();
+    //
+    // Key the store on the unique config PATH (#2 fix) — not the display name,
+    // which two configs may share. config_name is passed to get_with_keyring
+    // solely as the legacy key for the read-on-miss migration.
+    let cred_key = config_path.clone();
     let cred_store = crate::credentials::CredentialStore::default();
     let mut resolved = prefilled;
     let mut labels_to_try: Vec<String> = slots.iter().map(|(_, _, _, l, _)| l.clone()).collect();
@@ -160,19 +196,74 @@ pub(crate) async fn request_credentials(
             labels_to_try.push(variant.to_string());
         }
     }
+
+    // Open ONE keyring handle for the whole resolution and unlock it once.
+    // Previously each get_async opened its own Keyring::new() — N labels meant
+    // N opens, and none shared unlock state, so a locked collection left every
+    // field blank with no signal. Unlock before the loop so the system prompt
+    // fires before our dialog, not under it.
+    let mut keyring = match oo7::Keyring::new().await {
+        Ok(k) => Some(k),
+        Err(e) => {
+            warn!("Failed to open keyring — saved credentials unavailable: {e}");
+            crate::dialogs::show_error_notification(
+                "Saved Credentials Unavailable",
+                "Could not open the keyring. Enter credentials manually.",
+            );
+            None
+        }
+    };
+    if let Some(k) = &keyring
+        && let Err(e) = crate::credentials::store::ensure_unlocked(k).await
+    {
+        warn!("Failed to unlock keyring — pre-fill disabled: {e}");
+        let hint = if crate::credentials::store::is_locked_error(&e) {
+            "Keyring is locked. Enter credentials manually."
+        } else {
+            "Could not unlock the keyring. Enter credentials manually."
+        };
+        crate::dialogs::show_error_notification("Saved Credentials Unavailable", hint);
+        // Drop the handle so the read loop below short-circuits. Otherwise it
+        // stays `Some` and every label logs its own read-failure `warn!` (N
+        // near-identical lines for one root cause). One notification + one log
+        // line above is enough; pre-fill is simply blank.
+        keyring = None;
+    }
+
     for label in labels_to_try {
         if resolved.contains_key(&label) {
             continue;
         }
-        if is_storable_field(&label, true)
-            && let Some(val) = cred_store.get_async(&cred_key, &label).await.ok().flatten()
-        {
-            resolved.insert(label, val);
+        if !is_storable_field(&label, true) {
+            continue;
+        }
+        // Read against the single unlocked handle. Classify the outcome instead
+        // of the old `.ok().flatten()`, which conflated *locked/error* with
+        // *absent* and silently blanked fields.
+        if let Some(k) = keyring.as_ref() {
+            match cred_store
+                .get_with_keyring(k, &cred_key, &config_name, &label)
+                .await
+            {
+                Ok(Some(val)) => {
+                    resolved.insert(label, val);
+                }
+                Ok(None) => {} // genuinely absent — leave blank
+                Err(e) => warn!("Failed to read saved credential '{label}': {e}"),
+            }
+            // No keyring — already notified above; leave field blank.
         }
     }
 
     // Delegate to the dialog loop — never re-queries D-Bus or keyring
-    show_credentials_with_slots(dbus, session_path, config_name, &slots, &resolved);
+    show_credentials_with_slots(
+        dbus,
+        session_path,
+        config_path,
+        config_name,
+        &slots,
+        &resolved,
+    );
 }
 
 /// Show the credentials dialog with a **pre-built** slot list.
@@ -183,12 +274,16 @@ pub(crate) async fn request_credentials(
 fn show_credentials_with_slots(
     dbus: zbus::Connection,
     session_path: String,
+    config_path: String,
     config_name: String,
     slots: &[(u32, u32, u32, String, bool)],
     prefilled: &HashMap<String, String>,
 ) {
-    // Use config_name as credential store key (stable across sessions)
-    let cred_key = config_name.clone();
+    // Key the credential store on the config's unique D-Bus PATH, not its
+    // display name: two configs may share a name (verified real-device, S35
+    // T1), and keying by name would cross-wipe. `config_name` is kept as the
+    // legacy key for the read-on-miss migration from pre-0.3.11 stores.
+    let cred_key = config_path.clone();
 
     // Build dialog fields: always show all 3 standard fields so the user
     // sees a consistent UI regardless of which slots are currently in the
@@ -265,6 +360,7 @@ fn show_credentials_with_slots(
         {
             let dbus = dbus.clone();
             let sp = session_path.clone();
+            let cp = config_path.clone();
             let cn = config_name.clone();
             let slots = slots.to_vec();
             let ck = cred_key.clone();
@@ -273,6 +369,7 @@ fn show_credentials_with_slots(
             move |values, remember| {
                 let dbus = dbus.clone();
                 let sp = sp.clone();
+                let cp = cp.clone();
                 let cn = cn.clone();
                 let slots = slots.clone();
                 let ck = ck.clone();
@@ -285,6 +382,10 @@ fn show_credentials_with_slots(
                             // cleared by status_handler when is_connected() fires.
                             // Save only storable credentials (username/password, not OTP)
                             let store = crate::credentials::CredentialStore::default();
+                            // Fire the "save failed" notification at most once per submit:
+                            // a locked keyring fails every label, but the user only needs
+                            // one toast for the single root cause.
+                            let mut save_failure_notified = false;
                             for (label, value) in &values {
                                 let mask = slots
                                     .iter()
@@ -296,10 +397,29 @@ fn show_credentials_with_slots(
                                 }
                                 if remember {
                                     if let Err(e) = store.set_async(&ck, label, value).await {
+                                        // A failed "remember" must not be silent —
+                                        // the user believes credentials were saved
+                                        // when they weren't. classify so the message
+                                        // distinguishes "locked" from a generic keyring
+                                        // failure.
                                         warn!(
                                             "Failed to save credential '{}' to keyring: {}",
                                             label, e
                                         );
+                                        if !save_failure_notified {
+                                            save_failure_notified = true;
+                                            let hint = if crate::credentials::store::is_locked_error(
+                                                &e,
+                                            ) {
+                                                "Keyring is locked — credentials could not be saved."
+                                            } else {
+                                                "Could not save credentials to the keyring."
+                                            };
+                                            crate::dialogs::show_error_notification(
+                                                "Credential Save Failed",
+                                                hint,
+                                            );
+                                        }
                                     }
                                 } else {
                                     if let Err(e) = store.delete_async(&ck, label).await {
@@ -307,6 +427,9 @@ fn show_credentials_with_slots(
                                             "Failed to delete credential '{}' from keyring: {}",
                                             label, e
                                         );
+                                        // Delete failure is lower-stakes than save
+                                        // failure (worst case: a stale entry), so a
+                                        // bare warn suffices — no notification.
                                     }
                                 }
                             }
@@ -320,7 +443,7 @@ fn show_credentials_with_slots(
                                 .chain(values.into_iter().filter(|(_, v)| !v.is_empty()))
                                 .collect();
 
-                            show_credentials_with_slots(dbus, sp, cn, &slots, &merged);
+                            show_credentials_with_slots(dbus, sp, cp, cn, &slots, &merged);
                         }
                         Err(e) => {
                             let err_str = format!("{}", e);
@@ -329,6 +452,7 @@ fn show_credentials_with_slots(
                                 super::credential_handler::request_credentials(
                                     &dbus,
                                     &sp,
+                                    &cp,
                                     &cn,
                                     Default::default(),
                                 )
@@ -429,5 +553,79 @@ async fn submit_credentials(
             );
             Ok(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AUTH_RETRY_WINDOW_SECS, AuthAttempt, MAX_CREDENTIAL_ATTEMPTS, next_attempt};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn fresh_config_starts_at_one() {
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let now = Instant::now();
+        assert_eq!(next_attempt(&mut state, now, "vpn-a"), 1);
+    }
+
+    #[test]
+    fn repeated_failures_within_window_increment() {
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t0 = Instant::now();
+        assert_eq!(next_attempt(&mut state, t0, "vpn-a"), 1);
+        // 10s later — well inside the window.
+        let t1 = t0 + Duration::from_secs(10);
+        assert_eq!(next_attempt(&mut state, t1, "vpn-a"), 2);
+        let t2 = t1 + Duration::from_secs(10);
+        assert_eq!(next_attempt(&mut state, t2, "vpn-a"), 3);
+    }
+
+    #[test]
+    fn counter_keeps_climbing_past_cap_gate_lives_in_caller() {
+        // next_attempt itself does NOT cap — it keeps incrementing. The
+        // MAX_CREDENTIAL_ATTEMPTS gate is the caller's job. This pins that
+        // contract so a future "helpful" cap inside next_attempt is caught.
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let mut t = Instant::now();
+        for expected in 1..=(MAX_CREDENTIAL_ATTEMPTS + 1) {
+            assert_eq!(next_attempt(&mut state, t, "vpn-a"), expected);
+            t += Duration::from_secs(5);
+        }
+    }
+
+    #[test]
+    fn failure_after_window_resets_to_one() {
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t0 = Instant::now();
+        assert_eq!(next_attempt(&mut state, t0, "vpn-a"), 1);
+        assert_eq!(
+            next_attempt(&mut state, t0 + Duration::from_secs(10), "vpn-a"),
+            2
+        );
+        // One second past the window since the last failure → reset.
+        let stale = t0 + Duration::from_secs(10 + AUTH_RETRY_WINDOW_SECS + 1);
+        assert_eq!(next_attempt(&mut state, stale, "vpn-a"), 1);
+    }
+
+    #[test]
+    fn exactly_at_window_boundary_does_not_reset() {
+        // Reset is strict `>`, so a failure exactly AUTH_RETRY_WINDOW_SECS after
+        // the previous one still counts as within the window and increments.
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t0 = Instant::now();
+        assert_eq!(next_attempt(&mut state, t0, "vpn-a"), 1);
+        let boundary = t0 + Duration::from_secs(AUTH_RETRY_WINDOW_SECS);
+        assert_eq!(next_attempt(&mut state, boundary, "vpn-a"), 2);
+    }
+
+    #[test]
+    fn distinct_configs_count_independently() {
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t = Instant::now();
+        assert_eq!(next_attempt(&mut state, t, "vpn-a"), 1);
+        assert_eq!(next_attempt(&mut state, t, "vpn-b"), 1);
+        assert_eq!(next_attempt(&mut state, t, "vpn-a"), 2);
+        assert_eq!(next_attempt(&mut state, t, "vpn-b"), 2);
     }
 }

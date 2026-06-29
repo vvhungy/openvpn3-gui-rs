@@ -187,22 +187,42 @@ impl Application {
                     info!("Open file: {:?}", path);
                     let dbus = dbus_conn.clone();
                     let tray = tray_for_open.clone();
+                    // Clone per iteration: the move closure below captures this,
+                    // and `connect_open` may fire multiple times for one window.
+                    let p_result = parent.clone();
+                    let p_dialog = p_result.clone();
                     crate::dialogs::show_config_import_dialog(
-                        parent.as_ref(),
+                        p_dialog.as_ref(),
                         path.clone(),
                         move |name, path| {
                             let dbus = dbus.clone();
                             let tray = tray.clone();
+                            // Clone per closure invocation: the outer closure is Fn
+                            // (may fire several times), but the async block consumes
+                            // its captures once.
+                            let p_result = p_result.clone();
                             glib::spawn_future_local(async move {
+                                let parent: Option<&gtk4::Window> =
+                                    p_result.as_ref().map(|w| w.upcast_ref::<gtk4::Window>());
                                 match import_config(&dbus, &name, &path).await {
                                     Ok(_) => {
                                         refresh_configs(&dbus, &tray).await;
+                                        crate::dialogs::show_import_result_dialog(
+                                            parent, true, &name, None,
+                                        );
                                     }
                                     Err(e) => {
                                         error!("Failed to import config: {}", e);
+                                        let detail = format!("{e}");
                                         crate::dialogs::show_error_notification(
                                             "Import Failed",
-                                            &format!("Could not import configuration: {}", e),
+                                            &format!("Could not import configuration: {}", detail),
+                                        );
+                                        crate::dialogs::show_import_result_dialog(
+                                            parent,
+                                            false,
+                                            &name,
+                                            Some(&detail),
                                         );
                                     }
                                 }

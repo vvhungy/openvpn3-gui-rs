@@ -176,25 +176,17 @@ pub(super) async fn setup_status_handler(
                             .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()));
 
                         let attempt = {
-                            use super::credential_handler::{AUTH_RETRY_WINDOW_SECS, AuthAttempt};
                             // Poison-tolerant: a prior panic in a holder of
                             // this lock must not brick auth-retry bookkeeping.
                             // Treat a poisoned lock as a fresh attempt (count 1).
                             if let Ok(mut attempts) =
                                 super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
                             {
-                                let entry =
-                                    attempts.entry(config_name.clone()).or_insert(AuthAttempt {
-                                        count: 0,
-                                        last_failure: std::time::Instant::now(),
-                                    });
-                                // Reset counter if last failure was too long ago
-                                if entry.last_failure.elapsed().as_secs() > AUTH_RETRY_WINDOW_SECS {
-                                    entry.count = 0;
-                                }
-                                entry.count += 1;
-                                entry.last_failure = std::time::Instant::now();
-                                entry.count
+                                super::credential_handler::next_attempt(
+                                    &mut attempts,
+                                    std::time::Instant::now(),
+                                    &config_name,
+                                )
                             } else {
                                 warn!(
                                     "CREDENTIAL_ATTEMPTS lock poisoned — \

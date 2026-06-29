@@ -77,8 +77,6 @@ pub(crate) async fn connect_to_config(
     tray: &ksni::blocking::Handle<VpnTray>,
     settings: &Settings,
 ) -> anyhow::Result<()> {
-    let config_path = OwnedObjectPath::try_from(config_path_str)?;
-
     // Get config name
     let config_name = tray
         .update(|t| {
@@ -152,13 +150,16 @@ pub(crate) async fn connect_to_config(
         Err(e) => {
             info!("Session not ready (needs credentials): {}", e);
             let sp = session_path.as_str().to_string();
-            super::credential_handler::request_credentials(dbus, &sp, &config_name, HashMap::new())
-                .await;
+            super::credential_handler::request_credentials(
+                dbus,
+                &sp,
+                config_path_str,
+                &config_name,
+                HashMap::new(),
+            )
+            .await;
         }
     }
-
-    // config_path is used to build the proxy above; suppress unused warning
-    let _ = config_path;
 
     Ok(())
 }
@@ -212,17 +213,23 @@ pub(crate) async fn resume_session(
         }
         Err(e) => {
             info!("Session not ready after resume (needs credentials): {}", e);
-            let config_name = tray
+            let (config_name, config_path) = tray
                 .update(|t| {
                     t.sessions
                         .get(session_path_str)
-                        .map(|s| s.config_name.clone())
+                        .map(|s| (s.config_name.clone(), s.config_path.clone()))
                 })
                 .flatten()
-                .unwrap_or_else(|| "VPN".to_string());
+                .unwrap_or_else(|| ("VPN".to_string(), String::new()));
             let sp = session_path_str.to_string();
-            super::credential_handler::request_credentials(dbus, &sp, &config_name, HashMap::new())
-                .await;
+            super::credential_handler::request_credentials(
+                dbus,
+                &sp,
+                &config_path,
+                &config_name,
+                HashMap::new(),
+            )
+            .await;
         }
     }
 

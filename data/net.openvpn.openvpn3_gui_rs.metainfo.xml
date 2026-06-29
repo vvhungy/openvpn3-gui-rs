@@ -57,6 +57,19 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.11" date="2026-06-29">
+      <description>
+        <p>Credential reliability and import feedback — hardening across saved-credential handling and config import (no new features).</p>
+        <ul>
+          <li>Saved credentials now pre-fill the login dialog even when the keyring (Secret Service) collection is locked: the keyring is unlocked before the dialog opens, and keyring errors are surfaced instead of silently blanking fields. A failed "remember credentials" save now shows a notification instead of no-oping silently.</li>
+          <li>Saved credentials are now keyed by the VPN configuration's unique object path rather than its display name. Because OpenVPN 3 allows two configurations to share a name, keying by name could cross-wipe a same-named sibling's stored identity on removal; keying by path isolates each connection. Existing saved credentials migrate to the new key automatically on first use (the legacy entry is left intact if migration fails).</li>
+          <li>Removing a VPN configuration now also wipes its stored username/password/OTP from the keyring, so rotating or deleting a connection no longer leaves orphaned credentials that could re-populate a same-named re-import with the wrong identity.</li>
+          <li>Importing a configuration now validates it: a malformed file is rejected with the parser's error and removed from the profile list, instead of being silently accepted. (Requires OpenVPN 3 daemon v22+; older daemons skip validation.)</li>
+          <li>Import and removal now always show an in-app result dialog, regardless of the desktop-notification setting, so a successful import is no longer silent when notifications are off.</li>
+          <li>The 3-attempt auth-retry counter (wrong-password auto-reconnect cap) is now covered by unit tests.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.10" date="2026-06-26">
       <description>
         <p>Sprint 33: kill-switch fail-closed completion and one GUI correctness fix (no new features).</p>
