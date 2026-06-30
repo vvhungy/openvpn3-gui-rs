@@ -265,11 +265,21 @@ pub(super) async fn setup_status_handler(
                                 "Max auth attempts reached for '{}' — disconnecting",
                                 config_name
                             );
+                            // Reset this config's retry budget so the user can
+                            // reconnect within the 5-min window (otherwise the
+                            // path-keyed counter stays at/near MAX and the next
+                            // wrong password instantly disconnects again).
+                            // disconnect_with_message no longer clears the counter
+                            // (it doesn't receive the path); clear it here instead.
+                            if let Ok(mut attempts) =
+                                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
+                            {
+                                attempts.remove(&config_path);
+                            }
                             glib::spawn_future_local(async move {
                                 super::session_ops::disconnect_with_message(
                                     &dbus_conn,
                                     &session_path,
-                                    &config_name,
                                     "Authentication Failed",
                                     &format!(
                                         "Too many failed attempts for '{}'. Session disconnected.",
@@ -299,7 +309,6 @@ pub(super) async fn setup_status_handler(
                             super::session_ops::disconnect_with_message(
                                 &dbus_conn,
                                 &session_path,
-                                &config_name,
                                 "Connection Failed",
                                 &format!(
                                     "Connection failed for '{}'. Please try again.",
@@ -334,7 +343,6 @@ pub(super) async fn setup_status_handler(
                             super::session_ops::disconnect_with_message(
                                 &dbus_conn,
                                 &session_path,
-                                &config_name,
                                 "VPN Error",
                                 &body,
                             )

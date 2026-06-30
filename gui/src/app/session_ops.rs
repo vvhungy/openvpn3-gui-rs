@@ -241,14 +241,15 @@ pub(crate) async fn resume_session(
 pub(crate) async fn disconnect_with_message(
     dbus: &zbus::Connection,
     session_path: &str,
-    config_name: &str,
     title: &str,
     message: &str,
 ) {
-    // Clear attempt counter
-    if let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock() {
-        attempts.remove(config_name);
-    }
+    // NOTE: the auth-retry counter is NOT cleared here. It is keyed on the
+    // config *path* (see credential_handler::retry), which this generic
+    // disconnect/notify helper does not receive. Clearing it was a pre-T1
+    // no-op anyway once the map became path-keyed. The one caller that must
+    // reset the budget (max-attempts lockout, status_handler) clears it
+    // explicitly on the path; the happy path clears on ConnConnected.
     // Mark as user-initiated to suppress the SessDestroyed reconnect notification.
     // Poison-tolerant: matches the rest of session_ops; worst case is a redundant
     // reconnect prompt, never a panic that blocks the disconnect.
