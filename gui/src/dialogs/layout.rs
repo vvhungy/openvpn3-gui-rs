@@ -47,3 +47,26 @@ where
 
     btn_box
 }
+
+/// Like [`make_button_row`] but styles the action button with
+/// `destructive-action` (red) per the GNOME HIG for irreversible operations
+/// (Forget Credentials, Remove config, Quit).
+pub fn make_destructive_button_row<C, A>(
+    cancel_label: &str,
+    action_label: &str,
+    on_cancel: C,
+    on_action: A,
+) -> gtk4::Box
+where
+    C: Fn() + 'static,
+    A: Fn() + 'static,
+{
+    let btn_box = make_button_row(cancel_label, action_label, on_cancel, on_action);
+    // make_button_row styles the action button as suggested-action; swap to
+    // destructive-action. The action button is the 2nd (last) child of the row.
+    if let Some(action_btn) = btn_box.last_child().and_downcast::<gtk4::Button>() {
+        action_btn.remove_css_class("suggested-action");
+        action_btn.add_css_class("destructive-action");
+    }
+    btn_box
+}

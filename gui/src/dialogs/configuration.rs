@@ -8,7 +8,9 @@ use gtk4::{Box as GtkBox, Orientation, Separator};
 use gtk4::{Entry, FileChooserAction, FileChooserDialog, Grid, Label, ResponseType};
 use tracing::info;
 
-use super::layout::{BTN_MIN_WIDTH, CONTENT_MARGIN, GRID_SPACING, make_button_row};
+use super::layout::{
+    BTN_MIN_WIDTH, CONTENT_MARGIN, GRID_SPACING, make_button_row, make_destructive_button_row,
+};
 
 /// Show file chooser dialog for selecting an OpenVPN configuration file
 pub fn show_config_select_dialog<F>(parent: Option<&gtk4::Window>, on_select: F)
@@ -239,7 +241,7 @@ where
         .build();
     vbox.append(&label);
 
-    vbox.append(&make_button_row(
+    vbox.append(&make_destructive_button_row(
         "Cancel",
         "Forget",
         {
@@ -293,7 +295,7 @@ where
         .build();
     vbox.append(&label);
 
-    vbox.append(&make_button_row(
+    vbox.append(&make_destructive_button_row(
         "Cancel",
         "Remove",
         {
@@ -442,7 +444,7 @@ pub fn show_quit_confirmation_dialog(parent: Option<&gtk4::Window>, gtk_app: Gtk
 
         outer.append(&hbox);
         outer.append(&Separator::new(Orientation::Horizontal));
-        outer.append(&make_button_row(
+        outer.append(&make_destructive_button_row(
             "Cancel",
             "Quit anyway",
             {
