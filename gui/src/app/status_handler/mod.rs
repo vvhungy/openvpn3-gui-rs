@@ -176,12 +176,21 @@ pub(super) async fn setup_status_handler(
                             .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()));
 
                         let attempt = {
-                            // Poison-tolerant: a prior panic in a holder of
-                            // this lock must not brick auth-retry bookkeeping.
-                            // Treat a poisoned lock as a fresh attempt (count 1).
-                            if let Ok(mut attempts) =
+                            if config_path.is_empty() {
+                                // No config path to retry against — nothing to
+                                // reconnect to. Skip the retry counter entirely:
+                                // an empty key would be a shared bucket across
+                                // all un-keyed failures (see next_attempt's doc),
+                                // and the debug_assert there panics on empty.
+                                // Returning MAX makes the retry gate below fall
+                                // straight to the disconnect branch.
+                                super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
+                            } else if let Ok(mut attempts) =
                                 super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
                             {
+                                // Poison-tolerant: a prior panic in a holder of
+                                // this lock must not brick auth-retry bookkeeping.
+                                // Treat a poisoned lock as a fresh attempt (count 1).
                                 super::credential_handler::next_attempt(
                                     &mut attempts,
                                     std::time::Instant::now(),
