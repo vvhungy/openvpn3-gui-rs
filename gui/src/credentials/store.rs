@@ -250,6 +250,13 @@ impl CredentialStore {
 
         let keyring = Keyring::new().await.context("Failed to open keyring")?;
 
+        // Unlock before writing. On a locked DBus collection create_item is
+        // not persisted, so without this a "Remember" save would appear to
+        // succeed yet store nothing — exactly the locked-keyring gap the read
+        // path already closes. Noop on the file backend. Mirrors
+        // delete_for_config_async and the read path in request_credentials.
+        ensure_unlocked(&keyring).await?;
+
         let mut attributes = HashMap::new();
         attributes.insert("application", APP_ID);
         attributes.insert("config-id", config_id);
@@ -271,6 +278,14 @@ impl CredentialStore {
         use std::collections::HashMap;
 
         let keyring = Keyring::new().await.context("Failed to open keyring")?;
+
+        // Unlock before searching. On a locked DBus collection search_items
+        // returns no usable items, so without this a global clear would
+        // silently report Ok(0) and every secret survive — exactly the
+        // locked-keyring gap delete_for_config_async closes. Noop on the file
+        // backend. Affects Preferences ▸ Security “Clear all” and the
+        // `--clear-secret-storage` startup flag.
+        ensure_unlocked(&keyring).await?;
 
         let mut attributes = HashMap::new();
         attributes.insert("application", APP_ID);
@@ -337,6 +352,13 @@ impl CredentialStore {
         use std::collections::HashMap;
 
         let keyring = Keyring::new().await.context("Failed to open keyring")?;
+
+        // Unlock before searching. On a locked DBus collection search_items
+        // returns no usable items, so without this a field-delete would
+        // silently report Ok(()) and the stale entry survive — same
+        // locked-keyring gap the sibling delete paths close. Noop on the
+        // file backend.
+        ensure_unlocked(&keyring).await?;
 
         let mut attributes = HashMap::new();
         attributes.insert("application", APP_ID);
