@@ -57,6 +57,15 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.12" date="2026-06-30">
+      <description>
+        <p>Credential isolation and per-config management — finishing the saved-credential reliability work begun in 0.3.11 (no new features beyond credential handling).</p>
+        <ul>
+          <li>Each VPN configuration now has its own per-config <em>Forget Credentials</em> action in the tray menu (Connect → Forget Credentials → Remove), removing that connection's saved username/password without touching the configuration itself or any other connection. Previously the only way to forget saved credentials was the global "Clear all saved credentials".</li>
+          <li>The 3-attempt wrong-password auto-reconnect counter is now isolated per configuration (keyed on its unique object path) instead of by display name, so wrong-password attempts on one same-named configuration no longer burn the retry budget of a sibling sharing that name.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.11" date="2026-06-29">
       <description>
         <p>Credential reliability and import feedback — hardening across saved-credential handling and config import (no new features).</p>
