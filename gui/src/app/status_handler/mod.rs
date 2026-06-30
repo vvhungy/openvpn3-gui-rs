@@ -185,7 +185,7 @@ pub(super) async fn setup_status_handler(
                                 super::credential_handler::next_attempt(
                                     &mut attempts,
                                     std::time::Instant::now(),
-                                    &config_name,
+                                    &config_path,
                                 )
                             } else {
                                 warn!(
@@ -334,16 +334,19 @@ pub(super) async fn setup_status_handler(
                         continue;
                     }
 
-                    // Clear credential attempts on successful connection
+                    // Clear credential attempts on successful connection.
+                    // Key on the config PATH (same scheme as next_attempt) — a
+                    // dup-named sibling must not share/clear the other's budget.
                     if status.is_connected() {
-                        let cn = tray_for_status
-                            .update(|t| t.sessions.get(&path).map(|s| s.config_name.clone()))
+                        let cp = tray_for_status
+                            .update(|t| t.sessions.get(&path).map(|s| s.config_path.clone()))
                             .flatten();
-                        if let Some(cn) = cn
+                        if let Some(cp) = cp
+                            && !cp.is_empty()
                             && let Ok(mut attempts) =
                                 super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
                         {
-                            attempts.remove(&cn);
+                            attempts.remove(&cp);
                         }
 
                         // Kill-switch: apply firewall rules now that the tunnel is up.

@@ -39,7 +39,16 @@ pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<String, AuthAttempt>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// Record one auth failure for `config_name` and return the running attempt count.
+/// Record one auth failure for `config_id` and return the running attempt count.
+///
+/// `config_id` is the unique D-Bus config object **path**, never the display
+/// name: two configs can share a name (`LookupConfigName -> Vec<...>`,
+/// `dbus/configuration.rs:28`), so keying the retry budget on the name makes
+/// wrong-password attempts on one same-named config burn the other's cap. The
+/// caller (`status_handler`) threads the path and keeps the name only for
+/// human-readable notification text. An empty path must never reach here — the
+/// caller gates retry on `!config_path.is_empty()`, and an empty key would
+/// become a shared bucket across all un-keyed failures.
 ///
 /// Pure bookkeeping over the supplied `state` map, with `now` injected so the
 /// window-reset branch is unit-testable without sleeping. Behaviour:
@@ -53,9 +62,13 @@ pub(crate) static CREDENTIAL_ATTEMPTS: std::sync::LazyLock<
 pub(crate) fn next_attempt(
     state: &mut HashMap<String, AuthAttempt>,
     now: std::time::Instant,
-    config_name: &str,
+    config_id: &str,
 ) -> u32 {
-    let entry = state.entry(config_name.to_string()).or_insert(AuthAttempt {
+    debug_assert!(
+        !config_id.is_empty(),
+        "next_attempt key must be a non-empty config path, never empty"
+    );
+    let entry = state.entry(config_id.to_string()).or_insert(AuthAttempt {
         count: 0,
         last_failure: now,
     });
@@ -627,5 +640,25 @@ mod tests {
         assert_eq!(next_attempt(&mut state, t, "vpn-b"), 1);
         assert_eq!(next_attempt(&mut state, t, "vpn-a"), 2);
         assert_eq!(next_attempt(&mut state, t, "vpn-b"), 2);
+    }
+
+    // Regression guard for the dup-name bug (#2 class): two configs can share
+    // a display NAME but have distinct object PATHS. The caller now threads the
+    // path as `config_id`, so failures on one same-named config must NOT burn
+    // the other's retry budget. This test would fail under the old name-keyed
+    // scheme only if it modelled the names colliding; here it pins the contract
+    // by using distinct path-shaped keys that a shared name could not tell apart.
+    #[test]
+    fn same_name_different_path_budgets_isolate() {
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t = Instant::now();
+        // Two configs both displayed as "vpn-a" but distinct paths:
+        let path_a = "/net/openvpn/v3/configuration/a1";
+        let path_b = "/net/openvpn/v3/configuration/b2";
+        assert_eq!(next_attempt(&mut state, t, path_a), 1);
+        assert_eq!(next_attempt(&mut state, t, path_a), 2);
+        // Failure on the sibling must start fresh — name-collision must not leak.
+        assert_eq!(next_attempt(&mut state, t, path_b), 1);
+        assert_eq!(next_attempt(&mut state, t, path_a), 3);
     }
 }
