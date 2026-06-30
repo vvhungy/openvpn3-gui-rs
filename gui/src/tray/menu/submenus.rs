@@ -121,15 +121,24 @@ pub(super) fn session_submenu(session: &SessionInfo) -> Vec<MenuItem<VpnTray>> {
     items
 }
 
-/// Build config submenu (Connect / Remove).
+/// Build config submenu (Connect / Forget Credentials / Remove).
 pub(super) fn config_submenu(config: &ConfigInfo) -> Vec<MenuItem<VpnTray>> {
     let path = config.path.clone();
     let p2 = config.path.clone();
+    let p3 = config.path.clone();
     vec![
         StandardItem {
             label: "Connect".into(),
             activate: Box::new(move |tray: &mut VpnTray| {
                 tray.send_action(TrayAction::Connect(path.clone()));
+            }),
+            ..Default::default()
+        }
+        .into(),
+        StandardItem {
+            label: "Forget Credentials".into(),
+            activate: Box::new(move |tray: &mut VpnTray| {
+                tray.send_action(TrayAction::ForgetCredentials(p3.clone()));
             }),
             ..Default::default()
         }
@@ -237,6 +246,6 @@ mod tests {
             name: "VPN".into(),
         };
         let labels = menu_labels(&config_submenu(&config));
-        assert_eq!(labels, ["Connect", "Remove"]);
+        assert_eq!(labels, ["Connect", "Forget Credentials", "Remove"]);
     }
 }

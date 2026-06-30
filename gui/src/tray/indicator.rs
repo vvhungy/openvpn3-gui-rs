@@ -35,6 +35,7 @@ pub enum TrayAction {
     Reconnect(String, String), // (session_path, config_path) for disconnected/error sessions
     Statistics(String),        // session D-Bus path
     RemoveConfig(String),      // config D-Bus path
+    ForgetCredentials(String), // config D-Bus path — forget saved creds, keep config
     ImportConfig,
     About,
     Quit,

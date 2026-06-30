@@ -181,6 +181,84 @@ pub fn show_config_remove_dialog<F>(
     });
 }
 
+/// Show "forget saved credentials" confirmation for one config.
+///
+/// Distinct singleton key from remove (`forget-<path>` vs remove) so a user
+/// can open both against the same config without one no-showing the other.
+/// Tray-triggered (not chained from another dialog) so plain `present_keyed`
+/// is correct — no modal-funnel suppression to bypass here.
+pub fn show_config_forget_dialog<F>(
+    parent: Option<&gtk4::Window>,
+    key: &str,
+    name: &str,
+    on_forget: F,
+) where
+    F: Fn() + 'static,
+{
+    let parent = parent.cloned();
+    let name = name.to_string();
+    super::singleton::present_keyed(key, move || {
+        build_config_forget_window(parent.as_ref(), &name, on_forget)
+    });
+}
+
+fn build_config_forget_window<F>(
+    parent: Option<&gtk4::Window>,
+    name: &str,
+    on_forget: F,
+) -> gtk4::Window
+where
+    F: Fn() + 'static,
+{
+    let window = gtk4::Window::builder()
+        .title("Forget Credentials")
+        .modal(true)
+        .default_width(350)
+        .resizable(false)
+        .build();
+
+    if let Some(p) = parent {
+        window.set_transient_for(Some(p));
+    }
+
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+
+    let label = Label::builder()
+        .label(format!(
+            "Forget saved credentials for '{}'?\n\
+             \nRemoves the saved username and password for this configuration. \
+             The configuration itself is kept.\n\
+             \nThis action cannot be undone.",
+            name
+        ))
+        .margin_top(CONTENT_MARGIN)
+        .margin_bottom(CONTENT_MARGIN)
+        .margin_start(CONTENT_MARGIN)
+        .margin_end(CONTENT_MARGIN)
+        .wrap(true)
+        .build();
+    vbox.append(&label);
+
+    vbox.append(&make_button_row(
+        "Cancel",
+        "Forget",
+        {
+            let window = window.clone();
+            move || window.close()
+        },
+        {
+            let window = window.clone();
+            move || {
+                on_forget();
+                window.close();
+            }
+        },
+    ));
+
+    window.set_child(Some(&vbox));
+    window
+}
+
 fn build_config_remove_window<F>(
     parent: Option<&gtk4::Window>,
     name: &str,
