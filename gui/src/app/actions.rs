@@ -180,6 +180,57 @@ pub(crate) fn handle_tray_action(
                 },
             );
         }
+        TrayAction::ForgetCredentials(config_path) => {
+            info!("Tray action: Forget credentials {}", config_path);
+            let config_path = config_path.clone();
+            let tray = tray.clone();
+
+            // Resolve the display name for the confirm dialog. Key the
+            // keyring delete on config_path (S35 scheme) — never the name,
+            // which two configs may share and would cross-wipe.
+            let name = tray
+                .update(|t| {
+                    t.configs
+                        .iter()
+                        .find(|c| c.path == config_path)
+                        .map(|c| c.name.clone())
+                })
+                .flatten()
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let parent = parent.clone();
+            let key = format!("forget-{}", config_path);
+            let name_for_closure = name.clone();
+            crate::dialogs::show_config_forget_dialog(
+                Some(parent.upcast_ref()),
+                &key,
+                &name,
+                move || {
+                    let config_path = config_path.clone();
+                    let name = name_for_closure.clone();
+                    glib::spawn_future_local(async move {
+                        let store = crate::credentials::CredentialStore::default();
+                        match store.delete_for_config_async(&config_path).await {
+                            Ok(0) => crate::dialogs::show_info_notification(
+                                "Credentials Forgotten",
+                                &format!("No saved credentials found for '{}'.", name),
+                            ),
+                            Ok(n) => crate::dialogs::show_info_notification(
+                                "Credentials Forgotten",
+                                &format!("{} saved credential(s) removed for '{}'.", n, name),
+                            ),
+                            Err(e) => {
+                                error!("Failed to forget credentials: {}", e);
+                                crate::dialogs::show_error_notification(
+                                    "Forget Failed",
+                                    &format!("Could not forget credentials: {}", e),
+                                );
+                            }
+                        }
+                    });
+                },
+            );
+        }
         TrayAction::ImportConfig => {
             info!("Tray action: Import config");
             let dbus = dbus.clone();

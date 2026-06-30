@@ -176,16 +176,25 @@ pub(super) async fn setup_status_handler(
                             .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()));
 
                         let attempt = {
-                            // Poison-tolerant: a prior panic in a holder of
-                            // this lock must not brick auth-retry bookkeeping.
-                            // Treat a poisoned lock as a fresh attempt (count 1).
-                            if let Ok(mut attempts) =
+                            if config_path.is_empty() {
+                                // No config path to retry against — nothing to
+                                // reconnect to. Skip the retry counter entirely:
+                                // an empty key would be a shared bucket across
+                                // all un-keyed failures (see next_attempt's doc),
+                                // and the debug_assert there panics on empty.
+                                // Returning MAX makes the retry gate below fall
+                                // straight to the disconnect branch.
+                                super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
+                            } else if let Ok(mut attempts) =
                                 super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
                             {
+                                // Poison-tolerant: a prior panic in a holder of
+                                // this lock must not brick auth-retry bookkeeping.
+                                // Treat a poisoned lock as a fresh attempt (count 1).
                                 super::credential_handler::next_attempt(
                                     &mut attempts,
                                     std::time::Instant::now(),
-                                    &config_name,
+                                    &config_path,
                                 )
                             } else {
                                 warn!(
@@ -256,11 +265,21 @@ pub(super) async fn setup_status_handler(
                                 "Max auth attempts reached for '{}' — disconnecting",
                                 config_name
                             );
+                            // Reset this config's retry budget so the user can
+                            // reconnect within the 5-min window (otherwise the
+                            // path-keyed counter stays at/near MAX and the next
+                            // wrong password instantly disconnects again).
+                            // disconnect_with_message no longer clears the counter
+                            // (it doesn't receive the path); clear it here instead.
+                            if let Ok(mut attempts) =
+                                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
+                            {
+                                attempts.remove(&config_path);
+                            }
                             glib::spawn_future_local(async move {
                                 super::session_ops::disconnect_with_message(
                                     &dbus_conn,
                                     &session_path,
-                                    &config_name,
                                     "Authentication Failed",
                                     &format!(
                                         "Too many failed attempts for '{}'. Session disconnected.",
@@ -290,7 +309,6 @@ pub(super) async fn setup_status_handler(
                             super::session_ops::disconnect_with_message(
                                 &dbus_conn,
                                 &session_path,
-                                &config_name,
                                 "Connection Failed",
                                 &format!(
                                     "Connection failed for '{}'. Please try again.",
@@ -325,7 +343,6 @@ pub(super) async fn setup_status_handler(
                             super::session_ops::disconnect_with_message(
                                 &dbus_conn,
                                 &session_path,
-                                &config_name,
                                 "VPN Error",
                                 &body,
                             )
@@ -334,16 +351,19 @@ pub(super) async fn setup_status_handler(
                         continue;
                     }
 
-                    // Clear credential attempts on successful connection
+                    // Clear credential attempts on successful connection.
+                    // Key on the config PATH (same scheme as next_attempt) — a
+                    // dup-named sibling must not share/clear the other's budget.
                     if status.is_connected() {
-                        let cn = tray_for_status
-                            .update(|t| t.sessions.get(&path).map(|s| s.config_name.clone()))
+                        let cp = tray_for_status
+                            .update(|t| t.sessions.get(&path).map(|s| s.config_path.clone()))
                             .flatten();
-                        if let Some(cn) = cn
+                        if let Some(cp) = cp
+                            && !cp.is_empty()
                             && let Ok(mut attempts) =
                                 super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
                         {
-                            attempts.remove(&cn);
+                            attempts.remove(&cp);
                         }
 
                         // Kill-switch: apply firewall rules now that the tunnel is up.

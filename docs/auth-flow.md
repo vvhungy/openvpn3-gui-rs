@@ -110,3 +110,28 @@ Server sends:  StatusChange(major=3/Session, minor=22/SessAuthUrl, "https://..."
 
 > **Note:** Groups 2 (HTTP_PROXY_CREDS) and 3 (PK_PASSPHRASE) are not handled by the
 > current auth dispatch logic. If they appear, `dispatch_for_session()` returns `None`.
+
+---
+
+## Saved-credential surfaces (keyring)
+
+Credentials are stored in the Secret Service keyring under the attribute
+`config-id = <config D-Bus object path>` (NOT the display name — two configs can
+share a name, which would cross-wipe). All three write/delete surfaces below key
+on the path. Legacy pre-0.3.11 stores keyed on the name are migrated on read-miss
+(best-effort; the legacy item is left intact if migration fails, so it is never lossy).
+
+| Surface | Scope | Keying | Deletes | Result feedback |
+|---|---|---|---|---|
+| Tray ▸ config ▸ **Forget Credentials** | one config | path (`forget-<path>` singleton dialog) | `delete_for_config_async(path)` — config kept | info toast: n removed / none found; error toast on failure |
+| Tray ▸ config ▸ **Remove** | one config | path | `delete_for_config_async(path)` in `remove_config`, **after** the D-Bus config is removed (orphan cleanup) | folded into the remove result notification |
+| Preferences ▸ Security ▸ **Clear all saved credentials** | **all** configs | n/a (global) | `clear_all_async()` | info toast: n removed / none found; error toast on failure |
+| Credential dialog ▸ **Remember** checkbox (per submit) | one config | path (`cred_key = config_path`) | `set_async(path, label)` on remember; `delete_async(path, label)` on un-remember | save-failure toast (classified locked vs generic), at most once per submit |
+| Startup `--clear-secret-storage` | **all** configs | n/a (global) | `clear_all_async()` | none (silent) |
+
+**Auth-retry budget** (`CREDENTIAL_ATTEMPTS`) is keyed on the same config path
+(same dup-name isolation), cleared on `ConnConnected` for that path only. See
+`credential_handler/retry.rs`.
+
+No gaps identified post-Forget: every credential-writing surface has a matching
+forget/remove surface, all keyed on the path.
