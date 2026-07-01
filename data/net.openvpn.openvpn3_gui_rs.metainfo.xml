@@ -57,6 +57,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.13" date="2026-07-01">
+      <description>
+        <p>Credential reliability fixes closing the 0.3.11–0.3.12 arc — bug fixes only, no new features.</p>
+        <ul>
+          <li>Saved-credential operations now unlock the keyring before every read and write, not just some of them. On a locked keyring, &quot;Remember&quot; save, per-field delete, per-config Forget, global Clear-all, and the <code>--clear-secret-storage</code> startup flag previously no-op'ed silently (save appeared to succeed but stored nothing; deletes reported nothing removed). All now act, or report a clear failure.</li>
+          <li>The wrong-password auto-reconnect counter is reset when you manually Disconnect or Remove a configuration, so reconnecting with a corrected password gets the full 3 attempts again instead of inheriting the abandoned session's failures within the 5-minute window.</li>
+          <li>Locked-keyring errors now show a legible &quot;Keyring is locked&quot; message on the Clear-all and Forget actions (matching the existing save path), including when the unlock prompt is dismissed, instead of raw error text.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.12" date="2026-06-30">
       <description>
         <p>Credential isolation and per-config management — finishing the saved-credential reliability work begun in 0.3.11 (no new features beyond credential handling).</p>
