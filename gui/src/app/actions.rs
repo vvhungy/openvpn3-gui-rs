@@ -247,10 +247,13 @@ pub(crate) fn handle_tray_action(
                             ),
                             Err(e) => {
                                 error!("Failed to forget credentials: {}", e);
-                                crate::dialogs::show_error_notification(
-                                    "Forget Failed",
-                                    &format!("Could not forget credentials: {}", e),
-                                );
+                                let hint = if crate::credentials::store::is_locked_error(&e) {
+                                    "Keyring is locked — saved credentials could not be forgotten."
+                                        .to_string()
+                                } else {
+                                    format!("Could not forget credentials: {}", e)
+                                };
+                                crate::dialogs::show_error_notification("Forget Failed", &hint);
                             }
                         }
                     });

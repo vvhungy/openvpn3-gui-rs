@@ -184,10 +184,15 @@ fn show_clear_credentials_confirm(parent: &gtk4::Window) {
                             "Credentials Cleared",
                             &format!("{} saved credential(s) removed.", n),
                         ),
-                        Err(e) => crate::dialogs::show_error_notification(
-                            "Clear Failed",
-                            &format!("Could not clear credentials: {}", e),
-                        ),
+                        Err(e) => {
+                            let hint = if crate::credentials::store::is_locked_error(&e) {
+                                "Keyring is locked — saved credentials could not be cleared."
+                                    .to_string()
+                            } else {
+                                format!("Could not clear credentials: {}", e)
+                            };
+                            crate::dialogs::show_error_notification("Clear Failed", &hint);
+                        }
                     }
                 });
             }
