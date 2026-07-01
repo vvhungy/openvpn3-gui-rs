@@ -8,11 +8,23 @@ use tracing::{info, warn};
 /// Application identifier for the secret collection
 const APP_ID: &str = "net.openvpn.openvpn3-gui-rs";
 
-/// Classify whether a credential error is "the collection is locked".
+/// Classify whether a credential error means "the keyring is locked (or
+/// the user declined the unlock prompt, so it stayed locked)".
 ///
 /// Walks the anyhow error chain (which includes the store methods' own
-/// `.context()` wrappers) looking for the Secret Service locked-collection
-/// signal: `oo7::Error::DBus(oo7::dbus::Error::Service(oo7::dbus::ServiceError::IsLocked(_)))`.
+/// `.context()` wrappers) for two Secret Service conditions:
+/// - `oo7::dbus::ServiceError::IsLocked(_)` — the collection is locked.
+/// - `oo7::dbus::Error::Dismissed` — the user cancelled the unlock dialog.
+///
+/// Both warrant the same user-facing hint: the keyring stayed locked, so the
+/// credential op couldn't proceed. The unlock dialog only appears because the
+/// collection was locked, so a dismissed prompt means it *remains* locked.
+///
+/// Invariant: `Dismissed` only ever arises from `Keyring::unlock()` here —
+/// `search_items`/`create_item`/`delete` do not prompt on their own — so any
+/// `Dismissed` reaching the error path is an unlock dismissal, not some other
+/// cancelled prompt. If a future store method issues its own prompt, this
+/// classification must be re-checked.
 ///
 /// Pure (no I/O) so the chain-walk + variant match is unit-testable without a
 /// keyring — callers use it to pick a user-facing message ("keyring locked")
@@ -24,7 +36,7 @@ pub(crate) fn is_locked_error(e: &anyhow::Error) -> bool {
                 o,
                 oo7::Error::DBus(oo7::dbus::Error::Service(
                     oo7::dbus::ServiceError::IsLocked(_)
-                ))
+                )) | oo7::Error::DBus(oo7::dbus::Error::Dismissed)
             )
         })
     })
@@ -250,6 +262,13 @@ impl CredentialStore {
 
         let keyring = Keyring::new().await.context("Failed to open keyring")?;
 
+        // Unlock before writing. On a locked DBus collection create_item is
+        // not persisted, so without this a "Remember" save would appear to
+        // succeed yet store nothing — exactly the locked-keyring gap the read
+        // path already closes. Noop on the file backend. Mirrors
+        // delete_for_config_async and the read path in request_credentials.
+        ensure_unlocked(&keyring).await?;
+
         let mut attributes = HashMap::new();
         attributes.insert("application", APP_ID);
         attributes.insert("config-id", config_id);
@@ -271,6 +290,14 @@ impl CredentialStore {
         use std::collections::HashMap;
 
         let keyring = Keyring::new().await.context("Failed to open keyring")?;
+
+        // Unlock before searching. On a locked DBus collection search_items
+        // returns no usable items, so without this a global clear would
+        // silently report Ok(0) and every secret survive — exactly the
+        // locked-keyring gap delete_for_config_async closes. Noop on the file
+        // backend. Affects Preferences ▸ Security “Clear all” and the
+        // `--clear-secret-storage` startup flag.
+        ensure_unlocked(&keyring).await?;
 
         let mut attributes = HashMap::new();
         attributes.insert("application", APP_ID);
@@ -337,6 +364,13 @@ impl CredentialStore {
         use std::collections::HashMap;
 
         let keyring = Keyring::new().await.context("Failed to open keyring")?;
+
+        // Unlock before searching. On a locked DBus collection search_items
+        // returns no usable items, so without this a field-delete would
+        // silently report Ok(()) and the stale entry survive — same
+        // locked-keyring gap the sibling delete paths close. Noop on the
+        // file backend.
+        ensure_unlocked(&keyring).await?;
 
         let mut attributes = HashMap::new();
         attributes.insert("application", APP_ID);
@@ -461,12 +495,26 @@ mod tests {
     }
 
     #[test]
-    fn is_locked_error_rejects_non_locked_error() {
-        // A dismissed prompt, a transport error, a missing service — none of these
-        // mean "locked". The classifier must return false so the UI shows a
-        // generic failure message, not the unlock hint.
+    fn is_locked_error_treats_dismissed_as_locked() {
+        // Canceling the unlock prompt the collection itself raised means the
+        // keyring stayed locked, so the classifier must return true — the
+        // user-facing hint ("keyring locked") is the right message, not a
+        // generic one. The prompt only appears because the collection was
+        // locked, so Dismissed here implies locked.
         let dismissed: anyhow::Error =
             anyhow::Error::new(oo7::Error::DBus(oo7::dbus::Error::Dismissed));
-        assert!(!is_locked_error(&dismissed));
+        assert!(
+            is_locked_error(&dismissed),
+            "a dismissed unlock prompt means the keyring stayed locked"
+        );
+    }
+
+    #[test]
+    fn is_locked_error_rejects_unrelated_error() {
+        // A transport error or a missing item is not a lock condition — the
+        // classifier must return false so the UI shows a generic failure.
+        let not_found: anyhow::Error =
+            anyhow::Error::new(oo7::Error::DBus(oo7::dbus::Error::NotFound("x".into())));
+        assert!(!is_locked_error(&not_found));
     }
 }

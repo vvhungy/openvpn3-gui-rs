@@ -157,4 +157,41 @@ mod tests {
         assert_eq!(next_attempt(&mut state, t, path_b), 1);
         assert_eq!(next_attempt(&mut state, t, path_a), 3);
     }
+
+    // S37-T2: a manual Disconnect (or Remove) clears the config's budget entry,
+    // so a reconnect within the 5-min window starts fresh at 1, not at the
+    // count the abandoned session reached. Models the clear sites in
+    // actions.rs (Disconnect, RemoveConfig) and status_handler (lockout,
+    // connect-success) — all do `state.remove(&config_path)`.
+    #[test]
+    fn remove_key_resets_budget_within_window() {
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t0 = Instant::now();
+        // Two failures, 10s apart — well inside the window.
+        assert_eq!(
+            next_attempt(&mut state, t0, "/net/openvpn/v3/configuration/a1"),
+            1
+        );
+        assert_eq!(
+            next_attempt(
+                &mut state,
+                t0 + Duration::from_secs(10),
+                "/net/openvpn/v3/configuration/a1"
+            ),
+            2
+        );
+        // User disconnects → clear (as actions.rs does). Without this, a
+        // reconnect 20s in would hit attempt 3 (instant lockout).
+        state.remove("/net/openvpn/v3/configuration/a1");
+        // Reconnect 20s after the second failure — still inside the window, but
+        // the entry is gone, so next_attempt sees a brand-new config (count 1).
+        assert_eq!(
+            next_attempt(
+                &mut state,
+                t0 + Duration::from_secs(30),
+                "/net/openvpn/v3/configuration/a1"
+            ),
+            1
+        );
+    }
 }
