@@ -81,13 +81,10 @@ pub(crate) fn handle_tray_action(
             // status_handler. Poison-tolerant: a poisoned lock is best-effort
             // skip (worst case the stale window holds — safe).
             if let Some(config_path) = tray
-                .update(|t| {
-                    t.sessions.get(session_path).map(|s| s.config_path.clone())
-                })
+                .update(|t| t.sessions.get(session_path).map(|s| s.config_path.clone()))
                 .flatten()
                 && !config_path.is_empty()
-                && let Ok(mut attempts) =
-                    super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
+                && let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
             {
                 attempts.remove(&config_path);
             }
@@ -160,9 +157,7 @@ pub(crate) fn handle_tray_action(
             // 5-min stale window (harmless, since the path is gone, but the
             // map would grow without bound across many imports/removes).
             // Keyed on path; poison-tolerant best-effort.
-            if let Ok(mut attempts) =
-                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
-            {
+            if let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock() {
                 attempts.remove(&config_path);
             }
 
