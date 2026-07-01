@@ -71,6 +71,26 @@ pub(crate) fn handle_tray_action(
             if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
                 set.insert(session_path.clone());
             }
+            // Reset this config's auth-retry budget. A manual Disconnect is a
+            // clean-slate signal: if the user reconnects and mistypes the
+            // password again they should get the full 3 attempts, not be
+            // locked out by failures from the just-abandoned session inside
+            // the 5-min window. Keyed on the config path (same scheme as
+            // next_attempt); an empty path (session already gone) skips.
+            // Mirrors the clear-on-lockout and clear-on-connect sites in
+            // status_handler. Poison-tolerant: a poisoned lock is best-effort
+            // skip (worst case the stale window holds — safe).
+            if let Some(config_path) = tray
+                .update(|t| {
+                    t.sessions.get(session_path).map(|s| s.config_path.clone())
+                })
+                .flatten()
+                && !config_path.is_empty()
+                && let Ok(mut attempts) =
+                    super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
+            {
+                attempts.remove(&config_path);
+            }
             let dbus = dbus.clone();
             let session_path = session_path.clone();
             glib::spawn_future_local(async move {
@@ -134,6 +154,17 @@ pub(crate) fn handle_tray_action(
             let dbus = dbus.clone();
             let config_path = config_path.clone();
             let tray = tray.clone();
+
+            // Drop this config's auth-retry budget when the config is removed
+            // — otherwise its counter lingers in CREDENTIAL_ATTEMPTS for the
+            // 5-min stale window (harmless, since the path is gone, but the
+            // map would grow without bound across many imports/removes).
+            // Keyed on path; poison-tolerant best-effort.
+            if let Ok(mut attempts) =
+                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
+            {
+                attempts.remove(&config_path);
+            }
 
             // Get config name for confirmation dialog
             let name = tray
