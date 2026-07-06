@@ -245,19 +245,42 @@ fn live_set_elements(nftables: &[serde_json::Value], set_name: &str) -> Option<V
             .iter()
             .map(|e| match e {
                 serde_json::Value::String(s) => s.clone(),
-                obj => {
-                    // Prefix object: { "prefix": "10.0.0.0", "len": 8 }
-                    let prefix = obj.get("prefix").and_then(|p| p.as_str());
-                    let len = obj.get("len").and_then(|l| l.as_u64());
-                    match (prefix, len) {
-                        (Some(p), Some(n)) => format!("{p}/{n}"),
-                        _ => String::new(),
-                    }
-                }
+                obj => prefix_element_to_cidr(obj),
             })
             .filter(|s| !s.is_empty())
             .collect(),
     )
+}
+
+/// Normalize one set element that is a prefix object to `"addr/len"` CIDR
+/// form. `nft -j` emits interval-set prefixes in several shapes across
+/// versions; accept all three so drift detection survives whichever the
+/// installed nft emits:
+/// - nested object: `{ "prefix": { "addr": "10.0.0.0", "len": 8 } }` (modern)
+/// - flat:          `{ "prefix": "10.0.0.0", "len": 8 }` (older / libnft docs)
+/// - array:         `{ "prefix": ["10.0.0.0", 8] }`
+///
+/// Returns empty for any other shape; the caller filters empties.
+fn prefix_element_to_cidr(obj: &serde_json::Value) -> String {
+    let Some(prefix) = obj.get("prefix") else {
+        return String::new();
+    };
+    let (addr, len): (Option<&str>, Option<u64>) = match prefix {
+        serde_json::Value::Object(o) => (
+            o.get("addr").and_then(|v| v.as_str()),
+            o.get("len").and_then(|v| v.as_u64()),
+        ),
+        serde_json::Value::Array(arr) => (
+            arr.first().and_then(|v| v.as_str()),
+            arr.get(1).and_then(|v| v.as_u64()),
+        ),
+        serde_json::Value::String(p) => (Some(p.as_str()), obj.get("len").and_then(|v| v.as_u64())),
+        _ => (None, None),
+    };
+    match (addr, len) {
+        (Some(a), Some(n)) => format!("{a}/{n}"),
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -476,5 +499,35 @@ mod tests {
     fn diff_malformed_json_treated_as_no_table() {
         let report = diff_bypass_set((&["10.0.0.0/8"], &[]), "not json at all");
         assert_eq!(report.v4_missing, vec!["10.0.0.0/8"]);
+    }
+
+    // nft -j emits interval-set prefixes in multiple shapes across versions.
+    // All three must normalize to the same CIDR string or drift fires on a
+    // perfectly intact live set (the bug fixed after first real-device test).
+
+    /// Modern nftables: `{ "prefix": { "addr": "10.10.10.0", "len": 24 } }`.
+    const NESTED_PREFIX_JSON: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":12},"set":{"family":"inet","name":"bypass_set","table":"openvpn3_killswitch","handle":5,"type":"ipv4_addr","flags":["interval"],"elem":[{"prefix":{"addr":"10.10.10.0","len":24}}]}}]}"#;
+
+    #[test]
+    fn diff_handles_nested_prefix_object() {
+        let report = diff_bypass_set((&["10.10.10.0/24"], &[]), NESTED_PREFIX_JSON);
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    /// Older / alternate: `{ "prefix": ["10.10.10.0", 24] }`.
+    const ARRAY_PREFIX_JSON: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":12},"set":{"family":"inet","name":"bypass_set","table":"openvpn3_killswitch","handle":5,"type":"ipv4_addr","flags":["interval"],"elem":[{"prefix":["10.10.10.0",24]}]}}]}"#;
+
+    #[test]
+    fn diff_handles_array_prefix() {
+        let report = diff_bypass_set((&["10.10.10.0/24"], &[]), ARRAY_PREFIX_JSON);
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    #[test]
+    fn diff_mixed_shapes_in_one_set() {
+        // Live: nested prefix + bare host + array prefix; desired = all three.
+        const MIXED: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":1},"set":{"family":"inet","name":"bypass_set","table":"openvpn3_killswitch","handle":1,"type":"ipv4_addr","flags":["interval"],"elem":[{"prefix":{"addr":"10.0.0.0","len":8}},"1.2.3.4",{"prefix":["192.168.1.0",24]}]}}]}"#;
+        let report = diff_bypass_set((&["10.0.0.0/8", "1.2.3.4", "192.168.1.0/24"], &[]), MIXED);
+        assert!(report.is_clean(), "{report:?}");
     }
 }
