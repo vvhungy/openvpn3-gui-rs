@@ -86,18 +86,27 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
             tray_for_timer.update(|_| {});
 
             // Drift detection (S38 T2): once per stats cycle, while at least
-            // one session is connected AND bypass is currently Active, verify
+            // one session is connected AND bypass is Active or Drifted, verify
             // the live nft sets still hold the desired CIDR list. Cheap D-Bus
             // round-trip that runs at the user-configured stats interval (30s
             // default). On detected drift → tray `Drifted` + persistent notify.
-            // Skipped when bypass is Off/Failed/Drifted (no point re-checking a
-            // non-active state) or no session is connected (kill-switch not
-            // enforcing anyway). A helper that lacks the method (pre-0.3.14)
-            // errors the call → we no-op and stop polling for the session.
-            let bypass_active = tray_for_timer
-                .update(|t| matches!(t.bypass_state, crate::tray::BypassState::Active { .. }))
+            // Must keep verifying while Drifted, not just Active, so the
+            // `is_clean()` recovery path stays reachable once the missing
+            // element is restored (otherwise Drifted is a one-way trap).
+            // Skipped when bypass is Off/Failed (no live set to reconcile) or
+            // no session is connected (kill-switch not enforcing anyway). A
+            // helper that lacks the method (pre-0.3.14) errors the call → we
+            // no-op and stop polling for the session.
+            let bypass_live = tray_for_timer
+                .update(|t| {
+                    matches!(
+                        t.bypass_state,
+                        crate::tray::BypassState::Active { .. }
+                            | crate::tray::BypassState::Drifted { .. }
+                    )
+                })
                 .unwrap_or(false);
-            if bypass_active && any_connected {
+            if bypass_live && any_connected {
                 let all = settings.bypass_cidrs();
                 let disabled = settings.bypass_cidrs_disabled();
                 let enabled = crate::settings::enabled_cidrs(&all, &disabled);
