@@ -131,6 +131,30 @@ pub fn show_bypass_failed_notification() {
 /// instead of escaping, so this is persistent (`urgency=critical`,
 /// `expire_timeout=0`). Shares the `BYPASS_STATE_KEY` dedup slot with the
 /// apply notifications so it replaces rather than stacks.
+/// Fired when drift detection (S38 T2) finds the live nft sets have come back
+/// into sync with the desired list — the external actor that removed CIDRs has
+/// been undone (reconnect, manual `nft add element`, firewall-manager reload).
+/// One-shot (`expire_timeout=-1`, urgency normal): good news is informational.
+/// Shares `BYPASS_STATE_KEY` so it replaces the persistent drift toast rather
+/// than leaving a stale "missing" warning on screen after recovery.
+pub fn show_bypass_recovered_notification() {
+    if !Settings::new().show_notifications() {
+        return;
+    }
+    glib::spawn_future_local(async move {
+        if let Err(e) = send_bypass_state(
+            "Split Tunneling Restored",
+            "Bypass CIDRs match the firewall again.",
+            1,
+            -1,
+        )
+        .await
+        {
+            warn!("Failed to send bypass recovered notification: {}", e);
+        }
+    });
+}
+
 pub fn show_bypass_drift_notification(missing: &[String]) {
     if !Settings::new().show_notifications() {
         return;

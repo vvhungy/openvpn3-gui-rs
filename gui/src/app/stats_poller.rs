@@ -115,15 +115,27 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                     crate::dbus::killswitch::verify_bypass_set(desired_v4, desired_v6).await
                 {
                     if report.is_clean() {
-                        tray_for_timer.update(|t| {
-                            // Clear a prior drift state once sets match again.
-                            if matches!(t.bypass_state, crate::tray::BypassState::Drifted { .. }) {
-                                t.bypass_state = crate::tray::BypassState::Active {
-                                    applied: enabled.len(),
-                                    failed: 0,
-                                };
-                            }
-                        });
+                        let was_drifted = tray_for_timer
+                            .update(|t| {
+                                // Clear a prior drift state once sets match again.
+                                if matches!(
+                                    t.bypass_state,
+                                    crate::tray::BypassState::Drifted { .. }
+                                ) {
+                                    t.bypass_state = crate::tray::BypassState::Active {
+                                        applied: enabled.len(),
+                                        failed: 0,
+                                    };
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        if was_drifted {
+                            tracing::info!("bypass drift cleared — live sets match desired again");
+                            crate::dialogs::show_bypass_recovered_notification();
+                        }
                     } else {
                         let missing: Vec<String> = report
                             .v4_missing
