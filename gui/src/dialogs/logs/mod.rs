@@ -6,8 +6,9 @@
 //! tailed via a D-Bus `Log` signal subscription.
 //!
 //! No testable pure surface here — pure formatting (`format_log_line`) lives
-//! in the `format` submodule with its own unit tests. This file is GTK widget
-//! builder + async D-Bus stream wiring.
+//! in the `format` submodule with its own unit tests, and the search/level
+//! filter rules live in the `filter` submodule with its own unit tests. This
+//! file is GTK widget builder + async D-Bus stream wiring.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -25,9 +26,11 @@ use crate::app::log_buffer;
 use crate::settings::Settings;
 
 mod export;
+mod filter;
 mod format;
 
 use export::show_export_dialog;
+use filter::{any_passes_filter, level_index_to_min, passes_filter};
 use format::format_log_line;
 
 /// Per-tab state. Holds the full unfiltered entry vec so search/level
@@ -42,28 +45,6 @@ struct TabState {
     search_text: Rc<RefCell<String>>,
     level_min: Rc<RefCell<u32>>,
     export_btn: gtk4::Button,
-}
-
-/// Returns true if any entry in `entries` passes the current filter.
-fn any_passes_filter(entries: &[log_buffer::LogEntry], search: &str, level_min: u32) -> bool {
-    entries.iter().any(|e| passes_filter(e, search, level_min))
-}
-
-/// Returns true if the entry passes the current filter pair (substring
-/// match on message, case-insensitive; category >= level_min).
-fn passes_filter(entry: &log_buffer::LogEntry, search: &str, level_min: u32) -> bool {
-    if entry.category < level_min {
-        return false;
-    }
-    if !search.is_empty()
-        && !entry
-            .message
-            .to_lowercase()
-            .contains(&search.to_lowercase())
-    {
-        return false;
-    }
-    true
 }
 
 /// Rebuild the visible TextBuffer from the unfiltered entries vec by
@@ -81,15 +62,6 @@ fn rebuild_buffer(
         }
     }
     buffer.set_text(&text);
-}
-
-/// Map DropDown selected index to the min category threshold.
-fn level_index_to_min(idx: u32) -> u32 {
-    match idx {
-        1 => 5,
-        2 => 6,
-        _ => 0,
-    }
 }
 
 /// Show the tabbed log viewer window.
