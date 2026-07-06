@@ -16,12 +16,17 @@ use tracing::error;
 /// from the helper (S28 T3): a partially-applied apply lands here with
 /// `failed > 0` rather than collapsing to `Failed`. `Failed` is reserved for
 /// system-wide apply failures (helper missing, gateway capture, rp_filter,
-/// table populate) where no per-CIDR detail is available.
+/// table populate) where no per-CIDR detail is available. `Drifted { missing }`
+/// (S38 T2) means the kill-switch table is present but live nft sets have
+/// fewer CIDRs than desired — external tamper or partial teardown between
+/// applies. Distinct from `Failed` (apply never succeeded) so the tray can
+/// name the right remediation ("reconnect" vs "check what deleted the set").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BypassState {
     Off,
     Active { applied: usize, failed: usize },
     Failed,
+    Drifted { missing: usize },
 }
 
 /// Action to dispatch from tray menu clicks back to the GTK app

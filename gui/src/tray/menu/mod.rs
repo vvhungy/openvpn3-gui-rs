@@ -47,6 +47,9 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
         BypassState::Off => "🌐 Split tunnel: Off".to_string(),
         BypassState::Active { applied, failed } => format_bypass_active(*applied, *failed),
         BypassState::Failed => "⚠️ Split tunnel: Apply failed".to_string(),
+        BypassState::Drifted { missing } => {
+            format!("⚠️ Split tunnel: {missing} CIDR(s) missing from firewall")
+        }
     };
     items.push(
         StandardItem {

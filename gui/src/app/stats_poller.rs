@@ -33,6 +33,8 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                 })
                 .unwrap_or_default();
 
+            let any_connected = session_paths.iter().any(|(_, c)| *c);
+
             let auto_reconnect = settings.auto_reconnect();
             let cooldown_secs = (settings.auto_reconnect_delay_seconds() as u64) * 2;
 
@@ -82,6 +84,59 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
             }
 
             tray_for_timer.update(|_| {});
+
+            // Drift detection (S38 T2): once per stats cycle, while at least
+            // one session is connected AND bypass is currently Active, verify
+            // the live nft sets still hold the desired CIDR list. Cheap D-Bus
+            // round-trip that runs at the user-configured stats interval (30s
+            // default). On detected drift → tray `Drifted` + persistent notify.
+            // Skipped when bypass is Off/Failed/Drifted (no point re-checking a
+            // non-active state) or no session is connected (kill-switch not
+            // enforcing anyway). A helper that lacks the method (pre-0.3.14)
+            // errors the call → we no-op and stop polling for the session.
+            let bypass_active = tray_for_timer
+                .update(|t| matches!(t.bypass_state, crate::tray::BypassState::Active { .. }))
+                .unwrap_or(false);
+            if bypass_active && any_connected {
+                let all = settings.bypass_cidrs();
+                let disabled = settings.bypass_cidrs_disabled();
+                let enabled = crate::settings::enabled_cidrs(&all, &disabled);
+                let (desired_v4, desired_v6) = crate::settings::split_v4_v6(&enabled);
+                if let Some(report) =
+                    crate::dbus::killswitch::verify_bypass_set(desired_v4, desired_v6).await
+                {
+                    if report.is_clean() {
+                        tray_for_timer.update(|t| {
+                            // Clear a prior drift state once sets match again.
+                            if matches!(t.bypass_state, crate::tray::BypassState::Drifted { .. }) {
+                                t.bypass_state = crate::tray::BypassState::Active {
+                                    applied: enabled.len(),
+                                    failed: 0,
+                                };
+                            }
+                        });
+                    } else {
+                        let missing: Vec<String> = report
+                            .v4_missing
+                            .iter()
+                            .chain(&report.v6_missing)
+                            .cloned()
+                            .collect();
+                        let missing_count = missing.len();
+                        tracing::warn!(
+                            missing_count,
+                            extra = report.extra.len(),
+                            "bypass drift detected by periodic verify"
+                        );
+                        tray_for_timer.update(|t| {
+                            t.bypass_state = crate::tray::BypassState::Drifted {
+                                missing: missing_count,
+                            };
+                        });
+                        crate::dialogs::show_bypass_drift_notification(&missing);
+                    }
+                }
+            }
         }
     });
 }

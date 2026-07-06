@@ -123,3 +123,37 @@ pub fn show_bypass_failed_notification() {
         }
     });
 }
+
+/// Fired when drift detection (S38 T2) finds the live nft sets have fewer
+/// CIDRs than desired — an external actor (firewall manager, manual `nft del
+/// element`, partial teardown) removed them while the kill-switch icon still
+/// showed "Active". Bypassed traffic to the missing CIDRs hits `policy drop`
+/// instead of escaping, so this is persistent (`urgency=critical`,
+/// `expire_timeout=0`). Shares the `BYPASS_STATE_KEY` dedup slot with the
+/// apply notifications so it replaces rather than stacks.
+pub fn show_bypass_drift_notification(missing: &[String]) {
+    if !Settings::new().show_notifications() {
+        return;
+    }
+    let count = missing.len();
+    if count == 0 {
+        return;
+    }
+    const MAX_LISTED: usize = 5;
+    let listed: Vec<String> = missing.iter().take(MAX_LISTED).cloned().collect();
+    let tail = if count > MAX_LISTED {
+        format!(" (+{} more)", count - MAX_LISTED)
+    } else {
+        String::new()
+    };
+    let body = format!(
+        "{count} bypass CIDR(s) missing from the firewall — bypassed hosts \
+         may not route correctly: {}{tail}\nReconnect to re-install them.",
+        listed.join(", ")
+    );
+    glib::spawn_future_local(async move {
+        if let Err(e) = send_bypass_state("Split Tunneling Drifted", &body, 2, 0).await {
+            warn!("Failed to send bypass drift notification: {}", e);
+        }
+    });
+}

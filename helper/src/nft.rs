@@ -13,7 +13,7 @@
 
 use std::fmt::Write as _;
 
-const TABLE: &str = "openvpn3_killswitch";
+pub const TABLE: &str = "openvpn3_killswitch";
 const RFC1918: &str = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16";
 
 /// Build the nft script that creates the kill-switch table.
@@ -113,6 +113,151 @@ pub fn add_rules_script(
 /// layer (helper swallows "no such table" errors from `nft`).
 pub const fn remove_rules_script() -> &'static str {
     "delete table inet openvpn3_killswitch\n"
+}
+
+/// Drift report: the difference between the *desired* bypass CIDR list (what
+/// the GUI owns in GSettings and passed to `VerifyBypassSet`) and the *live*
+/// nft sets (parsed from `nft -j list table inet openvpn3_killswitch`).
+///
+/// `missing` = desired-but-not-live → the leak: bypassed traffic to those
+/// CIDRs hits `policy drop` instead of escaping, with no signal until the
+/// user notices a host stopped working. `extra` = live-but-not-desired →
+/// tamper-add (an external actor widened the bypass set); surfaced for
+/// visibility but not itself a connectivity hazard. Each vector holds CIDR
+/// strings as they appeared in the respective input (not re-canonicalized —
+/// the caller already canonicalizes at the GSettings trust boundary).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BypassDriftReport {
+    pub v4_missing: Vec<String>,
+    pub v6_missing: Vec<String>,
+    pub extra: Vec<String>,
+}
+
+#[cfg(test)]
+impl BypassDriftReport {
+    /// True when the live sets match the desired list exactly (no leak, no
+    /// tamper). Test-only helper — the GUI gets the three vecs over D-Bus and
+    /// does its own emptiness check.
+    fn is_clean(&self) -> bool {
+        self.v4_missing.is_empty() && self.v6_missing.is_empty() && self.extra.is_empty()
+    }
+}
+
+/// Compare the desired bypass CIDR list against the live nft sets and return
+/// the drift. Pure: takes the already-fetched `nft -j` JSON string (the one
+/// impure shell call lives in `service.rs`), so this fn is unit-testable
+/// against fixture JSON.
+///
+/// `desired` semantics: `(v4, v6)` are the CIDRs the GUI believes should be
+/// installed. `live_json` is the raw stdout of `nft -j list table inet
+/// openvpn3_killswitch`. Sets are matched by name (`bypass_set`, `bypass_set_v6`)
+/// — the same names `add_rules_script` emits. `nft` lists set elements as
+/// objects with a `prefix` field (`{ "prefix": "10.0.0.0", "len": 8 }`) for
+/// `/N` CIDRs under `flags interval`; single hosts appear as bare strings.
+/// Both shapes are normalized to the input CIDR's string form for comparison.
+///
+/// Tolerates a missing table (empty/invalid JSON, or the table absent) by
+/// reporting every desired CIDR as missing — the caller distinguishes "table
+/// gone" (kill-switch off, not drift) from "table present but drifted" by
+/// whether the parse found the table at all. Here we only compute the diff.
+pub fn diff_bypass_set(desired: (&[&str], &[&str]), live_json: &str) -> BypassDriftReport {
+    let (desired_v4, desired_v6) = desired;
+    let parsed = serde_json::from_str::<serde_json::Value>(live_json).ok();
+
+    // `nft -j list table` returns `{"nftables": [ {table}, {set}, {set}, ... ]}`
+    // — the table object and each set object are sibling array entries, not
+    // nested. A missing/unparseable table → every desired CIDR is "missing".
+    let nftables = parsed.as_ref().and_then(|v| v.get("nftables")?.as_array());
+
+    let has_table = nftables
+        .map(|arr| {
+            arr.iter().any(|obj| {
+                obj.get("table")
+                    .and_then(|t| t.get("name"))
+                    .and_then(|n| n.as_str())
+                    == Some(TABLE)
+            })
+        })
+        .unwrap_or(false);
+
+    let live_v4 = if has_table {
+        nftables
+            .and_then(|arr| live_set_elements(arr, "bypass_set"))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let live_v6 = if has_table {
+        nftables
+            .and_then(|arr| live_set_elements(arr, "bypass_set_v6"))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let v4_missing = desired_v4
+        .iter()
+        .filter(|c| !live_v4.iter().any(|l| l.as_str() == &***c))
+        .map(|c| c.to_string())
+        .collect();
+    let v6_missing = desired_v6
+        .iter()
+        .filter(|c| !live_v6.iter().any(|l| l.as_str() == &***c))
+        .map(|c| c.to_string())
+        .collect();
+
+    // `extra`: live elements that aren't in the desired list (tamper-add).
+    // Span both families into one vec — surfaced for visibility, not a hazard.
+    let mut extra = Vec::new();
+    for el in &live_v4 {
+        if !desired_v4.contains(&el.as_str()) {
+            extra.push(el.clone());
+        }
+    }
+    for el in &live_v6 {
+        if !desired_v6.contains(&el.as_str()) {
+            extra.push(el.clone());
+        }
+    }
+
+    BypassDriftReport {
+        v4_missing,
+        v6_missing,
+        extra,
+    }
+}
+
+/// Extract the element strings of a named set from the `nftables` sibling
+/// array. Handles the two element shapes `nft -j` emits under `flags interval`:
+/// bare strings (`"1.2.3.4"`) and prefix objects
+/// (`{ "prefix": "10.0.0.0", "len": 8 }` → `"10.0.0.0/8"`). Returns `None`
+/// when the set is absent from the array (declared with no elements, or not
+/// declared at all because that family had no CIDRs at apply time).
+fn live_set_elements(nftables: &[serde_json::Value], set_name: &str) -> Option<Vec<String>> {
+    let set = nftables.iter().find_map(|obj| {
+        let s = obj.get("set")?;
+        let name = s.get("name")?.as_str()?;
+        (name == set_name).then_some(s)
+    })?;
+    let elems = set.get("elem")?.as_array()?;
+    Some(
+        elems
+            .iter()
+            .map(|e| match e {
+                serde_json::Value::String(s) => s.clone(),
+                obj => {
+                    // Prefix object: { "prefix": "10.0.0.0", "len": 8 }
+                    let prefix = obj.get("prefix").and_then(|p| p.as_str());
+                    let len = obj.get("len").and_then(|l| l.as_u64());
+                    match (prefix, len) {
+                        (Some(p), Some(n)) => format!("{p}/{n}"),
+                        _ => String::new(),
+                    }
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -264,5 +409,72 @@ mod tests {
         let bypass_pos = s.find("ip daddr @bypass_set accept").unwrap();
         let tunnel_pos = s.find("oifname \"tun0\" accept").unwrap();
         assert!(bypass_pos < tunnel_pos);
+    }
+
+    // --- diff_bypass_set: drift detection (S38 T2) ---
+
+    /// nft -j table object with one v4 set carrying two CIDRs (one prefix,
+    /// one single host) + one v6 prefix. The two element shapes nft emits.
+    const CLEAN_TABLE_JSON: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":12},"set":{"family":"inet","name":"bypass_set","table":"openvpn3_killswitch","handle":5,"type":"ipv4_addr","flags":["interval"],"elem":[{"prefix":"10.0.0.0","len":8},"1.2.3.4"]}},{"set":{"family":"inet","name":"bypass_set_v6","table":"openvpn3_killswitch","handle":6,"type":"ipv6_addr","flags":["interval"],"elem":[{"prefix":"fd00::","len":8}]}}]}"#;
+
+    #[test]
+    fn diff_clean_when_live_matches_desired() {
+        let report = diff_bypass_set(
+            (&["10.0.0.0/8", "1.2.3.4"], &["fd00::/8"]),
+            CLEAN_TABLE_JSON,
+        );
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    #[test]
+    fn diff_flags_v4_cidr_missing_from_live() {
+        // Desired has an extra v4 CIDR the live set lacks → it's the leak.
+        let report = diff_bypass_set(
+            (&["10.0.0.0/8", "1.2.3.4", "5.6.7.0/24"], &[]),
+            CLEAN_TABLE_JSON,
+        );
+        assert!(!report.is_clean());
+        assert_eq!(report.v4_missing, vec!["5.6.7.0/24"]);
+        assert!(report.v6_missing.is_empty());
+    }
+
+    #[test]
+    fn diff_flags_v6_cidr_missing_from_live() {
+        let report = diff_bypass_set((&[], &["fd00::/8", "2001:db8::/32"]), CLEAN_TABLE_JSON);
+        assert_eq!(report.v6_missing, vec!["2001:db8::/32"]);
+        assert!(report.v4_missing.is_empty());
+    }
+
+    #[test]
+    fn diff_flags_extra_element_tamper_add() {
+        // Live set has an element the desired list doesn't → external widen.
+        // Here desired drops 1.2.3.4 but it's still in live → reported as extra.
+        let report = diff_bypass_set((&["10.0.0.0/8"], &["fd00::/8"]), CLEAN_TABLE_JSON);
+        assert_eq!(report.extra, vec!["1.2.3.4"]);
+        assert!(report.v4_missing.is_empty());
+    }
+
+    #[test]
+    fn diff_no_table_reports_all_desired_missing() {
+        // Table absent (empty JSON) → every desired CIDR is missing, no extra.
+        let report = diff_bypass_set((&["10.0.0.0/8", "1.2.3.4"], &["fd00::/8"]), "{}");
+        assert_eq!(report.v4_missing, vec!["10.0.0.0/8", "1.2.3.4"]);
+        assert_eq!(report.v6_missing, vec!["fd00::/8"]);
+        assert!(report.extra.is_empty());
+    }
+
+    #[test]
+    fn diff_empty_everywhere_is_clean() {
+        // Zero-data state: no desired AND live sets absent → clean, no false drift.
+        // A table with no bypass sets declared (e.g. applied with empty CIDR lists).
+        const EMPTY_SETS_JSON: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":12}}]}"#;
+        let report = diff_bypass_set((&[], &[]), EMPTY_SETS_JSON);
+        assert!(report.is_clean());
+    }
+
+    #[test]
+    fn diff_malformed_json_treated_as_no_table() {
+        let report = diff_bypass_set((&["10.0.0.0/8"], &[]), "not json at all");
+        assert_eq!(report.v4_missing, vec!["10.0.0.0/8"]);
     }
 }
