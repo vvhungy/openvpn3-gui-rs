@@ -3,9 +3,8 @@
 //! Subscribes to per-session `StatusChange` signals from OpenVPN3 backends
 //! and dispatches each status transition to the appropriate handler.
 //!
-//! No testable pure surface — async D-Bus event loop. Pure transition logic
-//! (e.g. stall detection) lives in `crate::status::stats_poller` with its own
-//! unit tests.
+//! The signal loop itself is async D-Bus with no unit surface, but the pure
+//! transition logic (`apply_status_transition`) is extracted and tested below.
 
 use futures::StreamExt;
 use tracing::{info, warn};
@@ -19,6 +18,37 @@ pub(crate) use killswitch_glue::apply_kill_switch;
 
 /// Fallback label when config/profile name is unavailable.
 const FALLBACK_NAME: &str = "VPN Connection";
+
+/// Update a session's status and reset the stats/idle baseline when the
+/// transition crosses the Connected boundary. Pure over `&mut SessionInfo`
+/// — no async, no D-Bus, no tray — so the transition rules are unit-testable.
+///
+/// Two directional resets:
+/// - **into** Connected (from a non-connected state): zero byte counters +
+///   clear idle. Frozen counters from before Pause would otherwise make the
+///   first post-Resume poll see a zero delta and falsely trip `idle_since`.
+/// - **out of** Connected (→ Error/Disconnected/Paused): clear the idle clock
+///   and warning flag. A stale `idle_since` would win the `current_icon()`
+///   priority check (`error > loading`) and mask the error icon.
+///
+/// Called on every StatusChange before the specialized auth/error/connected
+/// branches fire, so the menu label ("Authentication required", etc.) stays
+/// current even when a branch `continue`s before the generic path.
+pub(super) fn apply_status_transition(session: &mut SessionInfo, status: SessionStatus) {
+    let was_connected = session.status.is_connected();
+    session.status = status;
+    let now_connected = session.status.is_connected();
+    if !was_connected && now_connected {
+        session.last_bytes_in = 0;
+        session.last_bytes_out = 0;
+        session.idle_started_at = None;
+        session.idle_since = None;
+    }
+    if was_connected && !now_connected {
+        session.idle_started_at = None;
+        session.idle_since = None;
+    }
+}
 
 /// Subscribe to StatusChange signals and spawn the handler loop.
 ///
@@ -119,31 +149,10 @@ pub(super) async fn setup_status_handler(
                     // handlers dispatch dialogs and `continue` before the generic path.
                     {
                         let p = path.clone();
-                        let msg = message.to_string();
+                        let status = SessionStatus::new(major, minor, message.to_string());
                         tray_for_status.update(move |t| {
                             if let Some(session) = t.sessions.get_mut(&p) {
-                                let was_connected = session.status.is_connected();
-                                session.status = SessionStatus::new(major, minor, msg);
-                                // Reset stats baseline when (re)entering Connected so the
-                                // next poll sees a non-zero delta. Frozen counters from
-                                // before Pause would otherwise trigger idle_since on the
-                                // first poll after Resume and flip the icon to "loading".
-                                if !was_connected && session.status.is_connected() {
-                                    session.last_bytes_in = 0;
-                                    session.last_bytes_out = 0;
-                                    session.idle_started_at = None;
-                                    session.idle_since = None;
-                                }
-                                // The idle clock/warning are only meaningful while
-                                // Connected. On any drop out of Connected (Error,
-                                // Disconnected, Paused) clear both — otherwise the stale
-                                // `idle_since` wins the `current_icon()` priority check
-                                // (`error > loading`) and masks the error icon with the
-                                // idle/warning icon.
-                                if was_connected && !session.status.is_connected() {
-                                    session.idle_started_at = None;
-                                    session.idle_since = None;
-                                }
+                                apply_status_transition(session, status.clone());
                             }
                         });
                     }
@@ -476,4 +485,91 @@ pub(super) async fn setup_status_handler(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dbus::types::{StatusMajor, StatusMinor};
+    use crate::tray::SessionInfo;
+
+    fn connected() -> SessionStatus {
+        SessionStatus {
+            major: StatusMajor::Connection,
+            minor: StatusMinor::ConnConnected,
+        }
+    }
+
+    fn failed() -> SessionStatus {
+        SessionStatus {
+            major: StatusMajor::Connection,
+            minor: StatusMinor::ConnFailed,
+        }
+    }
+
+    /// Seed a session whose counters are non-zero + idle flags set, so a reset
+    /// is observable. Starts Connected since that's the only state whose
+    /// transitions the reset logic cares about.
+    fn seeded_connected() -> SessionInfo {
+        SessionInfo {
+            session_path: "/t".into(),
+            config_path: String::new(),
+            config_name: "T".into(),
+            status: connected(),
+            connected_at: None,
+            bytes_in: 999,
+            bytes_out: 888,
+            last_bytes_in: 999,
+            last_bytes_out: 888,
+            idle_started_at: Some(std::time::Instant::now()),
+            idle_since: Some(std::time::Instant::now()),
+            auto_reconnect_attempted_at: None,
+            kill_switch_active: false,
+        }
+    }
+
+    #[test]
+    fn into_connected_resets_baseline_and_idle() {
+        // Non-connected seed → Connected: frozen counters + idle flags clear.
+        let mut s = seeded_connected();
+        s.status = failed();
+        s.last_bytes_in = 100;
+        s.idle_since = Some(std::time::Instant::now());
+        apply_status_transition(&mut s, connected());
+        assert_eq!(s.last_bytes_in, 0);
+        assert_eq!(s.last_bytes_out, 0);
+        assert!(s.idle_started_at.is_none());
+        assert!(s.idle_since.is_none());
+        assert!(s.status.is_connected());
+    }
+
+    #[test]
+    fn out_of_connected_clears_idle_only() {
+        // Connected → Failed: idle flags clear but byte counters are untouched
+        // (a transition out of Connected is not a stats-baseline reset — the
+        // next connect re-zeroes them).
+        let mut s = seeded_connected();
+        apply_status_transition(&mut s, failed());
+        assert_eq!(s.last_bytes_in, 999, "counters preserved out of Connected");
+        assert!(s.idle_started_at.is_none());
+        assert!(s.idle_since.is_none());
+    }
+
+    #[test]
+    fn same_connected_state_no_reset() {
+        // Connected → Connected: no resets (was_connected && now_connected).
+        let mut s = seeded_connected();
+        let before = s.last_bytes_in;
+        apply_status_transition(&mut s, connected());
+        assert_eq!(s.last_bytes_in, before, "no reset on Connected→Connected");
+    }
+
+    #[test]
+    fn status_field_always_updated() {
+        // Even with no boundary reset, the new status must land so the menu
+        // reflects the current state before specialized branches dispatch.
+        let mut s = seeded_connected();
+        apply_status_transition(&mut s, failed());
+        assert!(!s.status.is_connected());
+    }
 }
