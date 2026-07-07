@@ -114,17 +114,25 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                 if let Some(report) =
                     crate::dbus::killswitch::verify_bypass_set(desired_v4, desired_v6).await
                 {
+                    use crate::tray::BypassState;
                     if report.is_clean() {
+                        // Recovery: restore the apply-outcome counts captured
+                        // when we entered Drifted, not a fabricated full-success
+                        // Active. Drift verifies set *membership*, a different
+                        // measurement than route apply-outcome — a partial apply
+                        // that then matched the (enabled) desired set must not be
+                        // silently upgraded to failed=0.
                         let was_drifted = tray_for_timer
                             .update(|t| {
-                                // Clear a prior drift state once sets match again.
-                                if matches!(
-                                    t.bypass_state,
-                                    crate::tray::BypassState::Drifted { .. }
-                                ) {
-                                    t.bypass_state = crate::tray::BypassState::Active {
-                                        applied: enabled.len(),
-                                        failed: 0,
+                                if let BypassState::Drifted {
+                                    prev_applied,
+                                    prev_failed,
+                                    ..
+                                } = t.bypass_state
+                                {
+                                    t.bypass_state = BypassState::Active {
+                                        applied: prev_applied,
+                                        failed: prev_failed,
                                     };
                                     true
                                 } else {
@@ -144,17 +152,58 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                             .cloned()
                             .collect();
                         let missing_count = missing.len();
+                        let extra_count = report.extra.len();
                         tracing::warn!(
                             missing_count,
-                            extra = report.extra.len(),
+                            extra = extra_count,
                             "bypass drift detected by periodic verify"
                         );
-                        tray_for_timer.update(|t| {
-                            t.bypass_state = crate::tray::BypassState::Drifted {
-                                missing: missing_count,
-                            };
-                        });
-                        crate::dialogs::show_bypass_drift_notification(&missing);
+                        // Re-arm guard: the gate was captured before the verify
+                        // await. A disconnect / split-tunnel toggle during that
+                        // window can have moved bypass_state to Off/Failed on the
+                        // single-threaded main loop; only transition into Drifted
+                        // from a still-live (Active/Drifted) state so we never
+                        // resurrect a torn-down kill-switch as Drifted. Preserve
+                        // the pre-drift apply counts for faithful recovery.
+                        let transitioned = tray_for_timer
+                            .update(|t| match t.bypass_state {
+                                BypassState::Active { applied, failed } => {
+                                    t.bypass_state = BypassState::Drifted {
+                                        missing: missing_count,
+                                        extra: extra_count,
+                                        prev_applied: applied,
+                                        prev_failed: failed,
+                                    };
+                                    true
+                                }
+                                BypassState::Drifted {
+                                    missing: prev_missing,
+                                    extra: prev_extra,
+                                    prev_applied,
+                                    prev_failed,
+                                } => {
+                                    // Already Drifted: only re-notify if the
+                                    // drift dimensions changed since last poll,
+                                    // so a persistent drift doesn't re-fire the
+                                    // critical toast every stats cycle (~30s).
+                                    let changed =
+                                        prev_missing != missing_count || prev_extra != extra_count;
+                                    t.bypass_state = BypassState::Drifted {
+                                        missing: missing_count,
+                                        extra: extra_count,
+                                        prev_applied,
+                                        prev_failed,
+                                    };
+                                    changed
+                                }
+                                // Off / Failed: bypass no longer live — the
+                                // captured gate is stale, drop this report.
+                                _ => false,
+                            })
+                            .unwrap_or(false);
+                        if transitioned {
+                            crate::dialogs::show_bypass_drift_notification(&missing, extra_count);
+                        }
                     }
                 }
             }

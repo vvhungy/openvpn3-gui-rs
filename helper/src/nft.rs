@@ -195,27 +195,38 @@ pub fn diff_bypass_set(desired: (&[&str], &[&str]), live_json: &str) -> BypassDr
         Vec::new()
     };
 
+    // Compare on a normalized key, not the raw string: nft lists a single
+    // host in an interval set as a bare address ("1.2.3.4"), while the desired
+    // list is canonicalized to include the implicit host prefix ("1.2.3.4/32").
+    // Stripping /32 (v4) and /128 (v6) from both sides makes the two encodings
+    // of one host compare equal, so a host-sized bypass entry no longer reads
+    // as permanently missing regardless of which shape the installed nft emits.
+    let live_v4_keys: Vec<String> = live_v4.iter().map(|l| host_key(l)).collect();
+    let live_v6_keys: Vec<String> = live_v6.iter().map(|l| host_key(l)).collect();
+
     let v4_missing = desired_v4
         .iter()
-        .filter(|c| !live_v4.iter().any(|l| l.as_str() == &***c))
+        .filter(|c| !live_v4_keys.iter().any(|l| l == &host_key(c)))
         .map(|c| c.to_string())
         .collect();
     let v6_missing = desired_v6
         .iter()
-        .filter(|c| !live_v6.iter().any(|l| l.as_str() == &***c))
+        .filter(|c| !live_v6_keys.iter().any(|l| l == &host_key(c)))
         .map(|c| c.to_string())
         .collect();
 
     // `extra`: live elements that aren't in the desired list (tamper-add).
     // Span both families into one vec — surfaced for visibility, not a hazard.
+    let desired_v4_keys: Vec<String> = desired_v4.iter().map(|c| host_key(c)).collect();
+    let desired_v6_keys: Vec<String> = desired_v6.iter().map(|c| host_key(c)).collect();
     let mut extra = Vec::new();
     for el in &live_v4 {
-        if !desired_v4.contains(&el.as_str()) {
+        if !desired_v4_keys.contains(&host_key(el)) {
             extra.push(el.clone());
         }
     }
     for el in &live_v6 {
-        if !desired_v6.contains(&el.as_str()) {
+        if !desired_v6_keys.contains(&host_key(el)) {
             extra.push(el.clone());
         }
     }
@@ -225,6 +236,18 @@ pub fn diff_bypass_set(desired: (&[&str], &[&str]), live_json: &str) -> BypassDr
         v6_missing,
         extra,
     }
+}
+
+/// Normalize a CIDR/host string to a comparison key by dropping the implicit
+/// host prefix (`/32` for v4, `/128` for v6). `nft -j` lists a single host in
+/// an interval set as a bare address, while the desired list carries the
+/// canonical `/32`|`/128` form — this collapses both to the same key. Any
+/// other (non-host) prefix is left intact, so `10.0.0.0/8` is unaffected.
+fn host_key(cidr: &str) -> String {
+    cidr.strip_suffix("/32")
+        .or_else(|| cidr.strip_suffix("/128"))
+        .unwrap_or(cidr)
+        .to_string()
 }
 
 /// Extract the element strings of a named set from the `nftables` sibling
@@ -528,6 +551,36 @@ mod tests {
         // Live: nested prefix + bare host + array prefix; desired = all three.
         const MIXED: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":1},"set":{"family":"inet","name":"bypass_set","table":"openvpn3_killswitch","handle":1,"type":"ipv4_addr","flags":["interval"],"elem":[{"prefix":{"addr":"10.0.0.0","len":8}},"1.2.3.4",{"prefix":["192.168.1.0",24]}]}}]}"#;
         let report = diff_bypass_set((&["10.0.0.0/8", "1.2.3.4", "192.168.1.0/24"], &[]), MIXED);
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    // Host-prefix normalization (S38 review fix): the real caller canonicalizes
+    // a single-host bypass entry to "/32" (v4) / "/128" (v6), but `nft -j`
+    // lists it as a bare address. The comparison must collapse both forms, or
+    // every host-sized entry reads as permanently missing.
+
+    #[test]
+    fn diff_host_v4_canonical_matches_bare_live() {
+        // Desired carries the canonical "/32"; live emits a bare host.
+        // This is exactly what service::verify_bypass_set + nft -j produce.
+        const BARE_HOST_JSON: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":1},"set":{"family":"inet","name":"bypass_set","table":"openvpn3_killswitch","handle":1,"type":"ipv4_addr","flags":["interval"],"elem":["1.2.3.4"]}}]}"#;
+        let report = diff_bypass_set((&["1.2.3.4/32"], &[]), BARE_HOST_JSON);
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    #[test]
+    fn diff_host_v6_canonical_matches_bare_live() {
+        const BARE_HOST_JSON: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":1},"set":{"family":"inet","name":"bypass_set_v6","table":"openvpn3_killswitch","handle":1,"type":"ipv6_addr","flags":["interval"],"elem":["2001:db8::1"]}}]}"#;
+        let report = diff_bypass_set((&[], &["2001:db8::1/128"]), BARE_HOST_JSON);
+        assert!(report.is_clean(), "{report:?}");
+    }
+
+    #[test]
+    fn diff_host_and_prefix_mixed_canonical() {
+        // A realistic desired list: one /24 + one host, both canonical. Live
+        // has the /24 as a prefix object and the host bare. All clean.
+        const JSON: &str = r#"{"nftables":[{"table":{"family":"inet","name":"openvpn3_killswitch","handle":1},"set":{"family":"inet","name":"bypass_set","table":"openvpn3_killswitch","handle":1,"type":"ipv4_addr","flags":["interval"],"elem":[{"prefix":{"addr":"10.10.10.0","len":24}},"198.51.100.7"]}}]}"#;
+        let report = diff_bypass_set((&["10.10.10.0/24", "198.51.100.7/32"], &[]), JSON);
         assert!(report.is_clean(), "{report:?}");
     }
 }

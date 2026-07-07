@@ -70,6 +70,10 @@ pub trait KillSwitch {
 
     fn RemoveBypassRoutes(&self) -> zbus::Result<()>;
 
+    // The 3-tuple return (v4_missing, v6_missing, extra) is dictated by the
+    // D-Bus method signature `aaa{s}` → (Vec, Vec, Vec); it can't be a named
+    // struct without diverging from the wire contract, so the clippy lint is
+    // silenced intentionally here.
     #[allow(clippy::type_complexity)]
     fn VerifyBypassSet(
         &self,

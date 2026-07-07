@@ -124,13 +124,6 @@ pub fn show_bypass_failed_notification() {
     });
 }
 
-/// Fired when drift detection (S38 T2) finds the live nft sets have fewer
-/// CIDRs than desired — an external actor (firewall manager, manual `nft del
-/// element`, partial teardown) removed them while the kill-switch icon still
-/// showed "Active". Bypassed traffic to the missing CIDRs hits `policy drop`
-/// instead of escaping, so this is persistent (`urgency=critical`,
-/// `expire_timeout=0`). Shares the `BYPASS_STATE_KEY` dedup slot with the
-/// apply notifications so it replaces rather than stacks.
 /// Fired when drift detection (S38 T2) finds the live nft sets have come back
 /// into sync with the desired list — the external actor that removed CIDRs has
 /// been undone (reconnect, manual `nft add element`, firewall-manager reload).
@@ -155,26 +148,52 @@ pub fn show_bypass_recovered_notification() {
     });
 }
 
-pub fn show_bypass_drift_notification(missing: &[String]) {
+/// Fired when drift detection (S38 T2) finds the live nft sets diverge from
+/// the desired list — an external actor (firewall manager, manual `nft
+/// add/del element`, partial teardown) changed them while the kill-switch icon
+/// still showed "Active". Bypassed traffic to missing CIDRs hits `policy drop`
+/// instead of escaping, so this is persistent (`urgency=critical`,
+/// `expire_timeout=0`). Shares the `BYPASS_STATE_KEY` dedup slot with the
+/// apply notifications so it replaces rather than stacks.
+///
+/// `missing` are desired CIDRs absent from the live set (bypassed hosts hit
+/// `policy drop`); `extra_count` are CIDRs present in the live set but not
+/// desired (an unexpected widening). Either dimension alone is drift, so the
+/// body names whichever is non-zero — an extra-only tamper must still notify
+/// rather than early-return on an empty `missing` slice.
+pub fn show_bypass_drift_notification(missing: &[String], extra_count: usize) {
     if !Settings::new().show_notifications() {
         return;
     }
-    let count = missing.len();
-    if count == 0 {
+    let missing_count = missing.len();
+    if missing_count == 0 && extra_count == 0 {
         return;
     }
     const MAX_LISTED: usize = 5;
     let listed: Vec<String> = missing.iter().take(MAX_LISTED).cloned().collect();
-    let tail = if count > MAX_LISTED {
-        format!(" (+{} more)", count - MAX_LISTED)
+    let tail = if missing_count > MAX_LISTED {
+        format!(" (+{} more)", missing_count - MAX_LISTED)
     } else {
         String::new()
     };
-    let body = format!(
-        "{count} bypass CIDR(s) missing from the firewall — bypassed hosts \
-         may not route correctly: {}{tail}\nReconnect to re-install them.",
-        listed.join(", ")
-    );
+    let body = match (missing_count, extra_count) {
+        (0, e) => format!(
+            "{e} unexpected CIDR(s) present in the firewall bypass set — the \
+             live set no longer matches your split-tunnel list.\nReconnect to \
+             restore it."
+        ),
+        (m, 0) => format!(
+            "{m} bypass CIDR(s) missing from the firewall — bypassed hosts \
+             may not route correctly: {}{tail}\nReconnect to re-install them.",
+            listed.join(", ")
+        ),
+        (m, e) => format!(
+            "{m} bypass CIDR(s) missing ({}{tail}) and {e} unexpected in the \
+             firewall — the live set no longer matches your split-tunnel \
+             list.\nReconnect to restore it.",
+            listed.join(", ")
+        ),
+    };
     glib::spawn_future_local(async move {
         if let Err(e) = send_bypass_state("Split Tunneling Drifted", &body, 2, 0).await {
             warn!("Failed to send bypass drift notification: {}", e);
