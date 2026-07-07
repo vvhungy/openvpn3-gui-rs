@@ -57,6 +57,17 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.14" date="2026-07-07">
+      <description>
+        <p>Split-tunneling reliability: a new drift monitor verifies the firewall bypass sets still match your configured CIDRs while a tunnel is up, plus hardening fixes found in review.</p>
+        <ul>
+          <li>Split-tunneling drift detection — while a tunnel is connected, the app now periodically verifies the firewall bypass sets still hold your configured bypass CIDRs. If an external firewall manager, manual <code>nft</code> edit, or partial teardown removes or widens a CIDR, the tray shows a <em>Split tunnel: N CIDR(s) missing</em> (or <em>unexpected CIDR(s)</em>) warning with a persistent notification; the warning clears and a one-shot &quot;Split Tunneling Restored&quot; notice fires once the sets match again. (Requires the privileged helper package, v0.3.14+.)</li>
+          <li>Host-sized bypass entries (single IPv4 or IPv6 hosts) no longer register as a permanent false drift — the comparison now treats a host's bare firewall representation and its canonical <code>/32</code>|<code>/128</code> form as the same entry.</li>
+          <li>Drift notifications no longer re-fire every poll cycle while drift persists; they re-notify only when the missing or unexpected CIDR count actually changes.</li>
+          <li>Internal: the status-change dispatcher's pure transition logic was extracted for unit testing, and the log viewer's search/level filter gained unit tests.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.13" date="2026-07-01">
       <description>
         <p>Credential reliability fixes closing the 0.3.11–0.3.12 arc — bug fixes only, no new features.</p>
