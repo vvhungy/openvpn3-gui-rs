@@ -18,8 +18,9 @@ pub use configuration::{
 pub use credentials::{CredentialField, show_credentials_dialog};
 pub use logs::show_log_viewer;
 pub use notification::{
-    show_bypass_active_notification, show_bypass_failed_notification,
-    show_bypass_partial_notification, show_connection_notification, show_error_notification,
+    show_bypass_active_notification, show_bypass_drift_notification,
+    show_bypass_failed_notification, show_bypass_partial_notification,
+    show_bypass_recovered_notification, show_connection_notification, show_error_notification,
     show_first_run_help_notification, show_helper_missing_notification, show_info_notification,
     show_killswitch_active_notification, show_killswitch_inactive_notification,
     show_reconnect_notification, withdraw_first_run_help_notification,

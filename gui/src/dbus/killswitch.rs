@@ -70,6 +70,17 @@ pub trait KillSwitch {
 
     fn RemoveBypassRoutes(&self) -> zbus::Result<()>;
 
+    // The 3-tuple return (v4_missing, v6_missing, extra) is dictated by the
+    // D-Bus method signature `aaa{s}` → (Vec, Vec, Vec); it can't be a named
+    // struct without diverging from the wire contract, so the clippy lint is
+    // silenced intentionally here.
+    #[allow(clippy::type_complexity)]
+    fn VerifyBypassSet(
+        &self,
+        desired_v4: Vec<String>,
+        desired_v6: Vec<String>,
+    ) -> zbus::Result<(Vec<String>, Vec<String>, Vec<String>)>;
+
     #[zbus(property)]
     fn version(&self) -> zbus::Result<String>;
 }
@@ -306,6 +317,66 @@ pub async fn apply_bypass_routes() -> Option<BypassApplyOutcome> {
         }
         Err(e) => {
             warn!("kill-switch: ApplyBypassRoutes failed: {}", e);
+            None
+        }
+    }
+}
+
+/// Drift between the desired bypass CIDR list and the live nft sets, as
+/// reported by `VerifyBypassSet`. `v4_missing`/`v6_missing` = desired-but-
+/// not-live (the leak); `extra` = live-but-not-desired (tamper-add). Empty
+/// vectors across the board means the live sets match exactly.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BypassDriftReport {
+    pub v4_missing: Vec<String>,
+    pub v6_missing: Vec<String>,
+    pub extra: Vec<String>,
+}
+
+impl BypassDriftReport {
+    /// True when no leak and no tamper — the live sets match the desired list.
+    pub fn is_clean(&self) -> bool {
+        self.v4_missing.is_empty() && self.v6_missing.is_empty() && self.extra.is_empty()
+    }
+}
+
+/// Ask the helper to diff the live nft bypass sets against the desired lists
+/// and return the drift. Read-only — does not re-apply or mutate state.
+///
+/// Returns `None` when the helper is absent, the proxy fails, or the call
+/// errors (treated as "verify unavailable this cycle — skip, don't alarm").
+/// The GUI polls this periodically while connected + bypass-on; a `Some`
+/// report with `missing_count() > 0` surfaces drift to the tray + a
+/// persistent notification. Old helpers pre-S38 lack the method → the call
+/// errors → we log once and stop polling for the session (graceful no-op).
+pub async fn verify_bypass_set(
+    desired_v4: Vec<String>,
+    desired_v6: Vec<String>,
+) -> Option<BypassDriftReport> {
+    let conn = system_bus().await?;
+    if !helper_present(conn).await {
+        return None;
+    }
+    let proxy = build_proxy(conn).await.ok()?;
+    match proxy.VerifyBypassSet(desired_v4, desired_v6).await {
+        Ok((v4_missing, v6_missing, extra)) => {
+            let report = BypassDriftReport {
+                v4_missing,
+                v6_missing,
+                extra,
+            };
+            if !report.is_clean() {
+                info!(
+                    v4_missing = report.v4_missing.len(),
+                    v6_missing = report.v6_missing.len(),
+                    extra = report.extra.len(),
+                    "kill-switch: bypass-set drift detected"
+                );
+            }
+            Some(report)
+        }
+        Err(e) => {
+            warn!("kill-switch: VerifyBypassSet failed: {}", e);
             None
         }
     }

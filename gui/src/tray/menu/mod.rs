@@ -25,6 +25,20 @@ fn format_bypass_active(applied: usize, failed: usize) -> String {
     }
 }
 
+/// Render the drift row from both drift dimensions. `missing` is CIDRs the
+/// desired list has that the live set lacks (removed under us); `extra` is
+/// CIDRs the live set has that desired does not (widened). Both are drift; the
+/// label names whichever dimension(s) are non-zero so an extra-only tamper
+/// never renders the self-contradictory "0 CIDR(s) missing".
+fn format_bypass_drifted(missing: usize, extra: usize) -> String {
+    match (missing, extra) {
+        (0, 0) => "⚠️ Split tunnel: firewall drift".to_string(),
+        (m, 0) => format!("⚠️ Split tunnel: {m} CIDR(s) missing from firewall"),
+        (0, e) => format!("⚠️ Split tunnel: {e} unexpected CIDR(s) in firewall"),
+        (m, e) => format!("⚠️ Split tunnel: {m} missing, {e} unexpected in firewall"),
+    }
+}
+
 /// Build the full tray menu for the given tray state.
 pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
     let mut items: Vec<MenuItem<VpnTray>> = Vec::new();
@@ -47,6 +61,7 @@ pub(super) fn build_menu(tray: &VpnTray) -> Vec<MenuItem<VpnTray>> {
         BypassState::Off => "🌐 Split tunnel: Off".to_string(),
         BypassState::Active { applied, failed } => format_bypass_active(*applied, *failed),
         BypassState::Failed => "⚠️ Split tunnel: Apply failed".to_string(),
+        BypassState::Drifted { missing, extra, .. } => format_bypass_drifted(*missing, *extra),
     };
     items.push(
         StandardItem {
@@ -353,5 +368,55 @@ mod tests {
         };
         let labels = menu_labels(&build_menu(&tray));
         assert_eq!(labels[1], "⚠️ Split tunnel: Apply failed");
+    }
+
+    #[test]
+    fn test_bypass_row_drift_missing_only() {
+        let mut tray = make_tray();
+        tray.bypass_state = BypassState::Drifted {
+            missing: 2,
+            extra: 0,
+            prev_applied: 3,
+            prev_failed: 0,
+        };
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(
+            labels[1],
+            "⚠️ Split tunnel: 2 CIDR(s) missing from firewall"
+        );
+    }
+
+    #[test]
+    fn test_bypass_row_drift_extra_only_not_zero_missing() {
+        // Regression: an extra-only tamper (widened set, nothing missing) must
+        // not render the self-contradictory "0 CIDR(s) missing".
+        let mut tray = make_tray();
+        tray.bypass_state = BypassState::Drifted {
+            missing: 0,
+            extra: 1,
+            prev_applied: 3,
+            prev_failed: 0,
+        };
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(
+            labels[1],
+            "⚠️ Split tunnel: 1 unexpected CIDR(s) in firewall"
+        );
+    }
+
+    #[test]
+    fn test_bypass_row_drift_both_dimensions() {
+        let mut tray = make_tray();
+        tray.bypass_state = BypassState::Drifted {
+            missing: 2,
+            extra: 1,
+            prev_applied: 3,
+            prev_failed: 0,
+        };
+        let labels = menu_labels(&build_menu(&tray));
+        assert_eq!(
+            labels[1],
+            "⚠️ Split tunnel: 2 missing, 1 unexpected in firewall"
+        );
     }
 }

@@ -249,6 +249,42 @@ impl KillSwitch {
         validate_bypass_cidrs(&cidrs).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))
     }
 
+    /// Verify the live nft bypass sets against the caller-supplied desired
+    /// lists and return the drift. S38 T2 — read-only detection of external
+    /// tamper / partial teardown between applies. Returns `(v4_missing,
+    /// v6_missing, extra)`:
+    ///   - `*_missing` = desired-but-not-live → the leak (bypassed traffic to
+    ///     those CIDRs hits `policy drop` instead of escaping).
+    ///   - `extra` = live-but-not-desired → tamper-add (visibility only).
+    ///
+    /// The caller (GUI) owns the desired list in GSettings; the helper stays
+    /// stateless here to avoid a second source of truth that could itself
+    /// drift from `state.bypass_cidrs`. Input is validated at the trust
+    /// boundary (`validate_bypass_cidrs`) so untrusted CIDR strings never
+    /// reach the comparison. A missing/unparseable table is reported as
+    /// "everything missing" — the GUI treats that as kill-switch-off, not
+    /// drift, by checking whether *all* desired are missing AND `extra` empty.
+    async fn verify_bypass_set(
+        &self,
+        desired_v4: Vec<String>,
+        desired_v6: Vec<String>,
+    ) -> fdo::Result<(Vec<String>, Vec<String>, Vec<String>)> {
+        // Canonicalize so the comparison uses the same string form the live
+        // sets were built from (host bits masked). Reject on invalid input.
+        let desired_v4 = validate_bypass_cidrs(&desired_v4)
+            .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
+        let desired_v6 = validate_bypass_cidrs(&desired_v6)
+            .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
+        let dv4: Vec<&str> = desired_v4.iter().map(|s| s.as_str()).collect();
+        let dv6: Vec<&str> = desired_v6.iter().map(|s| s.as_str()).collect();
+
+        let live_json = run_nft_list()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("nft list: {e}")))?;
+        let report = nft::diff_bypass_set((dv4.as_slice(), dv6.as_slice()), &live_json);
+        Ok((report.v4_missing, report.v6_missing, report.extra))
+    }
+
     /// Apply the routing-layer split-tunnel: priority-100 ip-rule per CIDR
     /// (symmetric v4+v6), secondary table 100 pointing at the captured
     /// pre-VPN gateway, rp_filter set to loose on the physical iface, and a
@@ -416,4 +452,23 @@ async fn run_nft(script: &str) -> Result<()> {
         bail!("nft exit {}: {}", output.status, stderr.trim());
     }
     Ok(())
+}
+
+/// Capture the live kill-switch nft table as JSON (`nft -j list table inet
+/// openvpn3_killswitch`). Used by `VerifyBypassSet` to diff against the desired
+/// bypass list. Empty stdout (exit 0) means the table is absent — the caller
+/// treats that as kill-switch-off, not drift. A non-zero exit (e.g. table
+/// deleted between the check and the list) is surfaced as an error so the GUI
+/// skips this poll rather than reporting a false clean.
+async fn run_nft_list() -> Result<String> {
+    let output = Command::new(NFT_BIN)
+        .args(["-j", "list", "table", "inet", nft::TABLE])
+        .output()
+        .await
+        .with_context(|| format!("spawn {NFT_BIN}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("nft list exit {}: {}", output.status, stderr.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }

@@ -33,6 +33,8 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                 })
                 .unwrap_or_default();
 
+            let any_connected = session_paths.iter().any(|(_, c)| *c);
+
             let auto_reconnect = settings.auto_reconnect();
             let cooldown_secs = (settings.auto_reconnect_delay_seconds() as u64) * 2;
 
@@ -82,6 +84,129 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
             }
 
             tray_for_timer.update(|_| {});
+
+            // Drift detection (S38 T2): once per stats cycle, while at least
+            // one session is connected AND bypass is Active or Drifted, verify
+            // the live nft sets still hold the desired CIDR list. Cheap D-Bus
+            // round-trip that runs at the user-configured stats interval (30s
+            // default). On detected drift → tray `Drifted` + persistent notify.
+            // Must keep verifying while Drifted, not just Active, so the
+            // `is_clean()` recovery path stays reachable once the missing
+            // element is restored (otherwise Drifted is a one-way trap).
+            // Skipped when bypass is Off/Failed (no live set to reconcile) or
+            // no session is connected (kill-switch not enforcing anyway). A
+            // helper that lacks the method (pre-0.3.14) errors the call → we
+            // no-op and stop polling for the session.
+            let bypass_live = tray_for_timer
+                .update(|t| {
+                    matches!(
+                        t.bypass_state,
+                        crate::tray::BypassState::Active { .. }
+                            | crate::tray::BypassState::Drifted { .. }
+                    )
+                })
+                .unwrap_or(false);
+            if bypass_live && any_connected {
+                let all = settings.bypass_cidrs();
+                let disabled = settings.bypass_cidrs_disabled();
+                let enabled = crate::settings::enabled_cidrs(&all, &disabled);
+                let (desired_v4, desired_v6) = crate::settings::split_v4_v6(&enabled);
+                if let Some(report) =
+                    crate::dbus::killswitch::verify_bypass_set(desired_v4, desired_v6).await
+                {
+                    use crate::tray::BypassState;
+                    if report.is_clean() {
+                        // Recovery: restore the apply-outcome counts captured
+                        // when we entered Drifted, not a fabricated full-success
+                        // Active. Drift verifies set *membership*, a different
+                        // measurement than route apply-outcome — a partial apply
+                        // that then matched the (enabled) desired set must not be
+                        // silently upgraded to failed=0.
+                        let was_drifted = tray_for_timer
+                            .update(|t| {
+                                if let BypassState::Drifted {
+                                    prev_applied,
+                                    prev_failed,
+                                    ..
+                                } = t.bypass_state
+                                {
+                                    t.bypass_state = BypassState::Active {
+                                        applied: prev_applied,
+                                        failed: prev_failed,
+                                    };
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        if was_drifted {
+                            tracing::info!("bypass drift cleared — live sets match desired again");
+                            crate::dialogs::show_bypass_recovered_notification();
+                        }
+                    } else {
+                        let missing: Vec<String> = report
+                            .v4_missing
+                            .iter()
+                            .chain(&report.v6_missing)
+                            .cloned()
+                            .collect();
+                        let missing_count = missing.len();
+                        let extra_count = report.extra.len();
+                        tracing::warn!(
+                            missing_count,
+                            extra = extra_count,
+                            "bypass drift detected by periodic verify"
+                        );
+                        // Re-arm guard: the gate was captured before the verify
+                        // await. A disconnect / split-tunnel toggle during that
+                        // window can have moved bypass_state to Off/Failed on the
+                        // single-threaded main loop; only transition into Drifted
+                        // from a still-live (Active/Drifted) state so we never
+                        // resurrect a torn-down kill-switch as Drifted. Preserve
+                        // the pre-drift apply counts for faithful recovery.
+                        let transitioned = tray_for_timer
+                            .update(|t| match t.bypass_state {
+                                BypassState::Active { applied, failed } => {
+                                    t.bypass_state = BypassState::Drifted {
+                                        missing: missing_count,
+                                        extra: extra_count,
+                                        prev_applied: applied,
+                                        prev_failed: failed,
+                                    };
+                                    true
+                                }
+                                BypassState::Drifted {
+                                    missing: prev_missing,
+                                    extra: prev_extra,
+                                    prev_applied,
+                                    prev_failed,
+                                } => {
+                                    // Already Drifted: only re-notify if the
+                                    // drift dimensions changed since last poll,
+                                    // so a persistent drift doesn't re-fire the
+                                    // critical toast every stats cycle (~30s).
+                                    let changed =
+                                        prev_missing != missing_count || prev_extra != extra_count;
+                                    t.bypass_state = BypassState::Drifted {
+                                        missing: missing_count,
+                                        extra: extra_count,
+                                        prev_applied,
+                                        prev_failed,
+                                    };
+                                    changed
+                                }
+                                // Off / Failed: bypass no longer live — the
+                                // captured gate is stale, drop this report.
+                                _ => false,
+                            })
+                            .unwrap_or(false);
+                        if transitioned {
+                            crate::dialogs::show_bypass_drift_notification(&missing, extra_count);
+                        }
+                    }
+                }
+            }
         }
     });
 }
