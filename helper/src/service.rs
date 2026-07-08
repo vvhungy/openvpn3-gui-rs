@@ -261,9 +261,16 @@ impl KillSwitch {
     /// stateless here to avoid a second source of truth that could itself
     /// drift from `state.bypass_cidrs`. Input is validated at the trust
     /// boundary (`validate_bypass_cidrs`) so untrusted CIDR strings never
-    /// reach the comparison. A missing/unparseable table is reported as
-    /// "everything missing" — the GUI treats that as kill-switch-off, not
-    /// drift, by checking whether *all* desired are missing AND `extra` empty.
+    /// reach the comparison.
+    ///
+    /// A missing/unparseable table is reported as "everything missing"
+    /// (absent table ⇒ no live sets ⇒ every desired CIDR is missing). The GUI
+    /// poller only runs this while the kill-switch is already `Active`/
+    /// `Drifted`, so it never reaches the table-gone branch through normal
+    /// polling — and it treats any non-clean report as drift unconditionally
+    /// (no "all-missing ⇒ kill-switch-off" special case). A torn-down table
+    /// surfacing here would read as drift, but that path is not exercised in
+    /// practice because the poll is gated on a live kill-switch state.
     async fn verify_bypass_set(
         &self,
         desired_v4: Vec<String>,
