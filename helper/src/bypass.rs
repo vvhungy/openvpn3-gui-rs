@@ -323,6 +323,13 @@ fn cidr_is_v6(cidr: &str) -> Result<bool> {
 
 /// Partition a canonical CIDR list by address family. Used by the kill-switch
 /// nft script builder to emit the v4 and v6 bypass named sets separately.
+///
+/// Mirrors `gui/src/settings/mod.rs::split_v4_v6` (same address-family
+/// partition of canonical CIDRs). Keep the two in sync on canonicalization
+/// changes — a divergence would split a CIDR into the wrong family here vs.
+/// in the GUI, making the GUI's drift-detection poll flag a correct set as
+/// drifted. Difference: this fn is fallible (rejects malformed CIDRs, since
+/// the helper is the trust boundary); the GUI variant drops them silently.
 pub fn split_by_family(cidrs: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
