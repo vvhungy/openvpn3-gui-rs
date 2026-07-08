@@ -56,8 +56,11 @@ fn rebuild_buffer(
     level_min: u32,
 ) {
     let mut text = String::new();
+    // Lower the search once per rebuild, not once per entry (passes_filter runs
+    // inside the loop). The level gate is unaffected by casing.
+    let search_lower = search.to_lowercase();
     for e in entries {
-        if passes_filter(e, search, level_min) {
+        if passes_filter(e, &search_lower, level_min) {
             text.push_str(&format_log_line(&e.timestamp, e.category, &e.message));
         }
     }
@@ -325,7 +328,7 @@ fn build_log_viewer(
                                 message: message.to_string(),
                             };
                             tab.entries.borrow_mut().push(entry.clone());
-                            let search = tab.search_text.borrow().clone();
+                            let search = tab.search_text.borrow().to_lowercase();
                             let level_min = *tab.level_min.borrow();
                             if passes_filter(&entry, &search, level_min) {
                                 let mut end_iter = tab.buffer.end_iter();
@@ -507,10 +510,12 @@ fn create_tab_for_config(config_name: &str) -> TabState {
         let config_name_owned = config_name.to_string();
         export_btn.connect_clicked(move |btn| {
             let parent = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            let search_lower = search_text.borrow().to_lowercase();
+            let level = *level_min.borrow();
             let visible: Vec<log_buffer::LogEntry> = entries
                 .borrow()
                 .iter()
-                .filter(|e| passes_filter(e, &search_text.borrow(), *level_min.borrow()))
+                .filter(|e| passes_filter(e, &search_lower, level))
                 .cloned()
                 .collect();
             if visible.is_empty() {

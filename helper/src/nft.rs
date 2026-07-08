@@ -157,43 +157,30 @@ impl BypassDriftReport {
 /// Both shapes are normalized to the input CIDR's string form for comparison.
 ///
 /// Tolerates a missing table (empty/invalid JSON, or the table absent) by
-/// reporting every desired CIDR as missing — the caller distinguishes "table
-/// gone" (kill-switch off, not drift) from "table present but drifted" by
-/// whether the parse found the table at all. Here we only compute the diff.
+/// reporting every desired CIDR as missing: an absent table has no sets, so
+/// `live_set_elements` returns `None` → empty live vecs → every desired CIDR
+/// is "missing". Table-gone and table-present-but-empty-sets are
+/// indistinguishable here, and callers only consume the diff (missing/extra) —
+/// a `BypassDriftReport` with every desired CIDR missing is the correct signal
+/// either way.
 pub fn diff_bypass_set(desired: (&[&str], &[&str]), live_json: &str) -> BypassDriftReport {
     let (desired_v4, desired_v6) = desired;
     let parsed = serde_json::from_str::<serde_json::Value>(live_json).ok();
 
     // `nft -j list table` returns `{"nftables": [ {table}, {set}, {set}, ... ]}`
     // — the table object and each set object are sibling array entries, not
-    // nested. A missing/unparseable table → every desired CIDR is "missing".
+    // nested. A missing/unparseable table (no `nftables` array) → the
+    // `.unwrap_or_default()` below yields empty live vecs → every desired
+    // CIDR is "missing". No separate table-presence scan: a present table with
+    // no matching set, and an absent table, both report all desired missing.
     let nftables = parsed.as_ref().and_then(|v| v.get("nftables")?.as_array());
 
-    let has_table = nftables
-        .map(|arr| {
-            arr.iter().any(|obj| {
-                obj.get("table")
-                    .and_then(|t| t.get("name"))
-                    .and_then(|n| n.as_str())
-                    == Some(TABLE)
-            })
-        })
-        .unwrap_or(false);
-
-    let live_v4 = if has_table {
-        nftables
-            .and_then(|arr| live_set_elements(arr, "bypass_set"))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let live_v6 = if has_table {
-        nftables
-            .and_then(|arr| live_set_elements(arr, "bypass_set_v6"))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let live_v4 = nftables
+        .and_then(|arr| live_set_elements(arr, "bypass_set"))
+        .unwrap_or_default();
+    let live_v6 = nftables
+        .and_then(|arr| live_set_elements(arr, "bypass_set_v6"))
+        .unwrap_or_default();
 
     // Compare on a normalized key, not the raw string: nft lists a single
     // host in an interval set as a bare address ("1.2.3.4"), while the desired
