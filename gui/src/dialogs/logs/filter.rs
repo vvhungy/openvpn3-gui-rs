@@ -8,22 +8,28 @@
 use crate::app::log_buffer::LogEntry;
 
 /// Returns true if any entry in `entries` passes the current filter.
+///
+/// `search` is lowercased once here before the loop, so the per-entry
+/// `passes_filter` never re-allocates the search term.
 pub(super) fn any_passes_filter(entries: &[LogEntry], search: &str, level_min: u32) -> bool {
-    entries.iter().any(|e| passes_filter(e, search, level_min))
+    let search_lower = search.to_lowercase();
+    entries
+        .iter()
+        .any(|e| passes_filter(e, &search_lower, level_min))
 }
 
 /// Returns true if the entry passes the current filter pair (substring
 /// match on message, case-insensitive; category >= level_min).
-pub(super) fn passes_filter(entry: &LogEntry, search: &str, level_min: u32) -> bool {
+///
+/// `search_lower` MUST already be lowercased — the hot call sites
+/// (`rebuild_buffer`, the export `.filter`) lower the search term once per
+/// loop rather than once per entry, and this fn runs once per entry. An
+/// empty `search_lower` matches all messages.
+pub(super) fn passes_filter(entry: &LogEntry, search_lower: &str, level_min: u32) -> bool {
     if entry.category < level_min {
         return false;
     }
-    if !search.is_empty()
-        && !entry
-            .message
-            .to_lowercase()
-            .contains(&search.to_lowercase())
-    {
+    if !search_lower.is_empty() && !entry.message.to_lowercase().contains(search_lower) {
         return false;
     }
     true
@@ -71,40 +77,56 @@ mod tests {
     }
 
     // --- passes_filter: substring + level gate, independently and together ---
+    // Callers pass a pre-lowered search term; the test helper does the same.
+
+    /// `passes_filter` with the search pre-lowered (as every real call site does).
+    fn pf(entry: &LogEntry, search: &str, level_min: u32) -> bool {
+        passes_filter(entry, &search.to_lowercase(), level_min)
+    }
 
     #[test]
     fn passes_filter_empty_search_matches_all_at_or_above_level() {
-        assert!(passes_filter(&entry(6, "anything"), "", 0));
-        assert!(passes_filter(&entry(5, "warn text"), "", 5));
-        assert!(passes_filter(&entry(6, "err"), "", 6));
+        assert!(pf(&entry(6, "anything"), "", 0));
+        assert!(pf(&entry(5, "warn text"), "", 5));
+        assert!(pf(&entry(6, "err"), "", 6));
     }
 
     #[test]
     fn passes_filter_rejects_below_level_regardless_of_search() {
-        assert!(!passes_filter(&entry(3, "match"), "", 5));
-        assert!(!passes_filter(&entry(3, "match"), "match", 5));
+        assert!(!pf(&entry(3, "match"), "", 5));
+        assert!(!pf(&entry(3, "match"), "match", 5));
     }
 
     #[test]
     fn passes_filter_substring_match_is_case_insensitive() {
-        assert!(passes_filter(&entry(0, "Connection Refused"), "refused", 0));
-        assert!(passes_filter(&entry(0, "connection refused"), "REFUSED", 0));
-        assert!(passes_filter(&entry(0, "REFUSED"), "fus", 0));
+        assert!(pf(&entry(0, "Connection Refused"), "refused", 0));
+        assert!(pf(&entry(0, "connection refused"), "REFUSED", 0));
+        assert!(pf(&entry(0, "REFUSED"), "fus", 0));
     }
 
     #[test]
     fn passes_filter_rejects_when_search_present_but_not_in_message() {
-        assert!(!passes_filter(&entry(6, "unrelated"), "missing", 0));
+        assert!(!pf(&entry(6, "unrelated"), "missing", 0));
     }
 
     #[test]
     fn passes_filter_both_gates_apply_simultaneously() {
         // Passes level but fails substring.
-        assert!(!passes_filter(&entry(6, "nope"), "match", 0));
+        assert!(!pf(&entry(6, "nope"), "match", 0));
         // Passes substring but fails level.
-        assert!(!passes_filter(&entry(3, "match"), "match", 5));
+        assert!(!pf(&entry(3, "match"), "match", 5));
         // Passes both.
-        assert!(passes_filter(&entry(6, "match"), "match", 5));
+        assert!(pf(&entry(6, "match"), "match", 5));
+    }
+
+    #[test]
+    fn passes_filter_consumes_pre_lowered_search_verbatim() {
+        // Pins the new contract: the fn does NOT lower the search itself.
+        // A mixed-case message + already-lowered "refused" must still match.
+        assert!(passes_filter(&entry(0, "Connection Refused"), "refused", 0));
+        // A search term that is NOT lowercased would miss uppercase message
+        // text — documenting that the caller, not this fn, owns lowering.
+        assert!(!passes_filter(&entry(0, "REFUSED"), "REFUSED", 0));
     }
 
     // --- any_passes_filter: zero-data state + aggregation ---

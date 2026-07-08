@@ -19,6 +19,14 @@ pub fn enabled_cidrs(all: &[String], disabled: &[String]) -> Vec<String> {
 /// is to compare what the GUI *thinks* it installed, not to re-validate.
 /// Used by the drift-detection poll so it can pass family-split lists to
 /// `VerifyBypassSet`, matching the live nft sets' per-family structure.
+///
+/// Mirrors `helper/src/bypass.rs::split_by_family` (address-family partition
+/// of canonical CIDRs). Keep the two in sync on canonicalization changes — a
+/// divergence would split a CIDR into the wrong family here vs. at the helper,
+/// and the resulting bypass-set diff would flag a correct set as drifted.
+/// Difference: this fn is non-fallible (a malformed CIDR is dropped silently,
+/// since the helper re-validates); `split_by_family` returns `Result` and
+/// rejects malformed input.
 pub fn split_v4_v6(cidrs: &[String]) -> (Vec<String>, Vec<String>) {
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
