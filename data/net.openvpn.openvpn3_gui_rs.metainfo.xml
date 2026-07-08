@@ -57,6 +57,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.15" date="2026-07-08">
+      <description>
+        <p>Internal cleanup — no user-visible behaviour change.</p>
+        <ul>
+          <li>Removed a dead table-presence check from the kill-switch bypass-set drift detection, simplifying the drift-diff path (helper).</li>
+          <li>Reduced redundant string allocations in the log viewer search filter (lowercases the search term once per rebuild instead of once per log line).</li>
+          <li>Documentation sync between the GUI and helper CIDR family-splitting helpers.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.14" date="2026-07-07">
       <description>
         <p>Split-tunneling reliability: a new drift monitor verifies the firewall bypass sets still match your configured CIDRs while a tunnel is up, plus hardening fixes found in review.</p>
