@@ -338,7 +338,6 @@ impl Settings {
     /// Persist the bypass CIDR list. The list is the user's *intent* (durable);
     /// the helper re-validates at the trust boundary on every `SetBypassCidrs`
     /// call.
-    #[allow(dead_code)] // T3 ships plumbing; first call site lands in T4 (Preferences).
     pub fn set_bypass_cidrs(&self, cidrs: &[String]) {
         if let Some(settings) = &self.settings {
             let values: Vec<&str> = cidrs.iter().map(|s| s.as_str()).collect();
@@ -374,7 +373,6 @@ impl Settings {
 
     /// User-facing limit on the number of bypass CIDR entries. Clamped to
     /// [1, 128] where 128 is the helper's hard ceiling.
-    #[allow(dead_code)] // T3 ships plumbing; first call site lands in T4 (Preferences).
     pub fn bypass_cidrs_max_count(&self) -> i32 {
         self.settings
             .as_ref()
