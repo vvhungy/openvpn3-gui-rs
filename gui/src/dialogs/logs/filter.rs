@@ -16,6 +16,12 @@ use crate::app::log_buffer::LogEntry;
 /// exactly once. An empty query matches all messages.
 pub(super) struct LoweredQuery(String);
 
+impl std::fmt::Debug for LoweredQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LoweredQuery").field(&self.0).finish()
+    }
+}
+
 impl LoweredQuery {
     /// Lower the search term once. Call once per rebuild, before the loop.
     pub(super) fn new(search: &str) -> Self {

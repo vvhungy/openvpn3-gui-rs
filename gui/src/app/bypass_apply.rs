@@ -123,6 +123,26 @@ mod tests {
     }
 
     #[test]
+    fn partial_with_multiple_failures_preserves_exact_count() {
+        // Guards against a future coercion (e.g. capping at 1) on the failure
+        // count the tray label surfaces.
+        let out = outcome(
+            &["10.0.0.0/8"],
+            &[
+                &["fe80::/64", "rt-table unreachable"],
+                &["2001:db8::/32", "permission denied"],
+            ],
+        );
+        match outcome_to_state(&Some(out)) {
+            BypassState::Active { applied, failed } => {
+                assert_eq!(applied, 1);
+                assert_eq!(failed, 2);
+            }
+            other => panic!("expected Active, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn empty_applied_with_no_failures_still_active_zero() {
         // Edge: helper returned applied=∅, failed=∅ (e.g. nothing to apply).
         let out = outcome(&[], &[]);
