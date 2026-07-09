@@ -57,6 +57,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.16" date="2026-07-09">
+      <description>
+        <p>Internal quality sprint — no user-visible behaviour change.</p>
+        <ul>
+          <li>Hardened the log viewer search filter: the lowercased-search contract is now enforced by a dedicated type, making a future caller that forgets to lowercase the search term a compile error rather than a silent case-mismatch bug.</li>
+          <li>Removed three stale dead-code suppression markers whose comments had been overtaken by call sites that landed in an earlier sprint.</li>
+          <li>Added unit tests for the bypass-route apply outcome mapping (success / partial / system-failure → tray state), extracted from the impure tray-and-notification wrapper.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.15" date="2026-07-08">
       <description>
         <p>Internal cleanup — no user-visible behaviour change.</p>
