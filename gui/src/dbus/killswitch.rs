@@ -253,7 +253,6 @@ fn extract_diagnostic(err: &zbus::Error) -> String {
 
 /// Ask the helper to clear its bypass CIDR list. Idempotent — safe to call
 /// even if the list is already empty. No-op when the helper isn't installed.
-#[allow(dead_code)] // T3 ships plumbing; first call site lands in T4 (Preferences).
 pub async fn clear_bypass_cidrs() {
     let Some(conn) = system_bus().await else {
         return;

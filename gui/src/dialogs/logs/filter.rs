@@ -7,29 +7,56 @@
 
 use crate::app::log_buffer::LogEntry;
 
+/// A search term that is guaranteed to be lowercased.
+///
+/// `passes_filter` requires a pre-lowered search so it can run once per entry
+/// without re-allocating the term inside the loop. Making the lowered form a
+/// distinct type means "forgot to lower" is unrepresentable at the call site:
+/// the only way to obtain a `LoweredQuery` is `LoweredQuery::new`, which lowers
+/// exactly once. An empty query matches all messages.
+pub(super) struct LoweredQuery(String);
+
+impl std::fmt::Debug for LoweredQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LoweredQuery").field(&self.0).finish()
+    }
+}
+
+impl LoweredQuery {
+    /// Lower the search term once. Call once per rebuild, before the loop.
+    pub(super) fn new(search: &str) -> Self {
+        LoweredQuery(search.to_lowercase())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Returns true if any entry in `entries` passes the current filter.
 ///
-/// `search` is lowercased once here before the loop, so the per-entry
+/// `search` is lowered once here before the loop, so the per-entry
 /// `passes_filter` never re-allocates the search term.
 pub(super) fn any_passes_filter(entries: &[LogEntry], search: &str, level_min: u32) -> bool {
-    let search_lower = search.to_lowercase();
-    entries
-        .iter()
-        .any(|e| passes_filter(e, &search_lower, level_min))
+    let query = LoweredQuery::new(search);
+    entries.iter().any(|e| passes_filter(e, &query, level_min))
 }
 
 /// Returns true if the entry passes the current filter pair (substring
 /// match on message, case-insensitive; category >= level_min).
 ///
-/// `search_lower` MUST already be lowercased — the hot call sites
-/// (`rebuild_buffer`, the export `.filter`) lower the search term once per
-/// loop rather than once per entry, and this fn runs once per entry. An
-/// empty `search_lower` matches all messages.
-pub(super) fn passes_filter(entry: &LogEntry, search_lower: &str, level_min: u32) -> bool {
+/// Takes a `LoweredQuery` so the search term is lowered once per loop (in the
+/// constructor) rather than once per entry, and "forgot to lower" cannot
+/// happen — the type has no other constructor.
+pub(super) fn passes_filter(entry: &LogEntry, query: &LoweredQuery, level_min: u32) -> bool {
     if entry.category < level_min {
         return false;
     }
-    if !search_lower.is_empty() && !entry.message.to_lowercase().contains(search_lower) {
+    if !query.is_empty() && !entry.message.to_lowercase().contains(query.as_str()) {
         return false;
     }
     true
@@ -79,9 +106,9 @@ mod tests {
     // --- passes_filter: substring + level gate, independently and together ---
     // Callers pass a pre-lowered search term; the test helper does the same.
 
-    /// `passes_filter` with the search pre-lowered (as every real call site does).
+    /// `passes_filter` via the `LoweredQuery` newtype (as every real call site does).
     fn pf(entry: &LogEntry, search: &str, level_min: u32) -> bool {
-        passes_filter(entry, &search.to_lowercase(), level_min)
+        passes_filter(entry, &LoweredQuery::new(search), level_min)
     }
 
     #[test]
@@ -120,13 +147,20 @@ mod tests {
     }
 
     #[test]
-    fn passes_filter_consumes_pre_lowered_search_verbatim() {
-        // Pins the new contract: the fn does NOT lower the search itself.
-        // A mixed-case message + already-lowered "refused" must still match.
-        assert!(passes_filter(&entry(0, "Connection Refused"), "refused", 0));
-        // A search term that is NOT lowercased would miss uppercase message
-        // text — documenting that the caller, not this fn, owns lowering.
-        assert!(!passes_filter(&entry(0, "REFUSED"), "REFUSED", 0));
+    fn lowered_query_lowers_once_and_matches_case_insensitively() {
+        // The newtype is the only way to build a search term, and it lowers on
+        // construction — so an uppercase query still matches lowercase message
+        // text. This is what the old doc-only "caller must lower" contract
+        // asserted, now enforced by the type instead of by discipline.
+        let q = LoweredQuery::new("REFUSED");
+        assert!(passes_filter(&entry(0, "connection refused"), &q, 0));
+        assert!(passes_filter(&entry(0, "Connection REFUSED"), &q, 0));
+        // Empty query matches all.
+        assert!(passes_filter(
+            &entry(0, "anything"),
+            &LoweredQuery::new(""),
+            0
+        ));
     }
 
     // --- any_passes_filter: zero-data state + aggregation ---
