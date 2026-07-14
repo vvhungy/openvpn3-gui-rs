@@ -160,17 +160,6 @@ struct InitialSessions {
     pending_auth: Vec<(String, SessionStatus, String)>,
 }
 
-/// True if `status` is one of the "needs user input" states that warrant
-/// cold-start auth dispatch — a session already waiting on credentials / a
-/// challenge / URL auth when the GUI starts won't re-emit `StatusChange`, so
-/// it must be replayed manually. Extracted so the carve-out is unit-testable.
-fn needs_cold_start_auth(status: &SessionStatus) -> bool {
-    status.needs_user_input()
-        || status.needs_credentials()
-        || status.needs_url_auth()
-        || status.needs_challenge()
-}
-
 /// Scan active sessions: enable log forwarding, build the tray session map, and
 /// collect (a) connected paths for firewall re-apply and (b) sessions already
 /// waiting on user input for cold-start auth dispatch. A missing session manager
@@ -262,7 +251,7 @@ async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedS
     } else {
         None
     };
-    let pending_auth = if needs_cold_start_auth(&status) {
+    let pending_auth = if status.is_auth_request() {
         Some((path.to_string(), status.clone(), message))
     } else {
         None
@@ -531,29 +520,6 @@ mod tests {
         assert!(!helper_version_below_min("1.0.0", "0.1.0"));
         assert!(helper_version_below_min("0.1.0", "0.2.0"));
         assert!(!helper_version_below_min("0.2.0", "0.2.0"));
-    }
-
-    // --- needs_cold_start_auth ------------------------------------------------
-
-    #[test]
-    fn needs_cold_start_auth_true_for_credentials_request() {
-        // StatusMajor::Session (3) + SessAuthUserpass (20) → needs_credentials.
-        let s = SessionStatus::new(3, 20, String::new());
-        assert!(needs_cold_start_auth(&s));
-    }
-
-    #[test]
-    fn needs_cold_start_auth_false_for_non_auth_status() {
-        // A connected/error status trips none of the needs_* predicates.
-        let s = SessionStatus::new(0, 0, String::new());
-        assert!(!needs_cold_start_auth(&s));
-    }
-
-    #[test]
-    fn needs_cold_start_auth_false_for_session_unknown_minor() {
-        // Session major but a minor that matches no user-input predicate.
-        let s = SessionStatus::new(3, 99, String::new());
-        assert!(!needs_cold_start_auth(&s));
     }
 
     // --- should_reapply_firewall ---------------------------------------------

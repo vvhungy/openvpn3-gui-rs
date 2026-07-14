@@ -166,6 +166,16 @@ mod tests {
         assert!(!SessionStatus::new(2, 7, String::new()).needs_user_input()); // ConnConnected
         assert!(!SessionStatus::new(2, 11, String::new()).needs_user_input()); // ConnAuthFailed
     }
+    #[test]
+    fn test_is_auth_request() {
+        // Composition of the four auth-predicates. T2 replaced the duplicated
+        // needs_cold_start_auth free fn with this method; these keep coverage
+        // on the canonical surface rather than the deleted twin.
+        assert!(SessionStatus::new(2, 4, String::new()).is_auth_request()); // needs_user_input
+        assert!(!SessionStatus::new(2, 7, String::new()).is_auth_request()); // ConnConnected
+        assert!(!SessionStatus::new(2, 11, String::new()).is_auth_request()); // ConnAuthFailed
+        assert!(!SessionStatus::new(2, 999, String::new()).is_auth_request()); // unknown minor
+    }
 
     #[test]
     fn test_is_reconnectable() {
