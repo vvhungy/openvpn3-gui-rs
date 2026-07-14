@@ -126,10 +126,7 @@ pub(crate) async fn subscribe(
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_default();
 
-            let config_name = tray
-                .update(|t| t.sessions.get(&session_path).map(|s| s.config_name.clone()))
-                .flatten()
-                .unwrap_or_else(|| "VPN".to_string());
+            let config_name = crate::tray::session_config_name(&tray, &session_path);
 
             if let Ok((_group, category, message)) = msg.body().deserialize::<(u32, u32, &str)>() {
                 push_entry(LogEntry {

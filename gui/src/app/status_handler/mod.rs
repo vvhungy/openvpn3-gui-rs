@@ -16,9 +16,6 @@ mod killswitch_glue;
 
 pub(crate) use killswitch_glue::apply_kill_switch;
 
-/// Fallback label when config/profile name is unavailable.
-const FALLBACK_NAME: &str = "VPN Connection";
-
 /// Update a session's status and reset the stats/idle baseline when the
 /// transition crosses the Connected boundary. Pure over `&mut SessionInfo`
 /// — no async, no D-Bus, no tray — so the transition rules are unit-testable.
@@ -263,7 +260,7 @@ pub(super) async fn setup_status_handler(
                                 SessionInfo {
                                     session_path: path.clone(),
                                     config_path: String::new(),
-                                    config_name: "VPN".to_string(),
+                                    config_name: crate::tray::FALLBACK_NAME.to_string(),
                                     status: SessionStatus::new(major, minor, msg_owned),
                                     connected_at: None,
                                     bytes_in: 0,
@@ -331,7 +328,10 @@ pub(super) async fn setup_status_handler(
                             crate::dialogs::show_connection_notification(&cn, &body);
                         }
                     } else {
-                        crate::dialogs::show_connection_notification("VPN", new_desc);
+                        crate::dialogs::show_connection_notification(
+                            crate::tray::FALLBACK_NAME,
+                            new_desc,
+                        );
                     }
                 }
                 Err(e) => {
@@ -361,14 +361,8 @@ fn handle_auth_failed(
 ) {
     let session_path = path.to_string();
     let dbus_conn = conn.clone();
-    let (config_name, config_path) = tray_for_status
-        .update(|t| {
-            t.sessions
-                .get(&session_path)
-                .map(|s| (s.config_name.clone(), s.config_path.clone()))
-        })
-        .flatten()
-        .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()));
+    let (config_name, config_path) =
+        crate::tray::session_config_identity(tray_for_status, &session_path);
 
     let attempt = {
         if config_path.is_empty() {
@@ -483,10 +477,7 @@ fn handle_conn_failed(
     warn!("Connection failed for session {}", path);
     let session_path = path.to_string();
     let dbus_conn = conn.clone();
-    let config_name = tray_for_status
-        .update(|t| t.sessions.get(&session_path).map(|s| s.config_name.clone()))
-        .flatten()
-        .unwrap_or_else(|| FALLBACK_NAME.to_string());
+    let config_name = crate::tray::session_config_name(tray_for_status, &session_path);
     glib::spawn_future_local(async move {
         super::session_ops::disconnect_with_message(
             &dbus_conn,
@@ -514,10 +505,7 @@ fn handle_session_error(
     );
     let session_path = path.to_string();
     let dbus_conn = conn.clone();
-    let config_name = tray_for_status
-        .update(|t| t.sessions.get(&session_path).map(|s| s.config_name.clone()))
-        .flatten()
-        .unwrap_or_else(|| FALLBACK_NAME.to_string());
+    let config_name = crate::tray::session_config_name(tray_for_status, &session_path);
     let body = if message.is_empty() {
         format!("VPN error for '{}'.", config_name)
     } else {

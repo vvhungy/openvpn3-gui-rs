@@ -86,7 +86,7 @@ pub(crate) async fn connect_to_config(
                 .map(|c| c.name.clone())
         })
         .flatten()
-        .unwrap_or_else(|| "VPN".to_string());
+        .unwrap_or_else(|| crate::tray::FALLBACK_NAME.to_string());
 
     // Save as most recent
     settings.set_most_recent_config(config_path_str, &config_name);
@@ -213,14 +213,8 @@ pub(crate) async fn resume_session(
         }
         Err(e) => {
             info!("Session not ready after resume (needs credentials): {}", e);
-            let (config_name, config_path) = tray
-                .update(|t| {
-                    t.sessions
-                        .get(session_path_str)
-                        .map(|s| (s.config_name.clone(), s.config_path.clone()))
-                })
-                .flatten()
-                .unwrap_or_else(|| ("VPN".to_string(), String::new()));
+            let (config_name, config_path) =
+                crate::tray::session_config_identity(tray, session_path_str);
             let sp = session_path_str.to_string();
             super::credential_handler::request_credentials(
                 dbus,

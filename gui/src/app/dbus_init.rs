@@ -239,7 +239,7 @@ async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedS
     let config_name = session
         .config_name()
         .await
-        .unwrap_or_else(|_| "VPN".to_string());
+        .unwrap_or_else(|_| crate::tray::FALLBACK_NAME.to_string());
     let config_path = session
         .config_path()
         .await
