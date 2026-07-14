@@ -9,7 +9,9 @@
 
 mod retry;
 
-pub(crate) use retry::{CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, next_attempt};
+pub(crate) use retry::{
+    CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, next_attempt, should_retry_auth,
+};
 
 use std::collections::HashMap;
 use std::rc::Rc;
