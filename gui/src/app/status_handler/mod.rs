@@ -50,6 +50,36 @@ pub(super) fn apply_status_transition(session: &mut SessionInfo, status: Session
     }
 }
 
+/// Pure signal-relevance filter. A message is a `StatusChange` from the
+/// OpenVPN3 backend only if it is `Signal`-typed, carries the
+/// `net.openvpn.v3.backends` interface, and has member `StatusChange`.
+/// Extracted from the three inline `continue` guards so the contract is
+/// unit-testable.
+pub(super) fn is_status_change(
+    msg_type: zbus::message::Type,
+    interface: Option<&str>,
+    member: Option<&str>,
+) -> bool {
+    msg_type == zbus::message::Type::Signal
+        && interface == Some("net.openvpn.v3.backends")
+        && member == Some("StatusChange")
+}
+
+/// Pure dedup predicate. OpenVPN3 delivers each `StatusChange` twice (once via
+/// `LogForward(true)`, once via the `AddMatch` rule), so a repeat `(major,
+/// minor)` for an already-seen path is skipped. Auth challenges are **exempt**:
+/// a re-emitted credential request after Resume on an invalidated session must
+/// still reach the dispatcher even if the same `(major, minor)` was seen
+/// earlier. Returns `true` when the signal should be dispatched.
+pub(super) fn should_dispatch(
+    prev: Option<(u32, u32)>,
+    major: u32,
+    minor: u32,
+    is_auth: bool,
+) -> bool {
+    is_auth || prev != Some((major, minor))
+}
+
 /// Subscribe to StatusChange signals and spawn the handler loop.
 ///
 /// An AddMatch rule is required for the D-Bus daemon to deliver signals to our
@@ -72,7 +102,6 @@ pub(super) async fn setup_status_handler(
     let tray_for_status = tray.clone();
     glib::spawn_future_local(async move {
         use zbus::MessageStream;
-        use zbus::message::Type as MessageType;
 
         let mut stream = MessageStream::from(&conn);
         let mut last_signal: std::collections::HashMap<String, (u32, u32)> =
@@ -87,15 +116,13 @@ pub(super) async fn setup_status_handler(
                 }
             };
 
-            if msg.message_type() != MessageType::Signal {
-                continue;
-            }
-
+            let msg_type = msg.message_type();
             let header = msg.header();
-            if header.interface().map(|i| i.as_str()) != Some("net.openvpn.v3.backends") {
-                continue;
-            }
-            if header.member().map(|m| m.as_str()) != Some("StatusChange") {
+            if !is_status_change(
+                msg_type,
+                header.interface().map(|i| i.as_str()),
+                header.member().map(|m| m.as_str()),
+            ) {
                 continue;
             }
 
@@ -112,14 +139,13 @@ pub(super) async fn setup_status_handler(
 
                     let status = SessionStatus::new(major, minor, message.to_string());
 
-                    // Dedup: skip duplicate (path, major, minor) signals caused by
-                    // LogForward + AddMatch both delivering the same signal.
-                    // Auth requests are exempted — a re-emitted credential challenge
-                    // after Resume on an invalidated session must still reach the
-                    // dispatcher even if the same (major, minor) was seen earlier.
+                    // Dedup: skip a repeat (major, minor) for an already-seen
+                    // path; auth challenges are exempt (a re-emitted credential
+                    // request after Resume on an invalidated session must still
+                    // dispatch). See `should_dispatch`.
                     let is_auth = status.is_auth_request();
                     let prev = last_signal.get(&path).copied();
-                    if !is_auth && prev == Some((major, minor)) {
+                    if !should_dispatch(prev, major, minor, is_auth) {
                         continue;
                     }
                     if is_auth && prev == Some((major, minor)) {
@@ -173,131 +199,7 @@ pub(super) async fn setup_status_handler(
                     if status.major == StatusMajor::Connection
                         && status.minor == StatusMinor::ConnAuthFailed
                     {
-                        let session_path = path.clone();
-                        let dbus_conn = conn.clone();
-                        let (config_name, config_path) = tray_for_status
-                            .update(|t| {
-                                t.sessions
-                                    .get(&session_path)
-                                    .map(|s| (s.config_name.clone(), s.config_path.clone()))
-                            })
-                            .flatten()
-                            .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()));
-
-                        let attempt = {
-                            if config_path.is_empty() {
-                                // No config path to retry against — nothing to
-                                // reconnect to. Skip the retry counter entirely:
-                                // an empty key would be a shared bucket across
-                                // all un-keyed failures (see next_attempt's doc),
-                                // and the debug_assert there panics on empty.
-                                // Returning MAX makes the retry gate below fall
-                                // straight to the disconnect branch.
-                                super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
-                            } else if let Ok(mut attempts) =
-                                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
-                            {
-                                // Poison-tolerant: a prior panic in a holder of
-                                // this lock must not brick auth-retry bookkeeping.
-                                // Treat a poisoned lock as a fresh attempt (count 1).
-                                super::credential_handler::next_attempt(
-                                    &mut attempts,
-                                    std::time::Instant::now(),
-                                    &config_path,
-                                )
-                            } else {
-                                warn!(
-                                    "CREDENTIAL_ATTEMPTS lock poisoned — \
-                                     treating as first attempt"
-                                );
-                                1
-                            }
-                        };
-
-                        if attempt < super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
-                            && !config_path.is_empty()
-                        {
-                            warn!(
-                                "Authentication failed for '{}' (attempt {}/{}) — creating new tunnel",
-                                config_name,
-                                attempt,
-                                super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
-                            );
-                            crate::dialogs::show_error_notification(
-                                &format!("{}: Authentication Failed", config_name),
-                                &format!("Wrong credentials for '{}'. Retrying...", config_name,),
-                            );
-                            // Mark old session so SessDestroyed won't show reconnect prompt.
-                            // Poison-tolerant: a poisoned lock must not skip this bookkeeping
-                            // (best-effort insert; worst case SessDestroyed shows a redundant
-                            // reconnect prompt, which is safe).
-                            if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
-                                set.insert(session_path.clone());
-                            } else {
-                                warn!(
-                                    "USER_DISCONNECTED lock poisoned — \
-                                     SessDestroyed may show reconnect prompt"
-                                );
-                            }
-                            let tray_for_retry = tray_for_status.clone();
-                            let settings = crate::settings::Settings::new();
-                            let sp_for_disconnect = session_path;
-                            let dbus_for_disconnect = dbus_conn.clone();
-                            glib::spawn_future_local(async move {
-                                // Disconnect the failed session on D-Bus to
-                                // prevent orphan sessions from accumulating.
-                                if let Err(e) = super::session_ops::session_action(
-                                    &dbus_for_disconnect,
-                                    &sp_for_disconnect,
-                                    "disconnect",
-                                )
-                                .await
-                                {
-                                    tracing::warn!("Failed to disconnect orphan session: {}", e);
-                                }
-                                if let Err(e) = super::session_ops::connect_to_config(
-                                    &dbus_conn,
-                                    &config_path,
-                                    &tray_for_retry,
-                                    &settings,
-                                )
-                                .await
-                                {
-                                    tracing::error!(
-                                        "Auto-reconnect after auth failure failed: {}",
-                                        e
-                                    );
-                                }
-                            });
-                        } else {
-                            warn!(
-                                "Max auth attempts reached for '{}' — disconnecting",
-                                config_name
-                            );
-                            // Reset this config's retry budget so the user can
-                            // reconnect within the 5-min window (otherwise the
-                            // path-keyed counter stays at/near MAX and the next
-                            // wrong password instantly disconnects again).
-                            // disconnect_with_message no longer clears the counter
-                            // (it doesn't receive the path); clear it here instead.
-                            if let Ok(mut attempts) =
-                                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
-                            {
-                                attempts.remove(&config_path);
-                            }
-                            glib::spawn_future_local(async move {
-                                super::session_ops::disconnect_with_message(
-                                    &dbus_conn,
-                                    &session_path,
-                                    "Authentication Failed",
-                                    &format!(
-                                        "Too many failed attempts for '{}'. Session disconnected.",
-                                        config_name
-                                    ),
-                                )
-                                .await;
-                            });
-                        }
+                        handle_auth_failed(&conn, &tray_for_status, &path);
                         continue;
                     }
 
@@ -305,58 +207,13 @@ pub(super) async fn setup_status_handler(
                     if status.major == StatusMajor::Connection
                         && status.minor == StatusMinor::ConnFailed
                     {
-                        warn!("Connection failed for session {}", path);
-                        let session_path = path.clone();
-                        let dbus_conn = conn.clone();
-                        let config_name = tray_for_status
-                            .update(|t| {
-                                t.sessions.get(&session_path).map(|s| s.config_name.clone())
-                            })
-                            .flatten()
-                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
-                        glib::spawn_future_local(async move {
-                            super::session_ops::disconnect_with_message(
-                                &dbus_conn,
-                                &session_path,
-                                "Connection Failed",
-                                &format!(
-                                    "Connection failed for '{}'. Please try again.",
-                                    config_name
-                                ),
-                            )
-                            .await;
-                        });
+                        handle_conn_failed(&conn, &tray_for_status, &path);
                         continue;
                     }
 
                     // Generic error states (config errors, process errors)
                     if status.is_error() {
-                        warn!(
-                            "Session error for {}: major={}, minor={}",
-                            path, major, minor
-                        );
-                        let session_path = path.clone();
-                        let dbus_conn = conn.clone();
-                        let config_name = tray_for_status
-                            .update(|t| {
-                                t.sessions.get(&session_path).map(|s| s.config_name.clone())
-                            })
-                            .flatten()
-                            .unwrap_or_else(|| FALLBACK_NAME.to_string());
-                        let body = if message.is_empty() {
-                            format!("VPN error for '{}'.", config_name)
-                        } else {
-                            format!("VPN error for '{}': {}", config_name, message)
-                        };
-                        glib::spawn_future_local(async move {
-                            super::session_ops::disconnect_with_message(
-                                &dbus_conn,
-                                &session_path,
-                                "VPN Error",
-                                &body,
-                            )
-                            .await;
-                        });
+                        handle_session_error(&conn, &tray_for_status, &path, major, minor, message);
                         continue;
                     }
 
@@ -487,6 +344,191 @@ pub(super) async fn setup_status_handler(
     Ok(())
 }
 
+// --- status-dispatch handlers -----------------------------------------------
+// Extracted from the `StatusChange` loop so `setup_status_handler` is thin
+// wiring. Each handler is impure (D-Bus calls, tray mutation, spawned futures)
+// and carries no unit-test surface — named for readability, not testability
+// (CLAUDE.md §Testing: orchestration wrappers with no pure branch need no
+// unit test).
+
+/// Authentication failed on `path`: auto-retry by creating a new tunnel up to
+/// `MAX_CREDENTIAL_ATTEMPTS`, then disconnect with a message and reset the
+/// per-config retry budget so the user can reconnect within the window.
+fn handle_auth_failed(
+    conn: &zbus::Connection,
+    tray_for_status: &ksni::blocking::Handle<VpnTray>,
+    path: &str,
+) {
+    let session_path = path.to_string();
+    let dbus_conn = conn.clone();
+    let (config_name, config_path) = tray_for_status
+        .update(|t| {
+            t.sessions
+                .get(&session_path)
+                .map(|s| (s.config_name.clone(), s.config_path.clone()))
+        })
+        .flatten()
+        .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()));
+
+    let attempt = {
+        if config_path.is_empty() {
+            // No config path to retry against — nothing to reconnect to. Skip
+            // the retry counter entirely: an empty key would be a shared bucket
+            // across all un-keyed failures (see next_attempt's doc), and the
+            // debug_assert there panics on empty. Returning MAX makes the retry
+            // gate below fall straight to the disconnect branch.
+            super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
+        } else if let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock() {
+            // Poison-tolerant: a prior panic in a holder of this lock must not
+            // brick auth-retry bookkeeping. Treat a poisoned lock as a fresh
+            // attempt (count 1).
+            super::credential_handler::next_attempt(
+                &mut attempts,
+                std::time::Instant::now(),
+                &config_path,
+            )
+        } else {
+            warn!(
+                "CREDENTIAL_ATTEMPTS lock poisoned — \
+                 treating as first attempt"
+            );
+            1
+        }
+    };
+
+    if attempt < super::credential_handler::MAX_CREDENTIAL_ATTEMPTS && !config_path.is_empty() {
+        warn!(
+            "Authentication failed for '{}' (attempt {}/{}) — creating new tunnel",
+            config_name,
+            attempt,
+            super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
+        );
+        crate::dialogs::show_error_notification(
+            &format!("{}: Authentication Failed", config_name),
+            &format!("Wrong credentials for '{}'. Retrying...", config_name),
+        );
+        // Mark old session so SessDestroyed won't show reconnect prompt.
+        // Poison-tolerant: a poisoned lock must not skip this bookkeeping
+        // (best-effort insert; worst case SessDestroyed shows a redundant
+        // reconnect prompt, which is safe).
+        if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
+            set.insert(session_path.clone());
+        } else {
+            warn!(
+                "USER_DISCONNECTED lock poisoned — \
+                 SessDestroyed may show reconnect prompt"
+            );
+        }
+        let tray_for_retry = tray_for_status.clone();
+        let settings = crate::settings::Settings::new();
+        let sp_for_disconnect = session_path;
+        let dbus_for_disconnect = dbus_conn.clone();
+        glib::spawn_future_local(async move {
+            // Disconnect the failed session on D-Bus to prevent orphan
+            // sessions from accumulating.
+            if let Err(e) = super::session_ops::session_action(
+                &dbus_for_disconnect,
+                &sp_for_disconnect,
+                "disconnect",
+            )
+            .await
+            {
+                tracing::warn!("Failed to disconnect orphan session: {}", e);
+            }
+            if let Err(e) = super::session_ops::connect_to_config(
+                &dbus_conn,
+                &config_path,
+                &tray_for_retry,
+                &settings,
+            )
+            .await
+            {
+                tracing::error!("Auto-reconnect after auth failure failed: {}", e);
+            }
+        });
+    } else {
+        warn!(
+            "Max auth attempts reached for '{}' — disconnecting",
+            config_name
+        );
+        // Reset this config's retry budget so the user can reconnect within
+        // the 5-min window (otherwise the path-keyed counter stays at/near MAX
+        // and the next wrong password instantly disconnects again).
+        // disconnect_with_message no longer clears the counter (it doesn't
+        // receive the path); clear it here instead.
+        if let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock() {
+            attempts.remove(&config_path);
+        }
+        glib::spawn_future_local(async move {
+            super::session_ops::disconnect_with_message(
+                &dbus_conn,
+                &session_path,
+                "Authentication Failed",
+                &format!(
+                    "Too many failed attempts for '{}'. Session disconnected.",
+                    config_name
+                ),
+            )
+            .await;
+        });
+    }
+}
+
+/// Connection failure on `path`: disconnect the session with a user-facing message.
+fn handle_conn_failed(
+    conn: &zbus::Connection,
+    tray_for_status: &ksni::blocking::Handle<VpnTray>,
+    path: &str,
+) {
+    warn!("Connection failed for session {}", path);
+    let session_path = path.to_string();
+    let dbus_conn = conn.clone();
+    let config_name = tray_for_status
+        .update(|t| t.sessions.get(&session_path).map(|s| s.config_name.clone()))
+        .flatten()
+        .unwrap_or_else(|| FALLBACK_NAME.to_string());
+    glib::spawn_future_local(async move {
+        super::session_ops::disconnect_with_message(
+            &dbus_conn,
+            &session_path,
+            "Connection Failed",
+            &format!("Connection failed for '{}'. Please try again.", config_name),
+        )
+        .await;
+    });
+}
+
+/// Generic session error (config/process errors) on `path`: disconnect with a
+/// message built from `message` (empty → generic). `major`/`minor` are logged.
+fn handle_session_error(
+    conn: &zbus::Connection,
+    tray_for_status: &ksni::blocking::Handle<VpnTray>,
+    path: &str,
+    major: u32,
+    minor: u32,
+    message: &str,
+) {
+    warn!(
+        "Session error for {}: major={}, minor={}",
+        path, major, minor
+    );
+    let session_path = path.to_string();
+    let dbus_conn = conn.clone();
+    let config_name = tray_for_status
+        .update(|t| t.sessions.get(&session_path).map(|s| s.config_name.clone()))
+        .flatten()
+        .unwrap_or_else(|| FALLBACK_NAME.to_string());
+    let body = if message.is_empty() {
+        format!("VPN error for '{}'.", config_name)
+    } else {
+        format!("VPN error for '{}': {}", config_name, message)
+    };
+    glib::spawn_future_local(async move {
+        super::session_ops::disconnect_with_message(&dbus_conn, &session_path, "VPN Error", &body)
+            .await;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +613,96 @@ mod tests {
         let mut s = seeded_connected();
         apply_status_transition(&mut s, failed());
         assert!(!s.status.is_connected());
+    }
+
+    // --- is_status_change ---------------------------------------------------
+
+    #[test]
+    fn is_status_change_accepts_backend_statuschange_signal() {
+        use zbus::message::Type as MessageType;
+        assert!(is_status_change(
+            MessageType::Signal,
+            Some("net.openvpn.v3.backends"),
+            Some("StatusChange"),
+        ));
+    }
+
+    #[test]
+    fn is_status_change_rejects_non_signal_method_call() {
+        use zbus::message::Type as MessageType;
+        assert!(!is_status_change(
+            MessageType::MethodCall,
+            Some("net.openvpn.v3.backends"),
+            Some("StatusChange"),
+        ));
+    }
+
+    #[test]
+    fn is_status_change_rejects_wrong_interface() {
+        use zbus::message::Type as MessageType;
+        // A StatusChange on the wrong interface is not ours.
+        assert!(!is_status_change(
+            MessageType::Signal,
+            Some("net.openvpn.v3.sessions"),
+            Some("StatusChange"),
+        ));
+    }
+
+    #[test]
+    fn is_status_change_rejects_wrong_member() {
+        use zbus::message::Type as MessageType;
+        // Log signals share the interface but a different member.
+        assert!(!is_status_change(
+            MessageType::Signal,
+            Some("net.openvpn.v3.backends"),
+            Some("Log"),
+        ));
+    }
+
+    #[test]
+    fn is_status_change_rejects_missing_interface_or_member() {
+        use zbus::message::Type as MessageType;
+        assert!(!is_status_change(
+            MessageType::Signal,
+            None,
+            Some("StatusChange")
+        ));
+        assert!(!is_status_change(
+            MessageType::Signal,
+            Some("net.openvpn.v3.backends"),
+            None,
+        ));
+    }
+
+    // --- should_dispatch ----------------------------------------------------
+
+    #[test]
+    fn should_dispatch_true_for_first_seen_tuple() {
+        // No prior signal for this path → always dispatch.
+        assert!(should_dispatch(None, 3, 4, false));
+    }
+
+    #[test]
+    fn should_dispatch_false_for_repeat_non_auth() {
+        // Same (major, minor) seen earlier, not an auth challenge → skip.
+        assert!(!should_dispatch(Some((3, 4)), 3, 4, false));
+    }
+
+    #[test]
+    fn should_dispatch_true_for_repeat_with_new_minor() {
+        // Same path, different minor → dispatch.
+        assert!(should_dispatch(Some((3, 4)), 3, 5, false));
+    }
+
+    #[test]
+    fn should_dispatch_auth_exempt_for_repeat() {
+        // Auth challenge re-emitted with the same (major, minor) after Resume
+        // must still dispatch.
+        assert!(should_dispatch(Some((7, 8)), 7, 8, true));
+    }
+
+    #[test]
+    fn should_dispatch_auth_first_seen_also_dispatches() {
+        assert!(should_dispatch(None, 7, 8, true));
     }
 }

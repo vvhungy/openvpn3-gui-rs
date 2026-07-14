@@ -57,6 +57,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.17" date="2026-07-14">
+      <description>
+        <p>Internal complexity-reduction sprint — the four highest cognitive-complexity hotspots (the status-change handler, D-Bus initialization, session signal handlers, and the stats poller) are decomposed into unit-tested pure helpers and thin orchestration wrappers. No user-visible behaviour change.</p>
+      </description>
+    </release>
     <release version="0.3.16" date="2026-07-09">
       <description>
         <p>Internal quality sprint — no user-visible behaviour change.</p>

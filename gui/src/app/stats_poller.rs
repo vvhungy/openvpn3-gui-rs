@@ -98,13 +98,7 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
             // helper that lacks the method (pre-0.3.14) errors the call → we
             // no-op and stop polling for the session.
             let bypass_live = tray_for_timer
-                .update(|t| {
-                    matches!(
-                        t.bypass_state,
-                        crate::tray::BypassState::Active { .. }
-                            | crate::tray::BypassState::Drifted { .. }
-                    )
-                })
+                .update(|t| bypass_is_live(&t.bypass_state))
                 .unwrap_or(false);
             if bypass_live && any_connected {
                 let all = settings.bypass_cidrs();
@@ -114,7 +108,6 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                 if let Some(report) =
                     crate::dbus::killswitch::verify_bypass_set(desired_v4, desired_v6).await
                 {
-                    use crate::tray::BypassState;
                     if report.is_clean() {
                         // Recovery: restore the apply-outcome counts captured
                         // when we entered Drifted, not a fabricated full-success
@@ -124,16 +117,8 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                         // silently upgraded to failed=0.
                         let was_drifted = tray_for_timer
                             .update(|t| {
-                                if let BypassState::Drifted {
-                                    prev_applied,
-                                    prev_failed,
-                                    ..
-                                } = t.bypass_state
-                                {
-                                    t.bypass_state = BypassState::Active {
-                                        applied: prev_applied,
-                                        failed: prev_failed,
-                                    };
+                                if let Some(restored) = recover_from_drift(&t.bypass_state) {
+                                    t.bypass_state = restored;
                                     true
                                 } else {
                                     false
@@ -166,39 +151,15 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
                         // resurrect a torn-down kill-switch as Drifted. Preserve
                         // the pre-drift apply counts for faithful recovery.
                         let transitioned = tray_for_timer
-                            .update(|t| match t.bypass_state {
-                                BypassState::Active { applied, failed } => {
-                                    t.bypass_state = BypassState::Drifted {
-                                        missing: missing_count,
-                                        extra: extra_count,
-                                        prev_applied: applied,
-                                        prev_failed: failed,
-                                    };
-                                    true
+                            .update(|t| {
+                                if let Some((new_state, notify)) =
+                                    drift_transition(&t.bypass_state, missing_count, extra_count)
+                                {
+                                    t.bypass_state = new_state;
+                                    notify
+                                } else {
+                                    false
                                 }
-                                BypassState::Drifted {
-                                    missing: prev_missing,
-                                    extra: prev_extra,
-                                    prev_applied,
-                                    prev_failed,
-                                } => {
-                                    // Already Drifted: only re-notify if the
-                                    // drift dimensions changed since last poll,
-                                    // so a persistent drift doesn't re-fire the
-                                    // critical toast every stats cycle (~30s).
-                                    let changed =
-                                        prev_missing != missing_count || prev_extra != extra_count;
-                                    t.bypass_state = BypassState::Drifted {
-                                        missing: missing_count,
-                                        extra: extra_count,
-                                        prev_applied,
-                                        prev_failed,
-                                    };
-                                    changed
-                                }
-                                // Off / Failed: bypass no longer live — the
-                                // captured gate is stale, drop this report.
-                                _ => false,
                             })
                             .unwrap_or(false);
                         if transitioned {
@@ -209,6 +170,86 @@ pub(super) fn setup_stats_poller(dbus: &zbus::Connection, tray: &ksni::blocking:
             }
         }
     });
+}
+
+/// True when bypass is in a live, verifiable state (`Active` or `Drifted`).
+/// Drift detection and recovery run only while live — `Off`/`Failed` have no
+/// nft set to reconcile. Extracted so the gate is unit-testable.
+fn bypass_is_live(state: &crate::tray::BypassState) -> bool {
+    matches!(
+        state,
+        crate::tray::BypassState::Active { .. } | crate::tray::BypassState::Drifted { .. }
+    )
+}
+
+/// Recovery transition: a `Drifted` state whose live sets now match the desired
+/// set restores the pre-drift apply counts as `Active` (not a fabricated
+/// full-success Active — drift verifies set membership, a different measure than
+/// route apply-outcome). Returns the restored `Active` state, or `None` if not
+/// currently `Drifted`. Pure; the tray mutation stays at the call site.
+fn recover_from_drift(state: &crate::tray::BypassState) -> Option<crate::tray::BypassState> {
+    use crate::tray::BypassState;
+    if let BypassState::Drifted {
+        prev_applied,
+        prev_failed,
+        ..
+    } = state
+    {
+        Some(BypassState::Active {
+            applied: *prev_applied,
+            failed: *prev_failed,
+        })
+    } else {
+        None
+    }
+}
+
+/// Drift transition from a live state into `Drifted` with the current
+/// missing/extra counts, preserving pre-drift apply counts for faithful
+/// recovery. Returns `Some((new_state, should_notify))`:
+/// - `Active` → `Drifted` (new drift): notify.
+/// - `Drifted` → `Drifted`: re-notify only if missing/extra changed since the
+///   last poll (a persistent drift must not re-fire the toast every ~30s).
+/// - `Off`/`Failed`: `None` — the captured `bypass_live` gate is stale (a
+///   disconnect/split-tunnel toggle during the verify await moved bypass off the
+///   live path); drop the report so we never resurrect a torn-down kill-switch.
+///
+/// Pure; the tray mutation stays at the call site.
+fn drift_transition(
+    state: &crate::tray::BypassState,
+    missing: usize,
+    extra: usize,
+) -> Option<(crate::tray::BypassState, bool)> {
+    use crate::tray::BypassState;
+    match state {
+        BypassState::Active { applied, failed } => Some((
+            BypassState::Drifted {
+                missing,
+                extra,
+                prev_applied: *applied,
+                prev_failed: *failed,
+            },
+            true,
+        )),
+        BypassState::Drifted {
+            missing: prev_missing,
+            extra: prev_extra,
+            prev_applied,
+            prev_failed,
+        } => {
+            let changed = *prev_missing != missing || *prev_extra != extra;
+            Some((
+                BypassState::Drifted {
+                    missing,
+                    extra,
+                    prev_applied: *prev_applied,
+                    prev_failed: *prev_failed,
+                },
+                changed,
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// Update byte counters and detect stall condition.
@@ -475,5 +516,131 @@ mod tests {
         s.auto_reconnect_attempted_at =
             Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
         assert!(should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+    }
+
+    // --- bypass drift state machine (pure) ---------------------------------
+
+    #[test]
+    fn bypass_is_live_true_for_active_and_drifted() {
+        use crate::tray::BypassState;
+        assert!(bypass_is_live(&BypassState::Active {
+            applied: 3,
+            failed: 1
+        }));
+        assert!(bypass_is_live(&BypassState::Drifted {
+            missing: 1,
+            extra: 0,
+            prev_applied: 3,
+            prev_failed: 1
+        }));
+    }
+
+    #[test]
+    fn bypass_is_live_false_for_off_and_failed() {
+        use crate::tray::BypassState;
+        assert!(!bypass_is_live(&BypassState::Off));
+        assert!(!bypass_is_live(&BypassState::Failed));
+    }
+
+    #[test]
+    fn recover_from_drift_restores_prev_counts_as_active() {
+        use crate::tray::BypassState;
+        let d = BypassState::Drifted {
+            missing: 2,
+            extra: 1,
+            prev_applied: 5,
+            prev_failed: 2,
+        };
+        assert!(matches!(
+            recover_from_drift(&d),
+            Some(BypassState::Active {
+                applied: 5,
+                failed: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn recover_from_drift_none_when_not_drifted() {
+        use crate::tray::BypassState;
+        assert!(
+            recover_from_drift(&BypassState::Active {
+                applied: 1,
+                failed: 0
+            })
+            .is_none()
+        );
+        assert!(recover_from_drift(&BypassState::Off).is_none());
+    }
+
+    #[test]
+    fn drift_transition_active_to_drifted_notifies() {
+        use crate::tray::BypassState;
+        let active = BypassState::Active {
+            applied: 4,
+            failed: 1,
+        };
+        let (new, notify) = drift_transition(&active, 2, 0).unwrap();
+        assert!(matches!(
+            new,
+            BypassState::Drifted {
+                missing: 2,
+                extra: 0,
+                prev_applied: 4,
+                prev_failed: 1
+            }
+        ));
+        assert!(notify, "first drift must notify");
+    }
+
+    #[test]
+    fn drift_transition_drifted_unchanged_dims_no_notify() {
+        use crate::tray::BypassState;
+        let drifted = BypassState::Drifted {
+            missing: 2,
+            extra: 0,
+            prev_applied: 4,
+            prev_failed: 1,
+        };
+        let (new, notify) = drift_transition(&drifted, 2, 0).unwrap();
+        assert!(matches!(
+            new,
+            BypassState::Drifted {
+                missing: 2,
+                extra: 0,
+                prev_applied: 4,
+                prev_failed: 1
+            }
+        ));
+        assert!(!notify, "unchanged drift dims must not re-notify");
+    }
+
+    #[test]
+    fn drift_transition_drifted_changed_dims_notifies() {
+        use crate::tray::BypassState;
+        let drifted = BypassState::Drifted {
+            missing: 2,
+            extra: 0,
+            prev_applied: 4,
+            prev_failed: 1,
+        };
+        let (new, notify) = drift_transition(&drifted, 3, 1).unwrap();
+        assert!(matches!(
+            new,
+            BypassState::Drifted {
+                missing: 3,
+                extra: 1,
+                prev_applied: 4,
+                prev_failed: 1
+            }
+        ));
+        assert!(notify);
+    }
+
+    #[test]
+    fn drift_transition_off_is_stale_gate() {
+        use crate::tray::BypassState;
+        assert!(drift_transition(&BypassState::Off, 1, 0).is_none());
+        assert!(drift_transition(&BypassState::Failed, 1, 0).is_none());
     }
 }

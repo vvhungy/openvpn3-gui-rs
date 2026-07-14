@@ -32,8 +32,52 @@ pub(crate) async fn init_dbus(
         .await?;
 
     // Detect manager version
-    let manager_version = parse_manager_version(config_manager.version().await.ok());
+    log_manager_version_assessment(parse_manager_version(config_manager.version().await.ok()));
 
+    // Probe the kill-switch helper's Version property (informational only).
+    probe_killswitch_helper_version().await;
+
+    let configs = fetch_config_infos(&config_manager, dbus).await?;
+    let InitialSessions {
+        sessions,
+        connected_paths,
+        pending_auth,
+    } = scan_initial_sessions(&session_manager, dbus).await?;
+
+    // Update tray with initial state
+    let config_count = configs.len();
+    tray.update(move |t| {
+        t.configs = configs;
+        t.sessions = sessions;
+    });
+    info!(
+        "Tray updated with {} configs, initial state set",
+        config_count
+    );
+
+    // Cold-start auth: replay missed StatusChange dispatch for sessions that
+    // were already waiting on user input when the GUI started. Without this,
+    // a session in "Authentication required" at app launch never gets its
+    // credentials/challenge dialog.
+    for (path, status, message) in pending_auth {
+        info!("Cold-start: dispatching auth handler for session {}", path);
+        super::auth_handlers::try_handle_auth(dbus, tray, &status, &path, &message);
+    }
+
+    // Re-apply bypass + kill-switch state for sessions that were already
+    // connected before this GUI instance started (e.g., after a GUI restart).
+    reapply_firewall_on_startup(dbus, tray, settings, connected_paths).await;
+
+    // Auto-connect on startup based on GSettings preference
+    handle_startup_connect(settings, dbus, tray).await;
+
+    Ok(())
+}
+
+/// Log whether the detected OpenVPN3 manager version is unsupported / below
+/// recommended / ok (the ok tier is silent). Extracted from `init_dbus` so the
+/// tier decision is named rather than three inline branches.
+fn log_manager_version_assessment(manager_version: u32) {
     if manager_version < MANAGER_VERSION_MINIMUM {
         error!(
             "Unsupported OpenVPN3 version: {}. Minimum: {}",
@@ -45,10 +89,12 @@ pub(crate) async fn init_dbus(
             manager_version, MANAGER_VERSION_RECOMMENDED
         );
     }
+}
 
-    // Probe the kill-switch helper's Version property. Informational only —
-    // a mismatch logs a warning, never blocks startup or any kill-switch
-    // call. Helper not present is a normal state (package not installed).
+/// Probe the kill-switch helper's Version property. Informational only —
+/// a mismatch logs a warning, never blocks startup or any kill-switch
+/// call. Helper not present is a normal state (package not installed).
+async fn probe_killswitch_helper_version() {
     match crate::dbus::killswitch::probe_version().await {
         Some(helper_version) => {
             if helper_version_below_min(&helper_version, MIN_HELPER_VERSION) {
@@ -63,7 +109,14 @@ pub(crate) async fn init_dbus(
         }
         None => debug!("kill-switch helper not present (skipping version probe)"),
     }
+}
 
+/// Fetch all available VPN configurations and resolve their display names.
+/// Returns `Err` if the config manager is unavailable so the caller can retry.
+async fn fetch_config_infos(
+    config_manager: &ConfigurationManagerProxy<'_>,
+    dbus: &zbus::Connection,
+) -> anyhow::Result<Vec<ConfigInfo>> {
     // Fetch configurations — config manager may not be running yet at startup
     let config_paths = match config_manager.FetchAvailableConfigs().await {
         Ok(paths) => paths,
@@ -95,7 +148,37 @@ pub(crate) async fn init_dbus(
             Err(e) => warn!("Failed to build config proxy for {}: {}", path, e),
         }
     }
+    Ok(configs)
+}
 
+/// Cold-start scan output: the session map plus bookkeeping for already-connected
+/// sessions (firewall re-apply) and sessions already waiting on user input
+/// (cold-start auth dispatch).
+struct InitialSessions {
+    sessions: HashMap<String, SessionInfo>,
+    connected_paths: Vec<String>,
+    pending_auth: Vec<(String, SessionStatus, String)>,
+}
+
+/// True if `status` is one of the "needs user input" states that warrant
+/// cold-start auth dispatch — a session already waiting on credentials / a
+/// challenge / URL auth when the GUI starts won't re-emit `StatusChange`, so
+/// it must be replayed manually. Extracted so the carve-out is unit-testable.
+fn needs_cold_start_auth(status: &SessionStatus) -> bool {
+    status.needs_user_input()
+        || status.needs_credentials()
+        || status.needs_url_auth()
+        || status.needs_challenge()
+}
+
+/// Scan active sessions: enable log forwarding, build the tray session map, and
+/// collect (a) connected paths for firewall re-apply and (b) sessions already
+/// waiting on user input for cold-start auth dispatch. A missing session manager
+/// (no active sessions) yields an empty scan, not an error.
+async fn scan_initial_sessions(
+    session_manager: &SessionManagerProxy<'_>,
+    dbus: &zbus::Connection,
+) -> anyhow::Result<InitialSessions> {
     // Fetch sessions — session manager may not be running when no sessions are active
     let session_paths = match session_manager.FetchAvailableSessions().await {
         Ok(paths) => paths,
@@ -119,145 +202,164 @@ pub(crate) async fn init_dbus(
             .await
         {
             Ok(session) => {
-                let (major, minor, message) =
-                    session.status().await.unwrap_or((0, 0, String::new()));
-                let config_name = session
-                    .config_name()
-                    .await
-                    .unwrap_or_else(|_| "VPN".to_string());
-                let config_path = session
-                    .config_path()
-                    .await
-                    .map(|p| p.as_str().to_string())
-                    .unwrap_or_default();
-
-                info!(
-                    "Session: {} -> {} (status: {}/{})",
-                    path, config_name, major, minor
-                );
-
-                // Enable log/status forwarding so we receive StatusChange signals
-                if let Err(e) = session.LogForward(true).await {
-                    debug!("LogForward for {}: {}", path, e);
+                let scanned = build_session_entry(&session, path).await;
+                if let Some(p) = scanned.connected_path {
+                    connected_paths.push(p);
                 }
-
-                let status = SessionStatus::new(major, minor, message.clone());
-                if status.is_connected() {
-                    connected_paths.push(path.as_str().to_string());
+                if let Some(auth) = scanned.pending_auth {
+                    pending_auth.push(auth);
                 }
-                if status.needs_user_input()
-                    || status.needs_credentials()
-                    || status.needs_url_auth()
-                    || status.needs_challenge()
-                {
-                    pending_auth.push((path.as_str().to_string(), status.clone(), message));
-                }
-                sessions.insert(
-                    path.as_str().to_string(),
-                    SessionInfo {
-                        session_path: path.as_str().to_string(),
-                        config_path,
-                        config_name,
-                        status,
-                        connected_at: None,
-                        bytes_in: 0,
-                        bytes_out: 0,
-                        last_bytes_in: 0,
-                        last_bytes_out: 0,
-                        idle_started_at: None,
-                        idle_since: None,
-                        auto_reconnect_attempted_at: None,
-                        kill_switch_active: false,
-                    },
-                );
+                sessions.insert(path.as_str().to_string(), scanned.entry);
             }
             Err(e) => warn!("Failed to build session proxy for {}: {}", path, e),
         }
     }
+    Ok(InitialSessions {
+        sessions,
+        connected_paths,
+        pending_auth,
+    })
+}
 
-    // Update tray with initial state
-    tray.update(move |t| {
-        t.configs = configs;
-        t.sessions = sessions;
-    });
+/// One session's cold-start scan result: the tray entry plus whether the
+/// session is already connected (→ firewall re-apply) and/or waiting on user
+/// input (→ cold-start auth dispatch). Extracted from `scan_initial_sessions`
+/// so the session loop is a thin fold.
+struct ScannedSession {
+    entry: SessionInfo,
+    connected_path: Option<String>,
+    pending_auth: Option<(String, SessionStatus, String)>,
+}
+
+/// Build the tray entry for one session and flag connected / needs-input
+/// state. The D-Bus reads and status predicates live here so the caller's
+/// loop body is a thin fold.
+async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedSession {
+    let (major, minor, message) = session.status().await.unwrap_or((0, 0, String::new()));
+    let config_name = session
+        .config_name()
+        .await
+        .unwrap_or_else(|_| "VPN".to_string());
+    let config_path = session
+        .config_path()
+        .await
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_default();
 
     info!(
-        "Tray updated with {} configs, initial state set",
-        config_paths.len()
+        "Session: {} -> {} (status: {}/{})",
+        path, config_name, major, minor
     );
 
-    // Cold-start auth: replay missed StatusChange dispatch for sessions that
-    // were already waiting on user input when the GUI started. Without this,
-    // a session in "Authentication required" at app launch never gets its
-    // credentials/challenge dialog.
-    for (path, status, message) in pending_auth {
-        info!("Cold-start: dispatching auth handler for session {}", path);
-        super::auth_handlers::try_handle_auth(dbus, tray, &status, &path, &message);
+    // Enable log/status forwarding so we receive StatusChange signals
+    if let Err(e) = session.LogForward(true).await {
+        debug!("LogForward for {}: {}", path, e);
     }
 
-    // Re-apply bypass + kill-switch state for sessions that were already
-    // connected before this GUI instance started (e.g., after a GUI restart).
-    // The helper's watcher cleaned the rules when the previous instance exited.
-    //
-    // ORDER MATTERS: bypass must land at the helper before `AddRules`. The
-    // helper snapshots `state.bypass_cidrs` inside `AddRules` and bakes it
-    // into the nft script (bypass accept rules + MSS clamp). Two independent
-    // spawns would race — if KS won, the firewall would drop bypassed
-    // traffic until the next manual reconnect.
+    let status = SessionStatus::new(major, minor, message.clone());
+    let connected_path = if status.is_connected() {
+        Some(path.to_string())
+    } else {
+        None
+    };
+    let pending_auth = if needs_cold_start_auth(&status) {
+        Some((path.to_string(), status.clone(), message))
+    } else {
+        None
+    };
+    ScannedSession {
+        entry: SessionInfo {
+            session_path: path.to_string(),
+            config_path,
+            config_name,
+            status,
+            connected_at: None,
+            bytes_in: 0,
+            bytes_out: 0,
+            last_bytes_in: 0,
+            last_bytes_out: 0,
+            idle_started_at: None,
+            idle_since: None,
+            auto_reconnect_attempted_at: None,
+            kill_switch_active: false,
+        },
+        connected_path,
+        pending_auth,
+    }
+}
+
+/// True when connected sessions exist AND either the kill-switch or bypass
+/// rules need re-applying after a GUI restart. Extracted so the gate is
+/// unit-testable. (ORDER MATTERS: bypass must land at the helper before
+/// `AddRules` — see `reapply_firewall_on_startup`.)
+fn should_reapply_firewall(has_connected: bool, ks_enabled: bool, has_bypass: bool) -> bool {
+    has_connected && (ks_enabled || has_bypass)
+}
+
+/// Re-apply bypass + kill-switch state for sessions that were already
+/// connected before this GUI instance started (e.g., after a GUI restart).
+/// The helper's watcher cleaned the rules when the previous instance exited.
+///
+/// ORDER MATTERS: bypass must land at the helper before `AddRules`. The
+/// helper snapshots `state.bypass_cidrs` inside `AddRules` and bakes it
+/// into the nft script (bypass accept rules + MSS clamp). Two independent
+/// spawns would race — if KS won, the firewall would drop bypassed
+/// traffic until the next manual reconnect.
+async fn reapply_firewall_on_startup(
+    dbus: &zbus::Connection,
+    tray: &ksni::blocking::Handle<VpnTray>,
+    settings: &Settings,
+    connected_paths: Vec<String>,
+) {
     let has_connected = !connected_paths.is_empty();
     let bypass_cidrs =
         crate::settings::enabled_cidrs(&settings.bypass_cidrs(), &settings.bypass_cidrs_disabled());
     let ks_enabled = settings.enable_kill_switch();
-    if has_connected && (ks_enabled || !bypass_cidrs.is_empty()) {
-        let allow_lan = settings.kill_switch_allow_lan();
-        let dbus_clone = dbus.clone();
-        let tray_clone = tray.clone();
-        glib::spawn_future_local(async move {
-            if !bypass_cidrs.is_empty() {
-                let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
-                let outcome = if set_ok {
-                    crate::dbus::killswitch::apply_bypass_routes().await
-                } else {
-                    None
-                };
-                apply_bypass_outcome_to_tray(&tray_clone, outcome, "startup re-apply");
-            }
+    if !should_reapply_firewall(has_connected, ks_enabled, !bypass_cidrs.is_empty()) {
+        return;
+    }
+    let allow_lan = settings.kill_switch_allow_lan();
+    let dbus_clone = dbus.clone();
+    let tray_clone = tray.clone();
+    glib::spawn_future_local(async move {
+        if !bypass_cidrs.is_empty() {
+            let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
+            let outcome = if set_ok {
+                crate::dbus::killswitch::apply_bypass_routes().await
+            } else {
+                None
+            };
+            apply_bypass_outcome_to_tray(&tray_clone, outcome, "startup re-apply");
+        }
 
-            if ks_enabled {
-                for path in connected_paths {
-                    match super::status_handler::apply_kill_switch(&dbus_clone, &path, allow_lan)
-                        .await
-                    {
-                        Ok(true) => {
-                            let p = path.clone();
-                            tray_clone.update(move |t| {
-                                if let Some(s) = t.sessions.get_mut(&p) {
-                                    s.kill_switch_active = true;
-                                }
-                            });
-                            crate::dialogs::show_killswitch_active_notification();
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            warn!("kill-switch: startup re-apply failed for {}: {}", path, e);
-                            crate::dialogs::show_error_notification(
-                                "Kill-Switch Re-Apply Failed",
-                                &format!(
-                                    "Firewall rules could not be re-applied after restart: {}",
-                                    e
-                                ),
-                            );
-                        }
+        if ks_enabled {
+            for path in connected_paths {
+                match super::status_handler::apply_kill_switch(&dbus_clone, &path, allow_lan).await
+                {
+                    Ok(true) => {
+                        let p = path.clone();
+                        tray_clone.update(move |t| {
+                            if let Some(s) = t.sessions.get_mut(&p) {
+                                s.kill_switch_active = true;
+                            }
+                        });
+                        crate::dialogs::show_killswitch_active_notification();
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!("kill-switch: startup re-apply failed for {}: {}", path, e);
+                        crate::dialogs::show_error_notification(
+                            "Kill-Switch Re-Apply Failed",
+                            &format!(
+                                "Firewall rules could not be re-applied after restart: {}",
+                                e
+                            ),
+                        );
                     }
                 }
             }
-        });
-    }
-
-    // Auto-connect on startup based on GSettings preference
-    handle_startup_connect(settings, dbus, tray).await;
-
-    Ok(())
+        }
+    });
 }
 
 /// Trigger auto-connect after tray is populated
@@ -429,5 +531,51 @@ mod tests {
         assert!(!helper_version_below_min("1.0.0", "0.1.0"));
         assert!(helper_version_below_min("0.1.0", "0.2.0"));
         assert!(!helper_version_below_min("0.2.0", "0.2.0"));
+    }
+
+    // --- needs_cold_start_auth ------------------------------------------------
+
+    #[test]
+    fn needs_cold_start_auth_true_for_credentials_request() {
+        // StatusMajor::Session (3) + SessAuthUserpass (20) → needs_credentials.
+        let s = SessionStatus::new(3, 20, String::new());
+        assert!(needs_cold_start_auth(&s));
+    }
+
+    #[test]
+    fn needs_cold_start_auth_false_for_non_auth_status() {
+        // A connected/error status trips none of the needs_* predicates.
+        let s = SessionStatus::new(0, 0, String::new());
+        assert!(!needs_cold_start_auth(&s));
+    }
+
+    #[test]
+    fn needs_cold_start_auth_false_for_session_unknown_minor() {
+        // Session major but a minor that matches no user-input predicate.
+        let s = SessionStatus::new(3, 99, String::new());
+        assert!(!needs_cold_start_auth(&s));
+    }
+
+    // --- should_reapply_firewall ---------------------------------------------
+
+    #[test]
+    fn should_reapply_firewall_false_when_no_connected_sessions() {
+        // Even with kill-switch enabled, nothing to re-apply if no session is up.
+        assert!(!should_reapply_firewall(false, true, true));
+    }
+
+    #[test]
+    fn should_reapply_firewall_false_when_connected_but_no_ks_no_bypass() {
+        assert!(!should_reapply_firewall(true, false, false));
+    }
+
+    #[test]
+    fn should_reapply_firewall_true_when_connected_and_ks_enabled() {
+        assert!(should_reapply_firewall(true, true, false));
+    }
+
+    #[test]
+    fn should_reapply_firewall_true_when_connected_and_bypass_present() {
+        assert!(should_reapply_firewall(true, false, true));
     }
 }

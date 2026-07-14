@@ -113,121 +113,12 @@ pub(crate) async fn setup_signal_handlers(
                             }
                         });
                     } else if event_type == SessionManagerEventType::SessDestroyed as u16 {
-                        // Capture config info before removing from tray. Fall back
-                        // to RECENT_DESTROYED_SESSIONS — status_handler removes the
-                        // entry from tray.sessions 3s after Disconnected, but
-                        // SessDestroyed can arrive several seconds later (~9s in
-                        // the resume-after-long-pause path), so without this cache
-                        // the reconnect notification silently fails to fire.
-                        let session_info = tray_for_session
-                            .update(|t| {
-                                t.sessions
-                                    .get(&session_path)
-                                    .map(|s| (s.config_path.clone(), s.config_name.clone()))
-                            })
-                            .flatten()
-                            .or_else(|| {
-                                super::session_ops::RECENT_DESTROYED_SESSIONS
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut m| m.remove(&session_path))
-                            });
-
-                        // Delay removal so status notifications complete with the
-                        // correct profile name. The status_handler also schedules a
-                        // 3s delayed removal on is_disconnected(); this 5s removal
-                        // is a safety net in case no terminal StatusChange arrives.
-                        let sp = session_path.clone();
-                        let tray_for_removal = tray_for_session.clone();
-                        glib::spawn_future_local(async move {
-                            glib::timeout_future_seconds(5).await;
-                            tray_for_removal.update(move |t| {
-                                t.sessions.remove(&sp);
-                            });
-                        });
-                        info!("Session destroyed, scheduled delayed removal");
-
-                        // Check whether the user initiated this disconnect
-                        let user_initiated =
-                            if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
-                                set.remove(&session_path)
-                            } else {
-                                false
-                            };
-
-                        if user_initiated {
-                            // Expected disconnect — release any kill-switch rules so
-                            // the user's internet keeps working. No-op when helper
-                            // not installed or kill-switch was never engaged.
-                            let tray_clear = tray_for_session.clone();
-                            glib::spawn_future_local(async move {
-                                crate::dbus::killswitch::remove_rules().await;
-                                crate::dbus::killswitch::remove_bypass_routes().await;
-                                tray_clear.update(|t| {
-                                    for s in t.sessions.values_mut() {
-                                        s.kill_switch_active = false;
-                                    }
-                                    t.bypass_state = crate::tray::BypassState::Off;
-                                });
-                                crate::dialogs::show_killswitch_inactive_notification();
-                            });
-                        } else if let Some((config_path, config_name)) = session_info
-                            && !config_path.is_empty()
-                        {
-                            // Unexpected drop — keep rules in place; the
-                            // notification's Reconnect/Dismiss handlers manage
-                            // their lifecycle from here.
-                            let settings = crate::settings::Settings::new();
-                            if settings.auto_reconnect() {
-                                let delay = settings.auto_reconnect_delay_seconds();
-                                info!(
-                                    "Unexpected session drop for '{}', auto-reconnect in {}s",
-                                    config_name, delay
-                                );
-                                let dbus = dbus_for_session.clone();
-                                let tray = tray_for_session.clone();
-                                let action_tx = action_tx_for_session.clone();
-                                glib::spawn_future_local(async move {
-                                    glib::timeout_future_seconds(delay).await;
-                                    let settings = crate::settings::Settings::new();
-                                    match super::session_ops::connect_to_config(
-                                        &dbus,
-                                        &config_path,
-                                        &tray,
-                                        &settings,
-                                    )
-                                    .await
-                                    {
-                                        Ok(()) => {
-                                            info!("Auto-reconnect succeeded for '{}'", config_name)
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                "Auto-reconnect failed for '{}': {}; falling back to notification",
-                                                config_name, e
-                                            );
-                                            crate::dialogs::show_reconnect_notification(
-                                                config_path,
-                                                config_name,
-                                                action_tx,
-                                                tray,
-                                            );
-                                        }
-                                    }
-                                });
-                            } else {
-                                info!(
-                                    "Unexpected session drop for '{}', showing reconnect notification",
-                                    config_name
-                                );
-                                crate::dialogs::show_reconnect_notification(
-                                    config_path,
-                                    config_name,
-                                    action_tx_for_session.clone(),
-                                    tray_for_session.clone(),
-                                );
-                            }
-                        }
+                        handle_session_destroyed(
+                            &dbus_for_session,
+                            &tray_for_session,
+                            &action_tx_for_session,
+                            session_path,
+                        );
                     }
                 }
                 Err(e) => warn!("Failed to parse SessionManagerEvent: {}", e),
@@ -238,4 +129,135 @@ pub(crate) async fn setup_signal_handlers(
     super::status_handler::setup_status_handler(dbus, &tray).await?;
 
     Ok(())
+}
+
+/// React to a destroyed session: schedule its tray removal, then either release
+/// kill-switch rules (user-initiated disconnect) or surface a reconnect path
+/// (unexpected drop — auto-reconnect if enabled, else a notification).
+///
+/// Impure (tray mutation, spawned futures, D-Bus via spawned tasks); named for
+/// readability, no unit-test surface (CLAUDE.md §Testing).
+fn handle_session_destroyed(
+    dbus: &zbus::Connection,
+    tray: &ksni::blocking::Handle<VpnTray>,
+    action_tx: &crate::tray::ActionSender,
+    session_path: String,
+) {
+    // Capture config info before removing from tray. Fall back to
+    // RECENT_DESTROYED_SESSIONS — status_handler removes the entry from
+    // tray.sessions 3s after Disconnected, but SessDestroyed can arrive
+    // several seconds later (~9s in the resume-after-long-pause path), so
+    // without this cache the reconnect notification silently fails to fire.
+    let session_info = tray
+        .update(|t| {
+            t.sessions
+                .get(&session_path)
+                .map(|s| (s.config_path.clone(), s.config_name.clone()))
+        })
+        .flatten()
+        .or_else(|| {
+            super::session_ops::RECENT_DESTROYED_SESSIONS
+                .lock()
+                .ok()
+                .and_then(|mut m| m.remove(&session_path))
+        });
+
+    // Delay removal so status notifications complete with the correct profile
+    // name. The status_handler also schedules a 3s delayed removal on
+    // is_disconnected(); this 5s removal is a safety net in case no terminal
+    // StatusChange arrives.
+    let sp = session_path.clone();
+    let tray_for_removal = tray.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future_seconds(5).await;
+        tray_for_removal.update(move |t| {
+            t.sessions.remove(&sp);
+        });
+    });
+    info!("Session destroyed, scheduled delayed removal");
+
+    // Check whether the user initiated this disconnect
+    let user_initiated = if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
+        set.remove(&session_path)
+    } else {
+        false
+    };
+
+    if user_initiated {
+        // Expected disconnect — release any kill-switch rules so the user's
+        // internet keeps working. No-op when helper not installed or kill-switch
+        // was never engaged.
+        let tray_clear = tray.clone();
+        glib::spawn_future_local(async move {
+            crate::dbus::killswitch::remove_rules().await;
+            crate::dbus::killswitch::remove_bypass_routes().await;
+            tray_clear.update(|t| {
+                for s in t.sessions.values_mut() {
+                    s.kill_switch_active = false;
+                }
+                t.bypass_state = crate::tray::BypassState::Off;
+            });
+            crate::dialogs::show_killswitch_inactive_notification();
+        });
+    } else if let Some((config_path, config_name)) = session_info
+        && !config_path.is_empty()
+    {
+        // Unexpected drop — keep rules in place; the notification's
+        // Reconnect/Dismiss handlers manage their lifecycle from here.
+        let settings = crate::settings::Settings::new();
+        if settings.auto_reconnect() {
+            spawn_auto_reconnect(dbus, tray, action_tx, config_path, config_name, settings);
+        } else {
+            info!(
+                "Unexpected session drop for '{}', showing reconnect notification",
+                config_name
+            );
+            crate::dialogs::show_reconnect_notification(
+                config_path,
+                config_name,
+                action_tx.clone(),
+                tray.clone(),
+            );
+        }
+    }
+}
+
+/// On an unexpected session drop with auto-reconnect enabled, wait `delay`
+/// seconds then try to re-establish the tunnel; fall back to a reconnect
+/// notification on failure. Impure (spawned future + D-Bus); no test surface.
+fn spawn_auto_reconnect(
+    dbus: &zbus::Connection,
+    tray: &ksni::blocking::Handle<VpnTray>,
+    action_tx: &crate::tray::ActionSender,
+    config_path: String,
+    config_name: String,
+    settings: crate::settings::Settings,
+) {
+    let delay = settings.auto_reconnect_delay_seconds();
+    info!(
+        "Unexpected session drop for '{}', auto-reconnect in {}s",
+        config_name, delay
+    );
+    let dbus = dbus.clone();
+    let tray = tray.clone();
+    let action_tx = action_tx.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future_seconds(delay).await;
+        let settings = crate::settings::Settings::new();
+        match super::session_ops::connect_to_config(&dbus, &config_path, &tray, &settings).await {
+            Ok(()) => info!("Auto-reconnect succeeded for '{}'", config_name),
+            Err(e) => {
+                warn!(
+                    "Auto-reconnect failed for '{}': {}; falling back to notification",
+                    config_name, e
+                );
+                crate::dialogs::show_reconnect_notification(
+                    config_path,
+                    config_name,
+                    action_tx,
+                    tray,
+                );
+            }
+        }
+    });
 }
