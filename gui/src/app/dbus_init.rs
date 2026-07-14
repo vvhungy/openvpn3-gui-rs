@@ -37,12 +37,20 @@ pub(crate) async fn init_dbus(
     // Probe the kill-switch helper's Version property (informational only).
     probe_killswitch_helper_version().await;
 
-    let configs = fetch_config_infos(&config_manager, dbus).await?;
+    // Configs and sessions are independent scans: the session scan takes no
+    // config as input, and the tray consumes both only after both resolve. Run
+    // them concurrently to cut startup-to-tray from the sum of the two
+    // round-trip chains to their max.
+    let (configs, initial_sessions) = futures::future::try_join(
+        fetch_config_infos(&config_manager, dbus),
+        scan_initial_sessions(&session_manager, dbus),
+    )
+    .await?;
     let InitialSessions {
         sessions,
         connected_paths,
         pending_auth,
-    } = scan_initial_sessions(&session_manager, dbus).await?;
+    } = initial_sessions;
 
     // Update tray with initial state
     let config_count = configs.len();
@@ -224,16 +232,26 @@ struct ScannedSession {
 /// state. The D-Bus reads and status predicates live here so the caller's
 /// loop body is a thin fold.
 async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedSession {
-    let (major, minor, message) = session.status().await.unwrap_or((0, 0, String::new()));
-    let config_name = session
-        .config_name()
-        .await
-        .unwrap_or_else(|_| crate::tray::FALLBACK_NAME.to_string());
-    let config_path = session
-        .config_path()
-        .await
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_default();
+    // The three per-session reads are independent (status / config_name /
+    // config_path); run them concurrently so N sessions cost N round-trips,
+    // not 3N. Each falls back to its pre-existing default on D-Bus error.
+    let ((major, minor, message), config_name, config_path) = futures::future::join3(
+        async { session.status().await.unwrap_or((0, 0, String::new())) },
+        async {
+            session
+                .config_name()
+                .await
+                .unwrap_or_else(|_| crate::tray::FALLBACK_NAME.to_string())
+        },
+        async {
+            session
+                .config_path()
+                .await
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_default()
+        },
+    )
+    .await;
 
     info!(
         "Session: {} -> {} (status: {}/{})",
