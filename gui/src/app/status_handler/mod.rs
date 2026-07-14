@@ -468,6 +468,21 @@ fn handle_auth_failed(
     }
 }
 
+/// Disconnect `path` asynchronously and surface `title`/`body` to the user.
+///
+/// Owns the clone-and-spawn pattern shared by the failure/error handlers below:
+/// every session-level disconnect-with-notification now routes through one
+/// place, so a future fix (e.g. clearing kill-switch state on failure) lands
+/// once instead of drifting between two copies.
+fn disconnect_with_notification(conn: &zbus::Connection, path: &str, title: &str, body: String) {
+    let session_path = path.to_string();
+    let dbus_conn = conn.clone();
+    let title = title.to_string();
+    glib::spawn_future_local(async move {
+        super::session_ops::disconnect_with_message(&dbus_conn, &session_path, &title, &body).await;
+    });
+}
+
 /// Connection failure on `path`: disconnect the session with a user-facing message.
 fn handle_conn_failed(
     conn: &zbus::Connection,
@@ -475,18 +490,13 @@ fn handle_conn_failed(
     path: &str,
 ) {
     warn!("Connection failed for session {}", path);
-    let session_path = path.to_string();
-    let dbus_conn = conn.clone();
-    let config_name = crate::tray::session_config_name(tray_for_status, &session_path);
-    glib::spawn_future_local(async move {
-        super::session_ops::disconnect_with_message(
-            &dbus_conn,
-            &session_path,
-            "Connection Failed",
-            &format!("Connection failed for '{}'. Please try again.", config_name),
-        )
-        .await;
-    });
+    let config_name = crate::tray::session_config_name(tray_for_status, path);
+    disconnect_with_notification(
+        conn,
+        path,
+        "Connection Failed",
+        format!("Connection failed for '{}'. Please try again.", config_name),
+    );
 }
 
 /// Generic session error (config/process errors) on `path`: disconnect with a
@@ -503,18 +513,13 @@ fn handle_session_error(
         "Session error for {}: major={}, minor={}",
         path, major, minor
     );
-    let session_path = path.to_string();
-    let dbus_conn = conn.clone();
-    let config_name = crate::tray::session_config_name(tray_for_status, &session_path);
+    let config_name = crate::tray::session_config_name(tray_for_status, path);
     let body = if message.is_empty() {
         format!("VPN error for '{}'.", config_name)
     } else {
         format!("VPN error for '{}': {}", config_name, message)
     };
-    glib::spawn_future_local(async move {
-        super::session_ops::disconnect_with_message(&dbus_conn, &session_path, "VPN Error", &body)
-            .await;
-    });
+    disconnect_with_notification(conn, path, "VPN Error", body);
 }
 
 #[cfg(test)]
