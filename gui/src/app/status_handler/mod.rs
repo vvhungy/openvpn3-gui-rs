@@ -62,19 +62,43 @@ pub(super) fn is_status_change(
         && member == Some("StatusChange")
 }
 
-/// Pure dedup predicate. OpenVPN3 delivers each `StatusChange` twice (once via
-/// `LogForward(true)`, once via the `AddMatch` rule), so a repeat `(major,
-/// minor)` for an already-seen path is skipped. Auth challenges are **exempt**:
-/// a re-emitted credential request after Resume on an invalidated session must
-/// still reach the dispatcher even if the same `(major, minor)` was seen
-/// earlier. Returns `true` when the signal should be dispatched.
+/// Why an incoming StatusChange for a path is dispatched after the per-path
+/// dedup check, or `None` to skip it.
+///
+/// OpenVPN3 delivers each `StatusChange` twice (once via `LogForward(true)`,
+/// once via the `AddMatch` rule), so a repeat `(major, minor)` for an
+/// already-seen path is skipped. Auth challenges are **exempt**: a re-emitted
+/// credential request after Resume on an invalidated session must still reach
+/// the dispatcher even if the same `(major, minor)` was seen earlier.
+///
+/// Returning the *reason* (rather than a bool) lets the caller branch on the
+/// dedup-exempt auth case without re-deriving `prev == Some((major, minor))`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DispatchReason {
+    /// First signal for this path.
+    FirstSeen,
+    /// `(major, minor)` changed since the last signal for this path.
+    Changed,
+    /// Repeat `(major, minor)` on a path, but auth challenges are dedup-exempt.
+    AuthExempt,
+}
+
+/// Classify an incoming StatusChange against the last-seen `(major, minor)` for
+/// its path. Returns `None` to skip (a non-auth repeat), otherwise the reason
+/// it should dispatch.
 pub(super) fn should_dispatch(
     prev: Option<(u32, u32)>,
     major: u32,
     minor: u32,
     is_auth: bool,
-) -> bool {
-    is_auth || prev != Some((major, minor))
+) -> Option<DispatchReason> {
+    let cur = (major, minor);
+    match prev {
+        None => Some(DispatchReason::FirstSeen),
+        Some(prev) if prev != cur => Some(DispatchReason::Changed),
+        Some(_) if is_auth => Some(DispatchReason::AuthExempt),
+        Some(_) => None,
+    }
 }
 
 /// Subscribe to StatusChange signals and spawn the handler loop.
@@ -142,14 +166,18 @@ pub(super) async fn setup_status_handler(
                     // dispatch). See `should_dispatch`.
                     let is_auth = status.is_auth_request();
                     let prev = last_signal.get(&path).copied();
-                    if !should_dispatch(prev, major, minor, is_auth) {
-                        continue;
-                    }
-                    if is_auth && prev == Some((major, minor)) {
-                        info!(
-                            "Auth signal re-emitted for {} (major={}, minor={}) — dedup-exempt, dispatching",
-                            path, major, minor
-                        );
+                    // Branch on the reason rather than re-deriving
+                    // `prev == Some((major, minor))`: should_dispatch already
+                    // classified the dedup-exempt auth re-emit as AuthExempt.
+                    match should_dispatch(prev, major, minor, is_auth) {
+                        None => continue,
+                        Some(DispatchReason::AuthExempt) => {
+                            info!(
+                                "Auth signal re-emitted for {} (major={}, minor={}) — dedup-exempt, dispatching",
+                                path, major, minor
+                            );
+                        }
+                        Some(_) => {}
                     }
                     last_signal.insert(path.clone(), (major, minor));
 
@@ -674,32 +702,57 @@ mod tests {
     // --- should_dispatch ----------------------------------------------------
 
     #[test]
-    fn should_dispatch_true_for_first_seen_tuple() {
-        // No prior signal for this path → always dispatch.
-        assert!(should_dispatch(None, 3, 4, false));
+    fn should_dispatch_first_seen_for_new_path() {
+        // No prior signal for this path → dispatch, classified as first-seen.
+        assert_eq!(
+            should_dispatch(None, 3, 4, false),
+            Some(DispatchReason::FirstSeen)
+        );
     }
 
     #[test]
-    fn should_dispatch_false_for_repeat_non_auth() {
+    fn should_dispatch_none_for_repeat_non_auth() {
         // Same (major, minor) seen earlier, not an auth challenge → skip.
-        assert!(!should_dispatch(Some((3, 4)), 3, 4, false));
+        assert_eq!(should_dispatch(Some((3, 4)), 3, 4, false), None);
     }
 
     #[test]
-    fn should_dispatch_true_for_repeat_with_new_minor() {
-        // Same path, different minor → dispatch.
-        assert!(should_dispatch(Some((3, 4)), 3, 5, false));
+    fn should_dispatch_changed_for_repeat_with_new_minor() {
+        // Same path, different minor → dispatch, classified as changed.
+        assert_eq!(
+            should_dispatch(Some((3, 4)), 3, 5, false),
+            Some(DispatchReason::Changed)
+        );
     }
 
     #[test]
     fn should_dispatch_auth_exempt_for_repeat() {
         // Auth challenge re-emitted with the same (major, minor) after Resume
-        // must still dispatch.
-        assert!(should_dispatch(Some((7, 8)), 7, 8, true));
+        // must still dispatch — and as AuthExempt, not FirstSeen/Changed, so the
+        // caller can log the dedup-exempt case without re-deriving prev.
+        assert_eq!(
+            should_dispatch(Some((7, 8)), 7, 8, true),
+            Some(DispatchReason::AuthExempt)
+        );
     }
 
     #[test]
-    fn should_dispatch_auth_first_seen_also_dispatches() {
-        assert!(should_dispatch(None, 7, 8, true));
+    fn should_dispatch_first_seen_dominates_auth() {
+        // First signal for a path is FirstSeen even when it's an auth challenge
+        // (nothing to be exempt from yet).
+        assert_eq!(
+            should_dispatch(None, 7, 8, true),
+            Some(DispatchReason::FirstSeen)
+        );
+    }
+
+    #[test]
+    fn should_dispatch_changed_when_auth_and_minor_differ() {
+        // Auth + a genuinely changed tuple dispatches as Changed (changed
+        // dominates; AuthExempt is only for an exact-repeat auth re-emit).
+        assert_eq!(
+            should_dispatch(Some((7, 8)), 7, 9, true),
+            Some(DispatchReason::Changed)
+        );
     }
 }

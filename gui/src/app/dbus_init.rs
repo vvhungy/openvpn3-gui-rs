@@ -295,14 +295,6 @@ async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedS
     }
 }
 
-/// True when connected sessions exist AND either the kill-switch or bypass
-/// rules need re-applying after a GUI restart. Extracted so the gate is
-/// unit-testable. (ORDER MATTERS: bypass must land at the helper before
-/// `AddRules` — see `reapply_firewall_on_startup`.)
-fn should_reapply_firewall(has_connected: bool, ks_enabled: bool, has_bypass: bool) -> bool {
-    has_connected && (ks_enabled || has_bypass)
-}
-
 /// Re-apply bypass + kill-switch state for sessions that were already
 /// connected before this GUI instance started (e.g., after a GUI restart).
 /// The helper's watcher cleaned the rules when the previous instance exited.
@@ -318,11 +310,13 @@ async fn reapply_firewall_on_startup(
     settings: &Settings,
     connected_paths: Vec<String>,
 ) {
-    let has_connected = !connected_paths.is_empty();
     let bypass_cidrs =
         crate::settings::enabled_cidrs(&settings.bypass_cidrs(), &settings.bypass_cidrs_disabled());
     let ks_enabled = settings.enable_kill_switch();
-    if !should_reapply_firewall(has_connected, ks_enabled, !bypass_cidrs.is_empty()) {
+    // Re-apply only when a connected session exists AND either the kill-switch
+    // or bypass rules need restoring (the helper cleaned them when the previous
+    // instance exited). Negation of `has_connected && (ks_enabled || has_bypass)`.
+    if connected_paths.is_empty() || (!ks_enabled && bypass_cidrs.is_empty()) {
         return;
     }
     let allow_lan = settings.kill_switch_allow_lan();
@@ -538,28 +532,5 @@ mod tests {
         assert!(!helper_version_below_min("1.0.0", "0.1.0"));
         assert!(helper_version_below_min("0.1.0", "0.2.0"));
         assert!(!helper_version_below_min("0.2.0", "0.2.0"));
-    }
-
-    // --- should_reapply_firewall ---------------------------------------------
-
-    #[test]
-    fn should_reapply_firewall_false_when_no_connected_sessions() {
-        // Even with kill-switch enabled, nothing to re-apply if no session is up.
-        assert!(!should_reapply_firewall(false, true, true));
-    }
-
-    #[test]
-    fn should_reapply_firewall_false_when_connected_but_no_ks_no_bypass() {
-        assert!(!should_reapply_firewall(true, false, false));
-    }
-
-    #[test]
-    fn should_reapply_firewall_true_when_connected_and_ks_enabled() {
-        assert!(should_reapply_firewall(true, true, false));
-    }
-
-    #[test]
-    fn should_reapply_firewall_true_when_connected_and_bypass_present() {
-        assert!(should_reapply_firewall(true, false, true));
     }
 }

@@ -206,7 +206,11 @@ fn handle_session_destroyed(
         // Reconnect/Dismiss handlers manage their lifecycle from here.
         let settings = crate::settings::Settings::new();
         if settings.auto_reconnect() {
-            spawn_auto_reconnect(dbus, tray, action_tx, config_path, config_name, settings);
+            // Pass only the resolved delay: the spawned future rebuilds
+            // Settings::new() itself, so capturing a whole Settings here would
+            // hold a live GSettings client for the reconnect window for nothing.
+            let delay = settings.auto_reconnect_delay_seconds();
+            spawn_auto_reconnect(dbus, tray, action_tx, config_path, config_name, delay);
         } else {
             info!(
                 "Unexpected session drop for '{}', showing reconnect notification",
@@ -231,9 +235,8 @@ fn spawn_auto_reconnect(
     action_tx: &crate::tray::ActionSender,
     config_path: String,
     config_name: String,
-    settings: crate::settings::Settings,
+    delay: u32,
 ) {
-    let delay = settings.auto_reconnect_delay_seconds();
     info!(
         "Unexpected session drop for '{}', auto-reconnect in {}s",
         config_name, delay
