@@ -139,45 +139,11 @@ impl KillSwitch {
             h.abort();
         }
 
-        let conn_clone = conn.clone();
-        let sender_clone = sender.clone();
-        let state_arc = Arc::clone(&self.state);
-        let handle = tokio::spawn(async move {
-            match watcher::wait_for_disappearance(&conn_clone, &sender_clone).await {
-                Ok(()) => {
-                    warn!(sender = %sender_clone, "GUI vanished — removing rules");
-                    if let Err(e) = run_nft(nft::remove_rules_script()).await {
-                        error!(err = ?e, "auto-cleanup nft failed");
-                    }
-                    // Firewall down before routing down (apply order reversed).
-                    // If bypass routing was applied, tear it down too — otherwise
-                    // table 100, the priority-100 ip-rules, and loose rp_filter
-                    // survive the GUI crash and the user is left in a degraded
-                    // forwarding state. Restore rp_filter first, then teardown.
-                    let rpf = {
-                        let mut state = state_arc.lock().expect("state mutex poisoned");
-                        let rpf = if state.bypass_routes_applied {
-                            state.bypass_routes_applied = false;
-                            state.rp_filter_original.take()
-                        } else {
-                            None
-                        };
-                        state.sender = None;
-                        state.watcher = None;
-                        rpf
-                    };
-                    if let Some((iface, value)) = rpf {
-                        if let Err(e) = bypass::restore_rp_filter(&iface, &value).await {
-                            warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
-                        }
-                        if let Err(e) = bypass::teardown_routing().await {
-                            error!(err = ?e, "auto-cleanup bypass routing failed");
-                        }
-                    }
-                }
-                Err(e) => error!(err = ?e, "watcher errored"),
-            }
-        });
+        let handle = tokio::spawn(watch_and_cleanup(
+            conn.clone(),
+            sender.clone(),
+            Arc::clone(&self.state),
+        ));
 
         self.state.lock().expect("state mutex poisoned").watcher = Some(handle);
 
@@ -429,6 +395,54 @@ pub async fn cleanup_rules() {
     }
     if let Err(e) = bypass::teardown_routing().await {
         warn!(err = ?e, "shutdown cleanup bypass routing failed");
+    }
+}
+
+/// Spawned per active client from `add_rules`: block until the client's D-Bus
+/// name disappears, then tear down firewall + routing state so a GUI crash
+/// never leaves the user locked out. Extracted from `add_rules` to keep that
+/// method under the complexity gate — pure structural move, no behaviour change.
+async fn watch_and_cleanup(conn: Connection, sender: String, state_arc: Arc<Mutex<State>>) {
+    match watcher::wait_for_disappearance(&conn, &sender).await {
+        Ok(()) => {
+            warn!(sender = %sender, "GUI vanished — removing rules");
+            if let Err(e) = run_nft(nft::remove_rules_script()).await {
+                error!(err = ?e, "auto-cleanup nft failed");
+            }
+            teardown_bypass_on_vanish(&state_arc).await;
+        }
+        Err(e) => error!(err = ?e, "watcher errored"),
+    }
+}
+
+/// Restore rp_filter and tear down routing state recorded for a vanished
+/// client. No-op when bypass routing was never applied. Split from
+/// `watch_and_cleanup` so that fn stays flat under the complexity gate.
+async fn teardown_bypass_on_vanish(state_arc: &Arc<Mutex<State>>) {
+    // Firewall down before routing down (apply order reversed).
+    // If bypass routing was applied, tear it down too — otherwise
+    // table 100, the priority-100 ip-rules, and loose rp_filter
+    // survive the GUI crash and the user is left in a degraded
+    // forwarding state. Restore rp_filter first, then teardown.
+    let rpf = {
+        let mut state = state_arc.lock().expect("state mutex poisoned");
+        let rpf = if state.bypass_routes_applied {
+            state.bypass_routes_applied = false;
+            state.rp_filter_original.take()
+        } else {
+            None
+        };
+        state.sender = None;
+        state.watcher = None;
+        rpf
+    };
+    if let Some((iface, value)) = rpf {
+        if let Err(e) = bypass::restore_rp_filter(&iface, &value).await {
+            warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
+        }
+        if let Err(e) = bypass::teardown_routing().await {
+            error!(err = ?e, "auto-cleanup bypass routing failed");
+        }
     }
 }
 
