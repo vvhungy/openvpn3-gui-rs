@@ -34,16 +34,19 @@ pub(crate) async fn init_dbus(
     // Detect manager version
     log_manager_version_assessment(parse_manager_version(config_manager.version().await.ok()));
 
-    // Probe the kill-switch helper's Version property (informational only).
-    probe_killswitch_helper_version().await;
-
-    // Configs and sessions are independent scans: the session scan takes no
-    // config as input, and the tray consumes both only after both resolve. Run
-    // them concurrently to cut startup-to-tray from the sum of the two
-    // round-trip chains to their max.
-    let (configs, initial_sessions) = futures::future::try_join(
+    // Configs, sessions, and the kill-switch-helper version probe are three
+    // independent bus reads. The probe is informational only (feeds a log line,
+    // never blocks) — run it concurrently so a slow or absent helper can't delay
+    // startup-to-tray. try_join short-circuits on the first Err; the probe
+    // returns Ok(()) unconditionally, so it can never abort the join, and if a
+    // scan errors the probe is simply dropped (only a log line is lost).
+    let (configs, initial_sessions, _helper_probe) = futures::future::try_join3(
         fetch_config_infos(&config_manager, dbus),
         scan_initial_sessions(&session_manager, dbus),
+        async {
+            probe_killswitch_helper_version().await;
+            Ok(())
+        },
     )
     .await?;
     let InitialSessions {
