@@ -65,9 +65,27 @@ pub(crate) fn next_attempt(
     entry.count
 }
 
+/// Pure retry decision for an auth failure: retry while under the attempt cap
+/// and a config path exists to reconnect to.
+///
+/// Extracted from `handle_auth_failed` (which previously inlined this as
+/// `attempt < MAX_CREDENTIAL_ATTEMPTS && !config_path.is_empty()`) so the gate
+/// is single-source and unit-testable in isolation. Two ways it answers false:
+/// - `attempt >= MAX_CREDENTIAL_ATTEMPTS` — the per-config budget is spent;
+/// - `config_path` is empty — the session already left the tray, so there is
+///   nothing to reconnect to. A first failure with no path must still
+///   disconnect (the empty-path branch of the status-handler glue returns
+///   [`MAX_CREDENTIAL_ATTEMPTS`], so this is belt-and-braces, not load-bearing).
+pub(crate) fn should_retry_auth(attempt: u32, config_path: &str) -> bool {
+    attempt < MAX_CREDENTIAL_ATTEMPTS && !config_path.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AUTH_RETRY_WINDOW_SECS, AuthAttempt, MAX_CREDENTIAL_ATTEMPTS, next_attempt};
+    use super::{
+        AUTH_RETRY_WINDOW_SECS, AuthAttempt, MAX_CREDENTIAL_ATTEMPTS, next_attempt,
+        should_retry_auth,
+    };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -193,5 +211,52 @@ mod tests {
             ),
             1
         );
+    }
+
+    #[test]
+    fn retry_while_under_cap_with_a_path() {
+        // The happy retry case: first/second failure with a known config path.
+        assert!(should_retry_auth(0, "/net/openvpn/v3/configuration/a1"));
+        assert!(should_retry_auth(1, "/net/openvpn/v3/configuration/a1"));
+        // MAX_CREDENTIAL_ATTEMPTS-1 is the last retryable attempt (count is
+        // 1-based; next_attempt returns MAX at the third failure, which must
+        // NOT retry).
+        assert!(should_retry_auth(
+            MAX_CREDENTIAL_ATTEMPTS - 1,
+            "/net/openvpn/v3/configuration/a1"
+        ));
+    }
+
+    #[test]
+    fn no_retry_once_cap_reached() {
+        // At and over the cap → disconnect, even with a valid path. Pins the
+        // boundary so an off-by-one (using <=) would fail here.
+        assert!(!should_retry_auth(
+            MAX_CREDENTIAL_ATTEMPTS,
+            "/net/openvpn/v3/configuration/a1"
+        ));
+        assert!(!should_retry_auth(
+            MAX_CREDENTIAL_ATTEMPTS + 5,
+            "/net/openvpn/v3/configuration/a1"
+        ));
+    }
+
+    #[test]
+    fn no_retry_without_a_config_path() {
+        // Empty path → nothing to reconnect to. Even a first failure (attempt
+        // 1, well under cap) must disconnect: the session already left the
+        // tray, so connect_to_config has no target.
+        assert!(!should_retry_auth(1, ""));
+        assert!(!should_retry_auth(0, ""));
+    }
+
+    #[test]
+    fn retry_decision_ignores_display_name_collisions() {
+        // The decision keys off the path, not the name — but should_retry_auth
+        // itself only checks emptiness, so two distinct paths both retry
+        // independently. (Name-vs-path keying is enforced inside next_attempt;
+        // this test pins that the gate doesn't second-guess it.)
+        assert!(should_retry_auth(1, "/net/openvpn/v3/configuration/a1"));
+        assert!(should_retry_auth(1, "/net/openvpn/v3/configuration/a2"));
     }
 }

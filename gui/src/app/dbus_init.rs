@@ -34,15 +34,26 @@ pub(crate) async fn init_dbus(
     // Detect manager version
     log_manager_version_assessment(parse_manager_version(config_manager.version().await.ok()));
 
-    // Probe the kill-switch helper's Version property (informational only).
-    probe_killswitch_helper_version().await;
-
-    let configs = fetch_config_infos(&config_manager, dbus).await?;
+    // Configs, sessions, and the kill-switch-helper version probe are three
+    // independent bus reads. The probe is informational only (feeds a log line,
+    // never blocks) — run it concurrently so a slow or absent helper can't delay
+    // startup-to-tray. try_join short-circuits on the first Err; the probe
+    // returns Ok(()) unconditionally, so it can never abort the join, and if a
+    // scan errors the probe is simply dropped (only a log line is lost).
+    let (configs, initial_sessions, _helper_probe) = futures::future::try_join3(
+        fetch_config_infos(&config_manager, dbus),
+        scan_initial_sessions(&session_manager, dbus),
+        async {
+            probe_killswitch_helper_version().await;
+            Ok(())
+        },
+    )
+    .await?;
     let InitialSessions {
         sessions,
         connected_paths,
         pending_auth,
-    } = scan_initial_sessions(&session_manager, dbus).await?;
+    } = initial_sessions;
 
     // Update tray with initial state
     let config_count = configs.len();
@@ -160,17 +171,6 @@ struct InitialSessions {
     pending_auth: Vec<(String, SessionStatus, String)>,
 }
 
-/// True if `status` is one of the "needs user input" states that warrant
-/// cold-start auth dispatch — a session already waiting on credentials / a
-/// challenge / URL auth when the GUI starts won't re-emit `StatusChange`, so
-/// it must be replayed manually. Extracted so the carve-out is unit-testable.
-fn needs_cold_start_auth(status: &SessionStatus) -> bool {
-    status.needs_user_input()
-        || status.needs_credentials()
-        || status.needs_url_auth()
-        || status.needs_challenge()
-}
-
 /// Scan active sessions: enable log forwarding, build the tray session map, and
 /// collect (a) connected paths for firewall re-apply and (b) sessions already
 /// waiting on user input for cold-start auth dispatch. A missing session manager
@@ -235,16 +235,26 @@ struct ScannedSession {
 /// state. The D-Bus reads and status predicates live here so the caller's
 /// loop body is a thin fold.
 async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedSession {
-    let (major, minor, message) = session.status().await.unwrap_or((0, 0, String::new()));
-    let config_name = session
-        .config_name()
-        .await
-        .unwrap_or_else(|_| "VPN".to_string());
-    let config_path = session
-        .config_path()
-        .await
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_default();
+    // The three per-session reads are independent (status / config_name /
+    // config_path); run them concurrently so N sessions cost N round-trips,
+    // not 3N. Each falls back to its pre-existing default on D-Bus error.
+    let ((major, minor, message), config_name, config_path) = futures::future::join3(
+        async { session.status().await.unwrap_or((0, 0, String::new())) },
+        async {
+            session
+                .config_name()
+                .await
+                .unwrap_or_else(|_| crate::tray::FALLBACK_NAME.to_string())
+        },
+        async {
+            session
+                .config_path()
+                .await
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_default()
+        },
+    )
+    .await;
 
     info!(
         "Session: {} -> {} (status: {}/{})",
@@ -262,7 +272,7 @@ async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedS
     } else {
         None
     };
-    let pending_auth = if needs_cold_start_auth(&status) {
+    let pending_auth = if status.is_auth_request() {
         Some((path.to_string(), status.clone(), message))
     } else {
         None
@@ -288,14 +298,6 @@ async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedS
     }
 }
 
-/// True when connected sessions exist AND either the kill-switch or bypass
-/// rules need re-applying after a GUI restart. Extracted so the gate is
-/// unit-testable. (ORDER MATTERS: bypass must land at the helper before
-/// `AddRules` — see `reapply_firewall_on_startup`.)
-fn should_reapply_firewall(has_connected: bool, ks_enabled: bool, has_bypass: bool) -> bool {
-    has_connected && (ks_enabled || has_bypass)
-}
-
 /// Re-apply bypass + kill-switch state for sessions that were already
 /// connected before this GUI instance started (e.g., after a GUI restart).
 /// The helper's watcher cleaned the rules when the previous instance exited.
@@ -311,11 +313,13 @@ async fn reapply_firewall_on_startup(
     settings: &Settings,
     connected_paths: Vec<String>,
 ) {
-    let has_connected = !connected_paths.is_empty();
     let bypass_cidrs =
         crate::settings::enabled_cidrs(&settings.bypass_cidrs(), &settings.bypass_cidrs_disabled());
     let ks_enabled = settings.enable_kill_switch();
-    if !should_reapply_firewall(has_connected, ks_enabled, !bypass_cidrs.is_empty()) {
+    // Re-apply only when a connected session exists AND either the kill-switch
+    // or bypass rules need restoring (the helper cleaned them when the previous
+    // instance exited). Negation of `has_connected && (ks_enabled || has_bypass)`.
+    if connected_paths.is_empty() || (!ks_enabled && bypass_cidrs.is_empty()) {
         return;
     }
     let allow_lan = settings.kill_switch_allow_lan();
@@ -531,51 +535,5 @@ mod tests {
         assert!(!helper_version_below_min("1.0.0", "0.1.0"));
         assert!(helper_version_below_min("0.1.0", "0.2.0"));
         assert!(!helper_version_below_min("0.2.0", "0.2.0"));
-    }
-
-    // --- needs_cold_start_auth ------------------------------------------------
-
-    #[test]
-    fn needs_cold_start_auth_true_for_credentials_request() {
-        // StatusMajor::Session (3) + SessAuthUserpass (20) → needs_credentials.
-        let s = SessionStatus::new(3, 20, String::new());
-        assert!(needs_cold_start_auth(&s));
-    }
-
-    #[test]
-    fn needs_cold_start_auth_false_for_non_auth_status() {
-        // A connected/error status trips none of the needs_* predicates.
-        let s = SessionStatus::new(0, 0, String::new());
-        assert!(!needs_cold_start_auth(&s));
-    }
-
-    #[test]
-    fn needs_cold_start_auth_false_for_session_unknown_minor() {
-        // Session major but a minor that matches no user-input predicate.
-        let s = SessionStatus::new(3, 99, String::new());
-        assert!(!needs_cold_start_auth(&s));
-    }
-
-    // --- should_reapply_firewall ---------------------------------------------
-
-    #[test]
-    fn should_reapply_firewall_false_when_no_connected_sessions() {
-        // Even with kill-switch enabled, nothing to re-apply if no session is up.
-        assert!(!should_reapply_firewall(false, true, true));
-    }
-
-    #[test]
-    fn should_reapply_firewall_false_when_connected_but_no_ks_no_bypass() {
-        assert!(!should_reapply_firewall(true, false, false));
-    }
-
-    #[test]
-    fn should_reapply_firewall_true_when_connected_and_ks_enabled() {
-        assert!(should_reapply_firewall(true, true, false));
-    }
-
-    #[test]
-    fn should_reapply_firewall_true_when_connected_and_bypass_present() {
-        assert!(should_reapply_firewall(true, false, true));
     }
 }

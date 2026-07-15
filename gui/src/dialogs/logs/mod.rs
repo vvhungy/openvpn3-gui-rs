@@ -297,7 +297,7 @@ fn build_log_viewer(
                                             .map(|s| s.config_name.clone())
                                     })
                                     .flatten()
-                                    .unwrap_or_else(|| "VPN".to_string());
+                                    .unwrap_or_else(|| crate::tray::FALLBACK_NAME.to_string());
                                 path_to_name
                                     .borrow_mut()
                                     .insert(session_path.clone(), cn.clone());

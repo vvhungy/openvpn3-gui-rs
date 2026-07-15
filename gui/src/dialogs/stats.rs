@@ -68,7 +68,7 @@ fn build_stats_window(
     let config_name = initial
         .as_ref()
         .map(|s| s.config_name.clone())
-        .unwrap_or_else(|| "VPN".to_string());
+        .unwrap_or_else(|| crate::tray::FALLBACK_NAME.to_string());
 
     let window = gtk4::Window::builder()
         .title(format!("Statistics — {config_name}"))

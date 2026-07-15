@@ -16,9 +16,6 @@ mod killswitch_glue;
 
 pub(crate) use killswitch_glue::apply_kill_switch;
 
-/// Fallback label when config/profile name is unavailable.
-const FALLBACK_NAME: &str = "VPN Connection";
-
 /// Update a session's status and reset the stats/idle baseline when the
 /// transition crosses the Connected boundary. Pure over `&mut SessionInfo`
 /// — no async, no D-Bus, no tray — so the transition rules are unit-testable.
@@ -65,19 +62,43 @@ pub(super) fn is_status_change(
         && member == Some("StatusChange")
 }
 
-/// Pure dedup predicate. OpenVPN3 delivers each `StatusChange` twice (once via
-/// `LogForward(true)`, once via the `AddMatch` rule), so a repeat `(major,
-/// minor)` for an already-seen path is skipped. Auth challenges are **exempt**:
-/// a re-emitted credential request after Resume on an invalidated session must
-/// still reach the dispatcher even if the same `(major, minor)` was seen
-/// earlier. Returns `true` when the signal should be dispatched.
+/// Why an incoming StatusChange for a path is dispatched after the per-path
+/// dedup check, or `None` to skip it.
+///
+/// OpenVPN3 delivers each `StatusChange` twice (once via `LogForward(true)`,
+/// once via the `AddMatch` rule), so a repeat `(major, minor)` for an
+/// already-seen path is skipped. Auth challenges are **exempt**: a re-emitted
+/// credential request after Resume on an invalidated session must still reach
+/// the dispatcher even if the same `(major, minor)` was seen earlier.
+///
+/// Returning the *reason* (rather than a bool) lets the caller branch on the
+/// dedup-exempt auth case without re-deriving `prev == Some((major, minor))`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DispatchReason {
+    /// First signal for this path.
+    FirstSeen,
+    /// `(major, minor)` changed since the last signal for this path.
+    Changed,
+    /// Repeat `(major, minor)` on a path, but auth challenges are dedup-exempt.
+    AuthExempt,
+}
+
+/// Classify an incoming StatusChange against the last-seen `(major, minor)` for
+/// its path. Returns `None` to skip (a non-auth repeat), otherwise the reason
+/// it should dispatch.
 pub(super) fn should_dispatch(
     prev: Option<(u32, u32)>,
     major: u32,
     minor: u32,
     is_auth: bool,
-) -> bool {
-    is_auth || prev != Some((major, minor))
+) -> Option<DispatchReason> {
+    let cur = (major, minor);
+    match prev {
+        None => Some(DispatchReason::FirstSeen),
+        Some(prev) if prev != cur => Some(DispatchReason::Changed),
+        Some(_) if is_auth => Some(DispatchReason::AuthExempt),
+        Some(_) => None,
+    }
 }
 
 /// Subscribe to StatusChange signals and spawn the handler loop.
@@ -145,14 +166,18 @@ pub(super) async fn setup_status_handler(
                     // dispatch). See `should_dispatch`.
                     let is_auth = status.is_auth_request();
                     let prev = last_signal.get(&path).copied();
-                    if !should_dispatch(prev, major, minor, is_auth) {
-                        continue;
-                    }
-                    if is_auth && prev == Some((major, minor)) {
-                        info!(
-                            "Auth signal re-emitted for {} (major={}, minor={}) — dedup-exempt, dispatching",
-                            path, major, minor
-                        );
+                    // Branch on the reason rather than re-deriving
+                    // `prev == Some((major, minor))`: should_dispatch already
+                    // classified the dedup-exempt auth re-emit as AuthExempt.
+                    match should_dispatch(prev, major, minor, is_auth) {
+                        None => continue,
+                        Some(DispatchReason::AuthExempt) => {
+                            info!(
+                                "Auth signal re-emitted for {} (major={}, minor={}) — dedup-exempt, dispatching",
+                                path, major, minor
+                            );
+                        }
+                        Some(_) => {}
                     }
                     last_signal.insert(path.clone(), (major, minor));
 
@@ -263,7 +288,7 @@ pub(super) async fn setup_status_handler(
                                 SessionInfo {
                                     session_path: path.clone(),
                                     config_path: String::new(),
-                                    config_name: "VPN".to_string(),
+                                    config_name: crate::tray::FALLBACK_NAME.to_string(),
                                     status: SessionStatus::new(major, minor, msg_owned),
                                     connected_at: None,
                                     bytes_in: 0,
@@ -331,7 +356,10 @@ pub(super) async fn setup_status_handler(
                             crate::dialogs::show_connection_notification(&cn, &body);
                         }
                     } else {
-                        crate::dialogs::show_connection_notification("VPN", new_desc);
+                        crate::dialogs::show_connection_notification(
+                            crate::tray::FALLBACK_NAME,
+                            new_desc,
+                        );
                     }
                 }
                 Err(e) => {
@@ -351,6 +379,34 @@ pub(super) async fn setup_status_handler(
 // (CLAUDE.md §Testing: orchestration wrappers with no pure branch need no
 // unit test).
 
+/// Record one auth failure for `config_path` and return the running attempt
+/// count for the retry decision in [`handle_auth_failed`].
+///
+/// Extracted to keep `handle_auth_failed` under the complexity gate. The
+/// pure retry *gate* lives in [`credential_handler::should_retry_auth`]
+/// (unit-tested); this is the impure glue that mutates the live counter map.
+///
+/// - empty path → [`MAX_CREDENTIAL_ATTEMPTS`], so the retry gate always answers
+///   false (straight to disconnect). Also avoids `next_attempt`'s empty-key
+///   debug_assert (see its doc) — an empty key would be a shared bucket across
+///   all un-keyed failures.
+/// - poisoned bookkeeping lock → log and treat as a first attempt (count 1), so
+///   a prior panic elsewhere can't brick auth-retry bookkeeping.
+/// - otherwise → [`next_attempt`] on the live map.
+fn record_auth_attempt(config_path: &str) -> u32 {
+    use super::credential_handler::{CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, next_attempt};
+    if config_path.is_empty() {
+        MAX_CREDENTIAL_ATTEMPTS
+    } else if let Ok(mut attempts) = CREDENTIAL_ATTEMPTS.lock() {
+        next_attempt(&mut attempts, std::time::Instant::now(), config_path)
+    } else {
+        warn!(
+            "CREDENTIAL_ATTEMPTS lock poisoned — \
+             treating as first attempt"
+        );
+        1
+    }
+}
 /// Authentication failed on `path`: auto-retry by creating a new tunnel up to
 /// `MAX_CREDENTIAL_ATTEMPTS`, then disconnect with a message and reset the
 /// per-config retry budget so the user can reconnect within the window.
@@ -361,42 +417,12 @@ fn handle_auth_failed(
 ) {
     let session_path = path.to_string();
     let dbus_conn = conn.clone();
-    let (config_name, config_path) = tray_for_status
-        .update(|t| {
-            t.sessions
-                .get(&session_path)
-                .map(|s| (s.config_name.clone(), s.config_path.clone()))
-        })
-        .flatten()
-        .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()));
+    let (config_name, config_path) =
+        crate::tray::session_config_identity(tray_for_status, &session_path);
 
-    let attempt = {
-        if config_path.is_empty() {
-            // No config path to retry against — nothing to reconnect to. Skip
-            // the retry counter entirely: an empty key would be a shared bucket
-            // across all un-keyed failures (see next_attempt's doc), and the
-            // debug_assert there panics on empty. Returning MAX makes the retry
-            // gate below fall straight to the disconnect branch.
-            super::credential_handler::MAX_CREDENTIAL_ATTEMPTS
-        } else if let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock() {
-            // Poison-tolerant: a prior panic in a holder of this lock must not
-            // brick auth-retry bookkeeping. Treat a poisoned lock as a fresh
-            // attempt (count 1).
-            super::credential_handler::next_attempt(
-                &mut attempts,
-                std::time::Instant::now(),
-                &config_path,
-            )
-        } else {
-            warn!(
-                "CREDENTIAL_ATTEMPTS lock poisoned — \
-                 treating as first attempt"
-            );
-            1
-        }
-    };
+    let attempt = record_auth_attempt(&config_path);
 
-    if attempt < super::credential_handler::MAX_CREDENTIAL_ATTEMPTS && !config_path.is_empty() {
+    if super::credential_handler::should_retry_auth(attempt, &config_path) {
         warn!(
             "Authentication failed for '{}' (attempt {}/{}) — creating new tunnel",
             config_name,
@@ -474,6 +500,21 @@ fn handle_auth_failed(
     }
 }
 
+/// Disconnect `path` asynchronously and surface `title`/`body` to the user.
+///
+/// Owns the clone-and-spawn pattern shared by the failure/error handlers below:
+/// every session-level disconnect-with-notification now routes through one
+/// place, so a future fix (e.g. clearing kill-switch state on failure) lands
+/// once instead of drifting between two copies.
+fn disconnect_with_notification(conn: &zbus::Connection, path: &str, title: &str, body: String) {
+    let session_path = path.to_string();
+    let dbus_conn = conn.clone();
+    let title = title.to_string();
+    glib::spawn_future_local(async move {
+        super::session_ops::disconnect_with_message(&dbus_conn, &session_path, &title, &body).await;
+    });
+}
+
 /// Connection failure on `path`: disconnect the session with a user-facing message.
 fn handle_conn_failed(
     conn: &zbus::Connection,
@@ -481,21 +522,13 @@ fn handle_conn_failed(
     path: &str,
 ) {
     warn!("Connection failed for session {}", path);
-    let session_path = path.to_string();
-    let dbus_conn = conn.clone();
-    let config_name = tray_for_status
-        .update(|t| t.sessions.get(&session_path).map(|s| s.config_name.clone()))
-        .flatten()
-        .unwrap_or_else(|| FALLBACK_NAME.to_string());
-    glib::spawn_future_local(async move {
-        super::session_ops::disconnect_with_message(
-            &dbus_conn,
-            &session_path,
-            "Connection Failed",
-            &format!("Connection failed for '{}'. Please try again.", config_name),
-        )
-        .await;
-    });
+    let config_name = crate::tray::session_config_name(tray_for_status, path);
+    disconnect_with_notification(
+        conn,
+        path,
+        "Connection Failed",
+        format!("Connection failed for '{}'. Please try again.", config_name),
+    );
 }
 
 /// Generic session error (config/process errors) on `path`: disconnect with a
@@ -512,21 +545,13 @@ fn handle_session_error(
         "Session error for {}: major={}, minor={}",
         path, major, minor
     );
-    let session_path = path.to_string();
-    let dbus_conn = conn.clone();
-    let config_name = tray_for_status
-        .update(|t| t.sessions.get(&session_path).map(|s| s.config_name.clone()))
-        .flatten()
-        .unwrap_or_else(|| FALLBACK_NAME.to_string());
+    let config_name = crate::tray::session_config_name(tray_for_status, path);
     let body = if message.is_empty() {
         format!("VPN error for '{}'.", config_name)
     } else {
         format!("VPN error for '{}': {}", config_name, message)
     };
-    glib::spawn_future_local(async move {
-        super::session_ops::disconnect_with_message(&dbus_conn, &session_path, "VPN Error", &body)
-            .await;
-    });
+    disconnect_with_notification(conn, path, "VPN Error", body);
 }
 
 #[cfg(test)]
@@ -677,32 +702,57 @@ mod tests {
     // --- should_dispatch ----------------------------------------------------
 
     #[test]
-    fn should_dispatch_true_for_first_seen_tuple() {
-        // No prior signal for this path → always dispatch.
-        assert!(should_dispatch(None, 3, 4, false));
+    fn should_dispatch_first_seen_for_new_path() {
+        // No prior signal for this path → dispatch, classified as first-seen.
+        assert_eq!(
+            should_dispatch(None, 3, 4, false),
+            Some(DispatchReason::FirstSeen)
+        );
     }
 
     #[test]
-    fn should_dispatch_false_for_repeat_non_auth() {
+    fn should_dispatch_none_for_repeat_non_auth() {
         // Same (major, minor) seen earlier, not an auth challenge → skip.
-        assert!(!should_dispatch(Some((3, 4)), 3, 4, false));
+        assert_eq!(should_dispatch(Some((3, 4)), 3, 4, false), None);
     }
 
     #[test]
-    fn should_dispatch_true_for_repeat_with_new_minor() {
-        // Same path, different minor → dispatch.
-        assert!(should_dispatch(Some((3, 4)), 3, 5, false));
+    fn should_dispatch_changed_for_repeat_with_new_minor() {
+        // Same path, different minor → dispatch, classified as changed.
+        assert_eq!(
+            should_dispatch(Some((3, 4)), 3, 5, false),
+            Some(DispatchReason::Changed)
+        );
     }
 
     #[test]
     fn should_dispatch_auth_exempt_for_repeat() {
         // Auth challenge re-emitted with the same (major, minor) after Resume
-        // must still dispatch.
-        assert!(should_dispatch(Some((7, 8)), 7, 8, true));
+        // must still dispatch — and as AuthExempt, not FirstSeen/Changed, so the
+        // caller can log the dedup-exempt case without re-deriving prev.
+        assert_eq!(
+            should_dispatch(Some((7, 8)), 7, 8, true),
+            Some(DispatchReason::AuthExempt)
+        );
     }
 
     #[test]
-    fn should_dispatch_auth_first_seen_also_dispatches() {
-        assert!(should_dispatch(None, 7, 8, true));
+    fn should_dispatch_first_seen_dominates_auth() {
+        // First signal for a path is FirstSeen even when it's an auth challenge
+        // (nothing to be exempt from yet).
+        assert_eq!(
+            should_dispatch(None, 7, 8, true),
+            Some(DispatchReason::FirstSeen)
+        );
+    }
+
+    #[test]
+    fn should_dispatch_changed_when_auth_and_minor_differ() {
+        // Auth + a genuinely changed tuple dispatches as Changed (changed
+        // dominates; AuthExempt is only for an exact-repeat auth re-emit).
+        assert_eq!(
+            should_dispatch(Some((7, 8)), 7, 9, true),
+            Some(DispatchReason::Changed)
+        );
     }
 }

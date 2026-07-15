@@ -45,10 +45,7 @@ pub(super) fn spawn_timeout_watcher(tray: &ksni::blocking::Handle<VpnTray>, path
             .flatten()
             .unwrap_or(false);
         if still_connecting {
-            let config_name = tray_for_timeout
-                .update(|t| t.sessions.get(&path).map(|s| s.config_name.clone()))
-                .flatten()
-                .unwrap_or_else(|| "VPN".to_string());
+            let config_name = crate::tray::session_config_name(&tray_for_timeout, &path);
             info!(
                 "Connection timeout watcher: '{}' still connecting after {}s",
                 config_name, timeout_secs
