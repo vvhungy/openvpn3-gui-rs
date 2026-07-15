@@ -219,46 +219,37 @@ pub(super) async fn setup_status_handler(
                         continue;
                     }
 
-                    // Authentication failure — auto-retry by creating a new tunnel
-                    // up to MAX_CREDENTIAL_ATTEMPTS times, then disconnect.
-                    if status.major == StatusMajor::Connection
-                        && status.minor == StatusMinor::ConnAuthFailed
-                    {
-                        handle_auth_failed(&conn, &tray_for_status, &path);
-                        continue;
-                    }
-
-                    // Connection failure
-                    if status.major == StatusMajor::Connection
-                        && status.minor == StatusMinor::ConnFailed
-                    {
-                        handle_conn_failed(&conn, &tray_for_status, &path);
-                        continue;
-                    }
-
-                    // Generic error states (config errors, process errors)
-                    if status.is_error() {
-                        handle_session_error(&conn, &tray_for_status, &path, major, minor, message);
-                        continue;
-                    }
-
-                    // Clear credential attempts on successful connection.
-                    // Key on the config PATH (same scheme as next_attempt) — a
-                    // dup-named sibling must not share/clear the other's budget.
-                    if status.is_connected() {
-                        let cp = tray_for_status
-                            .update(|t| t.sessions.get(&path).map(|s| s.config_path.clone()))
-                            .flatten();
-                        if let Some(cp) = cp
-                            && !cp.is_empty()
-                            && let Ok(mut attempts) =
-                                super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
-                        {
-                            attempts.remove(&cp);
+                    // Terminal/error dispatch. `is_error()` also matches
+                    // ConnAuthFailed/ConnFailed, so `classify_error` fixes the
+                    // precedence (AuthFailed > ConnFailed > generic error).
+                    match classify_error(&status) {
+                        ErrorAction::AuthFailed => {
+                            handle_auth_failed(&conn, &tray_for_status, &path);
+                            continue;
                         }
+                        ErrorAction::ConnFailed => {
+                            handle_conn_failed(&conn, &tray_for_status, &path);
+                            continue;
+                        }
+                        ErrorAction::SessionError => {
+                            handle_session_error(
+                                &conn,
+                                &tray_for_status,
+                                &path,
+                                major,
+                                minor,
+                                message,
+                            );
+                            continue;
+                        }
+                        ErrorAction::None => {}
+                    }
 
-                        // Kill-switch: apply firewall rules now that the tunnel is up.
-                        // Helper has replace semantics, so re-firing on Reconnect is safe.
+                    // On successful connect: clear this config's retry budget, then apply
+                    // kill-switch rules (helper has replace semantics, so re-firing
+                    // on Reconnect is safe).
+                    if status.is_connected() {
+                        clear_credential_attempts_on_connect(&tray_for_status, &path);
                         killswitch_glue::on_connected(&conn, &path, &tray_for_status);
                     }
 
@@ -269,73 +260,15 @@ pub(super) async fn setup_status_handler(
                         killswitch_glue::on_paused(&tray_for_status);
                     }
 
-                    // Update tray session state (connected_at, new sessions, removal)
+                    // Update tray session state (connected_at, new sessions).
                     let path_for_timeout = path.clone();
-                    let path_for_removal = path.clone(); // moved into delayed removal closure
-
-                    let is_now_connected = status.is_connected();
                     let is_now_disconnected = status.is_disconnected();
-                    let msg_owned = message.to_string();
-                    tray_for_status.update(move |t| {
-                        if let Some(session) = t.sessions.get_mut(&path) {
-                            if is_now_connected && session.connected_at.is_none() {
-                                session.connected_at = Some(std::time::Instant::now());
-                            }
-                        } else {
-                            // New session not yet seen via SessCreated
-                            t.sessions.insert(
-                                path.clone(),
-                                SessionInfo {
-                                    session_path: path.clone(),
-                                    config_path: String::new(),
-                                    config_name: crate::tray::FALLBACK_NAME.to_string(),
-                                    status: SessionStatus::new(major, minor, msg_owned),
-                                    connected_at: None,
-                                    bytes_in: 0,
-                                    bytes_out: 0,
-                                    last_bytes_in: 0,
-                                    last_bytes_out: 0,
-                                    idle_started_at: None,
-                                    idle_since: None,
-                                    auto_reconnect_attempted_at: None,
-                                    kill_switch_active: false,
-                                },
-                            );
-                        }
-                    });
+                    upsert_session_state(&tray_for_status, &path, status.clone());
 
-                    // Remove terminal sessions from the tray immediately rather than
-                    // waiting for SessDestroyed. Prevents zombie "Profile: Done" entries.
+                    // Remove terminal sessions from the tray (3s delayed so the
+                    // notification chain completes with the correct profile name).
                     if is_now_disconnected {
-                        // Cache (config_path, config_name) so the SessDestroyed
-                        // handler can still fire its reconnect notification after
-                        // we remove the session from the tray (SessDestroyed can
-                        // arrive several seconds after the 3s removal below).
-                        let path_for_cache = path_for_removal.clone();
-                        let tray_for_cache = tray_for_status.clone();
-                        if let Some((cp, cn)) = tray_for_cache
-                            .update(|t| {
-                                t.sessions
-                                    .get(&path_for_cache)
-                                    .map(|s| (s.config_path.clone(), s.config_name.clone()))
-                            })
-                            .flatten()
-                            && !cp.is_empty()
-                            && let Ok(mut map) =
-                                super::session_ops::RECENT_DESTROYED_SESSIONS.lock()
-                        {
-                            map.insert(path_for_cache, (cp, cn));
-                        }
-
-                        // Delay removal so the notification chain completes with
-                        // the correct profile name (Disconnecting → Disconnected → Done).
-                        let tray_for_removal = tray_for_status.clone();
-                        glib::spawn_future_local(async move {
-                            glib::timeout_future_seconds(3).await;
-                            tray_for_removal.update(move |t| {
-                                t.sessions.remove(&path_for_removal);
-                            });
-                        });
+                        schedule_disconnected_removal(&tray_for_status, &path);
                     }
 
                     // Connection timeout watcher — see `timeout_watcher` module.
@@ -346,21 +279,8 @@ pub(super) async fn setup_status_handler(
                         );
                     }
 
-                    // Desktop notification for status change
-                    let new_desc =
-                        crate::status::get_status_description(status.major, status.minor);
-                    if let Some((cn, prev)) = prev_info {
-                        if prev != new_desc {
-                            let body =
-                                format!("{}: Status change from {} to {}", cn, prev, new_desc);
-                            crate::dialogs::show_connection_notification(&cn, &body);
-                        }
-                    } else {
-                        crate::dialogs::show_connection_notification(
-                            crate::tray::FALLBACK_NAME,
-                            new_desc,
-                        );
-                    }
+                    // Desktop notification for the status transition.
+                    send_status_notification(prev_info, &status);
                 }
                 Err(e) => {
                     warn!("Failed to parse StatusChange signal: {}", e);
@@ -370,6 +290,149 @@ pub(super) async fn setup_status_handler(
     });
 
     Ok(())
+}
+
+// --- status classification & tray-state helpers ----------------------------
+// Pure classifiers/builders extracted from the StatusChange loop so the
+// dispatch precedence and the unseen-session field list are unit-tested
+// rather than buried in async wiring.
+
+/// Discrete terminal/error action for a StatusChange after auth dispatch
+/// declines it.
+///
+/// `SessionStatus::is_error()` also matches `ConnAuthFailed` and `ConnFailed`,
+/// so [`classify_error`] fixes the precedence: AuthFailed > ConnFailed > generic
+/// SessionError — each routes to its own handler before the `is_error()` bucket
+/// would swallow the more specific cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ErrorAction {
+    AuthFailed,
+    ConnFailed,
+    SessionError,
+    /// No terminal/error minor — proceed with the connected/paused/dispatch path.
+    None,
+}
+
+/// Classify a non-auth StatusChange into its terminal/error action.
+///
+/// Pure over `&SessionStatus`. The order of the checks encodes the precedence
+/// documented on [`ErrorAction`] (auth-failed and conn-failed are checked
+/// before the broader `is_error()`).
+pub(super) fn classify_error(status: &SessionStatus) -> ErrorAction {
+    if status.major == StatusMajor::Connection && status.minor == StatusMinor::ConnAuthFailed {
+        ErrorAction::AuthFailed
+    } else if status.major == StatusMajor::Connection && status.minor == StatusMinor::ConnFailed {
+        ErrorAction::ConnFailed
+    } else if status.is_error() {
+        ErrorAction::SessionError
+    } else {
+        ErrorAction::None
+    }
+}
+
+/// Build a fallback [`SessionInfo`] for a path the tray has not yet seen via
+/// `SessCreated`. Extracted so the field list (and its zeroed baselines) lives
+/// in one tested place rather than an inline literal in the signal loop.
+pub(super) fn build_unseen_session(path: &str, status: SessionStatus) -> SessionInfo {
+    SessionInfo {
+        session_path: path.to_string(),
+        config_path: String::new(),
+        config_name: crate::tray::FALLBACK_NAME.to_string(),
+        status,
+        connected_at: None,
+        bytes_in: 0,
+        bytes_out: 0,
+        last_bytes_in: 0,
+        last_bytes_out: 0,
+        idle_started_at: None,
+        idle_since: None,
+        auto_reconnect_attempted_at: None,
+        kill_switch_active: false,
+    }
+}
+
+/// Clear this session's credential-retry budget once it connects.
+///
+/// Keyed on the config PATH (same scheme as `next_attempt`) — a dup-named
+/// sibling must not share/clear the other's budget. Impure tray + global-lock
+/// glue; the retry *gate* itself is the unit-tested `should_retry_auth`.
+fn clear_credential_attempts_on_connect(tray: &ksni::blocking::Handle<VpnTray>, path: &str) {
+    let cp = tray
+        .update(|t| t.sessions.get(path).map(|s| s.config_path.clone()))
+        .flatten();
+    if let Some(cp) = cp
+        && !cp.is_empty()
+        && let Ok(mut attempts) = super::credential_handler::CREDENTIAL_ATTEMPTS.lock()
+    {
+        attempts.remove(&cp);
+    }
+}
+
+/// Upsert the tray session entry: stamp `connected_at` on a Connected
+/// transition for a known session, or insert a fallback entry for a path the
+/// tray has not yet seen. Impure tray glue.
+fn upsert_session_state(tray: &ksni::blocking::Handle<VpnTray>, path: &str, status: SessionStatus) {
+    let is_now_connected = status.is_connected();
+    let path = path.to_string();
+    tray.update(move |t| {
+        if let Some(session) = t.sessions.get_mut(&path) {
+            if is_now_connected && session.connected_at.is_none() {
+                session.connected_at = Some(std::time::Instant::now());
+            }
+        } else {
+            t.sessions
+                .insert(path.clone(), build_unseen_session(&path, status));
+        }
+    });
+}
+
+/// Cache a dying session's identity for the `SessDestroyed` reconnect hook,
+/// then remove it from the tray after 3s so the notification chain
+/// (Disconnecting → Disconnected → Done) completes with the correct profile
+/// name. Impure (spawned future + global map).
+fn schedule_disconnected_removal(tray: &ksni::blocking::Handle<VpnTray>, path: &str) {
+    // Cache (config_path, config_name) so the SessDestroyed handler can still
+    // fire its reconnect notification after removal (SessDestroyed can arrive
+    // several seconds after the 3s removal below).
+    let path_for_cache = path.to_string();
+    let tray_for_cache = tray.clone();
+    if let Some((cp, cn)) = tray_for_cache
+        .update(|t| {
+            t.sessions
+                .get(&path_for_cache)
+                .map(|s| (s.config_path.clone(), s.config_name.clone()))
+        })
+        .flatten()
+        && !cp.is_empty()
+        && let Ok(mut map) = super::session_ops::RECENT_DESTROYED_SESSIONS.lock()
+    {
+        map.insert(path_for_cache, (cp, cn));
+    }
+
+    let path_for_removal = path.to_string();
+    let tray_for_removal = tray.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future_seconds(3).await;
+        tray_for_removal.update(move |t| {
+            t.sessions.remove(&path_for_removal);
+        });
+    });
+}
+
+/// Show a desktop notification for the status transition, comparing the
+/// session's previous description to the new one. Impure (notification).
+fn send_status_notification(prev_info: Option<(String, &str)>, status: &SessionStatus) {
+    let new_desc = crate::status::get_status_description(status.major, status.minor);
+    match prev_info {
+        Some((cn, prev)) if prev != new_desc => {
+            let body = format!("{}: Status change from {} to {}", cn, prev, new_desc);
+            crate::dialogs::show_connection_notification(&cn, &body);
+        }
+        Some(_) => {}
+        None => {
+            crate::dialogs::show_connection_notification(crate::tray::FALLBACK_NAME, new_desc);
+        }
+    }
 }
 
 // --- status-dispatch handlers -----------------------------------------------
@@ -754,5 +817,76 @@ mod tests {
             should_dispatch(Some((7, 8)), 7, 9, true),
             Some(DispatchReason::Changed)
         );
+    }
+
+    // --- classify_error -----------------------------------------------------
+
+    fn status_of(major: StatusMajor, minor: StatusMinor) -> SessionStatus {
+        SessionStatus { major, minor }
+    }
+
+    #[test]
+    fn classify_error_auth_failed_dominates_is_error() {
+        // ConnAuthFailed is also matched by is_error(); it must classify as
+        // AuthFailed (its own handler), not the generic SessionError bucket.
+        assert_eq!(
+            classify_error(&status_of(
+                StatusMajor::Connection,
+                StatusMinor::ConnAuthFailed
+            )),
+            ErrorAction::AuthFailed
+        );
+    }
+
+    #[test]
+    fn classify_error_conn_failed_dominates_is_error() {
+        // ConnFailed is also matched by is_error(); it must classify as
+        // ConnFailed, not SessionError.
+        assert_eq!(
+            classify_error(&status_of(StatusMajor::Connection, StatusMinor::ConnFailed)),
+            ErrorAction::ConnFailed
+        );
+    }
+
+    #[test]
+    fn classify_error_cfg_error_is_session_error() {
+        // A config error with no more-specific minor routes to the generic handler.
+        assert_eq!(
+            classify_error(&status_of(StatusMajor::CfgError, StatusMinor::CfgError)),
+            ErrorAction::SessionError
+        );
+    }
+
+    #[test]
+    fn classify_error_connected_is_none() {
+        // A healthy Connected transition is not terminal — proceed with the
+        // connected/paused/dispatch path.
+        assert_eq!(
+            classify_error(&status_of(
+                StatusMajor::Connection,
+                StatusMinor::ConnConnected
+            )),
+            ErrorAction::None
+        );
+    }
+
+    // --- build_unseen_session -----------------------------------------------
+
+    #[test]
+    fn build_unseen_session_has_zeroed_baselines_and_fallback_name() {
+        // A path the tray has not yet seen gets a fallback entry with zeroed
+        // byte/idle baselines (so the first stats poll computes a real delta)
+        // and no connected_at timestamp.
+        let s = build_unseen_session("/x/y", connected());
+        assert_eq!(s.session_path, "/x/y");
+        assert_eq!(s.config_name, crate::tray::FALLBACK_NAME.to_string());
+        assert_eq!(s.config_path, "");
+        assert_eq!(s.bytes_in, 0);
+        assert_eq!(s.bytes_out, 0);
+        assert_eq!(s.last_bytes_in, 0);
+        assert_eq!(s.last_bytes_out, 0);
+        assert!(s.connected_at.is_none());
+        assert!(s.idle_since.is_none());
+        assert!(s.status.is_connected());
     }
 }
