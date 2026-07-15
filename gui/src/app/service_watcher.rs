@@ -23,6 +23,30 @@ pub(crate) async fn watch_service_restart(
     settings: &Settings,
     tray: &ksni::blocking::Handle<VpnTray>,
 ) {
+    if let Err(e) = subscribe_to_owner_changes(dbus).await {
+        warn!("Failed to subscribe to NameOwnerChanged: {}", e);
+        return;
+    }
+
+    let mut stream = MessageStream::from(dbus);
+    while let Some(Ok(msg)) = stream.next().await {
+        let Some((name, old_owner, new_owner)) = parse_name_owner_changed(&msg) else {
+            continue;
+        };
+
+        if is_service_appeared(&name, OPENVPN3_SERVICE, &old_owner, &new_owner) {
+            handle_config_service_appeared(dbus, settings, tray).await;
+        } else if is_service_lost(&name, OPENVPN3_SESSIONS_SERVICE, &old_owner, &new_owner) {
+            handle_sessions_service_lost(tray).await;
+        }
+    }
+}
+
+/// Registers `NameOwnerChanged` match rules for the two OpenVPN3 services.
+///
+/// The match rules outlive this call; a failure here means the stream would
+/// silently miss every restart, so it is fatal to the watcher.
+async fn subscribe_to_owner_changes(dbus: &zbus::Connection) -> Result<(), zbus::Error> {
     for svc in [OPENVPN3_SERVICE, OPENVPN3_SESSIONS_SERVICE] {
         let match_rule = format!(
             "type='signal',sender='org.freedesktop.DBus',\
@@ -30,79 +54,84 @@ pub(crate) async fn watch_service_restart(
              arg0='{}'",
             svc
         );
-        if let Err(e) = dbus
-            .call_method(
-                Some("org.freedesktop.DBus"),
-                "/org/freedesktop/DBus",
-                Some("org.freedesktop.DBus"),
-                "AddMatch",
-                &match_rule,
-            )
-            .await
-        {
-            warn!("Failed to subscribe to NameOwnerChanged for {}: {}", svc, e);
-            return;
+        dbus.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "AddMatch",
+            &match_rule,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Filters a stream message down to a `NameOwnerChanged` signal body, or
+/// `None` for anything else (non-signals, other members, undecodable bodies).
+fn parse_name_owner_changed(msg: &zbus::Message) -> Option<(String, String, String)> {
+    if msg.message_type() != MessageType::Signal {
+        return None;
+    }
+    if msg.header().member().map(|m| m.as_str()) != Some("NameOwnerChanged") {
+        return None;
+    }
+    msg.body().deserialize::<(String, String, String)>().ok()
+}
+
+/// Full re-init path for when the configuration service (re)appears: clears
+/// cached sessions/configs and re-runs `init_dbus` with a bounded retry.
+async fn handle_config_service_appeared(
+    dbus: &zbus::Connection,
+    settings: &Settings,
+    tray: &ksni::blocking::Handle<VpnTray>,
+) {
+    info!("OpenVPN3 configuration service appeared, re-initializing");
+    crate::dialogs::withdraw_first_run_help_notification();
+    tray.update(|t| {
+        t.sessions.clear();
+        t.configs.clear();
+    });
+    for attempt in 1..=5u32 {
+        match init_dbus(dbus, settings, tray).await {
+            Ok(_) => {
+                info!("Re-initialization after service restart complete");
+                break;
+            }
+            Err(e) => {
+                debug!("Re-init attempt {}/5: {}", attempt, e);
+                glib::timeout_future(std::time::Duration::from_secs(2)).await;
+            }
         }
     }
+}
 
-    let mut stream = MessageStream::from(dbus);
-    while let Some(Ok(msg)) = stream.next().await {
-        if msg.message_type() != MessageType::Signal {
-            continue;
-        }
-        if msg.header().member().map(|m| m.as_str()) != Some("NameOwnerChanged") {
-            continue;
-        }
-        let Ok((name, old_owner, new_owner)) = msg.body().deserialize::<(String, String, String)>()
-        else {
-            continue;
-        };
+/// Teardown path for when the sessions service disappears: tears down the
+/// kill-switch firewall + bypass routes, clears stale session state, and
+/// notifies the user if a session was actually active.
+async fn handle_sessions_service_lost(tray: &ksni::blocking::Handle<VpnTray>) {
+    let had_sessions = tray.update(|t| !t.sessions.is_empty()).unwrap_or(false);
+    info!(
+        "OpenVPN3 sessions service disappeared, clearing {} stale session(s)",
+        if had_sessions { "active" } else { "no" }
+    );
 
-        if is_service_appeared(&name, OPENVPN3_SERVICE, &old_owner, &new_owner) {
-            info!("OpenVPN3 configuration service appeared, re-initializing");
-            crate::dialogs::withdraw_first_run_help_notification();
-            tray.update(|t| {
-                t.sessions.clear();
-                t.configs.clear();
-            });
-            for attempt in 1..=5u32 {
-                match init_dbus(dbus, settings, tray).await {
-                    Ok(_) => {
-                        info!("Re-initialization after service restart complete");
-                        break;
-                    }
-                    Err(e) => {
-                        debug!("Re-init attempt {}/5: {}", attempt, e);
-                        glib::timeout_future(std::time::Duration::from_secs(2)).await;
-                    }
-                }
-            }
-        } else if is_service_lost(&name, OPENVPN3_SESSIONS_SERVICE, &old_owner, &new_owner) {
-            let had_sessions = tray.update(|t| !t.sessions.is_empty()).unwrap_or(false);
-            info!(
-                "OpenVPN3 sessions service disappeared, clearing {} stale session(s)",
-                if had_sessions { "active" } else { "no" }
-            );
+    // Tear down kill-switch firewall + bypass routes before clearing state;
+    // the rules outlive the sessionmgr and would otherwise block all non-VPN
+    // traffic with no live session to remove them.
+    crate::dbus::killswitch::remove_rules().await;
+    crate::dbus::killswitch::remove_bypass_routes().await;
 
-            // Tear down kill-switch firewall + bypass routes before clearing
-            // state; the rules outlive the sessionmgr and would otherwise
-            // block all non-VPN traffic with no live session to remove them.
-            crate::dbus::killswitch::remove_rules().await;
-            crate::dbus::killswitch::remove_bypass_routes().await;
+    tray.update(|t| {
+        t.sessions.clear();
+        t.bypass_state = BypassState::Off;
+    });
 
-            tray.update(|t| {
-                t.sessions.clear();
-                t.bypass_state = BypassState::Off;
-            });
-
-            if had_sessions {
-                crate::dialogs::show_killswitch_inactive_notification();
-                crate::dialogs::show_info_notification(
-                    "OpenVPN3 Sessions Service Stopped",
-                    "Active connections were cleared. Reconnect after the service restarts.",
-                );
-            }
-        }
+    if had_sessions {
+        crate::dialogs::show_killswitch_inactive_notification();
+        crate::dialogs::show_info_notification(
+            "OpenVPN3 Sessions Service Stopped",
+            "Active connections were cleared. Reconnect after the service restarts.",
+        );
     }
 }
 
