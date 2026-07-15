@@ -57,6 +57,18 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.3.18" date="2026-07-15">
+      <description>
+        <p>Internal cleanup sprint with one latency win: startup D-Bus work is parallelized and the config-name fallback is unified to a single source. No user-visible behaviour change beyond faster tray-population and consistent window titles.</p>
+        <ul>
+          <li>Startup now runs the config scan, the session scan, and the kill-switch helper version probe concurrently (try_join), cutting startup-to-tray from the sum of the three round-trip chains to their max.</li>
+          <li>Per-session cold-start reads (status, config name, config path) now run concurrently (join3) so N sessions cost N round-trips instead of 3N.</li>
+          <li>The config-name fallback is centralized ("VPN Connection") so a session dropped from the tray shows the same label in the tray, notifications, Logs, and Statistics windows.</li>
+          <li>The auth-retry decision is extracted into a unit-tested pure function; the two status-driven disconnect paths collapse into one helper.</li>
+          <li>Micro-cleanups: reconnect delay threaded as a parameter, a trivial firewall re-apply guard inlined, and status-change dispatch returns a typed reason instead of a re-derived boolean.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.17" date="2026-07-14">
       <description>
         <p>Internal complexity-reduction sprint — the four highest cognitive-complexity hotspots (the status-change handler, D-Bus initialization, session signal handlers, and the stats poller) are decomposed into unit-tested pure helpers and thin orchestration wrappers. No user-visible behaviour change.</p>
