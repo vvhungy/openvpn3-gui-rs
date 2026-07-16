@@ -57,6 +57,17 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.0" date="2026-07-16">
+      <description>
+        <p>Internal-only release closing the three-sprint complexity-reduction arc (S41–S43). No user-visible behaviour change; every high-cognitive-complexity hotspot in the tray app and killswitch helper has been decomposed into small, unit-tested pure functions behind thin async glue. Tagged as a minor version bump to mark the arc as a milestone rather than for any feature.</p>
+        <ul>
+          <li>Decomposed the status-change signal loop, statistics poller, credential dialog, preferences save path, tray-action dispatch, service-restart watcher, and notification builders — each split into pure, tested helpers (71 new tests) plus thin impure wiring.</li>
+          <li>Split the largest modules (stats_poller, status_handler) into concern-focused submodules under the file-size health gate.</li>
+          <li>The privileged killswitch helper's rule-apply path was refactored to extract its watcher teardown; all D-Bus input-validation guards were preserved unchanged.</li>
+          <li>Code review across the full arc confirmed the refactor is behaviour-preserving; pre-existing multi-session and reconnect-cooldown edge cases surfaced by the review are tracked for a future fix.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.18" date="2026-07-15">
       <description>
         <p>Internal cleanup sprint with one latency win: startup D-Bus work is parallelized and the config-name fallback is unified to a single source. No user-visible behaviour change beyond faster tray-population and consistent window titles.</p>
