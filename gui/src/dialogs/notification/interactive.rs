@@ -88,6 +88,8 @@ async fn handle_reconnect_action(
 ) -> bool {
     match key {
         "reconnect" => {
+            // Don't remove rules here — the new tunnel's connect path re-applies
+            // them (helper has replace semantics).
             let _ =
                 action_tx.unbounded_send(crate::tray::TrayAction::Connect(config_path.to_string()));
             true
@@ -96,8 +98,7 @@ async fn handle_reconnect_action(
             // User gave up on reconnecting — tear down both KS and bypass.
             // Bypass gateway capture is ephemeral, so leaving routes installed
             // against a possibly-stale gateway is a footgun on the next manual
-            // connect. Don't remove rules here — the new tunnel's connect path
-            // re-applies them (helper has replace semantics).
+            // connect.
             crate::dbus::killswitch::remove_rules().await;
             crate::dbus::killswitch::remove_bypass_routes().await;
             tray.update(|t| {
