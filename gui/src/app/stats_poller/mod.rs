@@ -140,12 +140,16 @@ async fn poll_connected_sessions(
 /// (`bypass_is_live`, `recover_from_drift`, `drift_transition`) and is
 /// unit-tested there. No unit surface here.
 async fn check_bypass_drift(tray: &ksni::blocking::Handle<VpnTray>, settings: &Settings) {
-    let any_connected = tray
-        .update(|t| t.sessions.values().any(|s| s.status.is_connected()))
-        .unwrap_or(false);
-    let bypass_live = tray
-        .update(|t| bypass_is_live(&t.bypass_state))
-        .unwrap_or(false);
+    // One lock for both gates — the poll loop is single-threaded but a second
+    // acquisition here would contend with the StatusChange mutator for nothing.
+    let (any_connected, bypass_live) = tray
+        .update(|t| {
+            (
+                t.sessions.values().any(|s| s.status.is_connected()),
+                bypass_is_live(&t.bypass_state),
+            )
+        })
+        .unwrap_or((false, false));
 
     // Skipped when bypass is Off/Failed (no live set to reconcile) or no
     // session is connected (kill-switch not enforcing anyway). A helper that
