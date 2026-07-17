@@ -131,6 +131,50 @@ pub(crate) async fn setup_signal_handlers(
     Ok(())
 }
 
+/// What the kill-switch teardown path should do when a protected session is
+/// destroyed. The helper's kill-switch is a *single global nft table* bound to
+/// one tunnel interface (`AddRules` replaces it wholesale), so tearing it down
+/// on any disconnect strips protection from every *other* still-connected
+/// session — and even leaving it in place would keep the table bound to the
+/// dying interface. The correct response depends on whether a protected
+/// survivor remains.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum KillSwitchTeardown {
+    /// No protected session remains — release rules + bypass and clear all flags.
+    Full,
+    /// Another kill-switch-active session is still connected — leave the rules
+    /// up, clear only the destroyed session's flag, and rebind the global table
+    /// to the survivor at `session_path`.
+    RebindTo { session_path: String },
+    /// This drop was not a genuine user disconnect (auth-retry swap) — leave the
+    /// firewall entirely untouched; a replacement tunnel is coming.
+    Skip,
+}
+
+/// Decide the teardown action for a destroyed session. Pure: the caller passes
+/// the destroyed path, whether it was an auth-retry teardown, and the surviving
+/// sessions as `(path, is_connected, kill_switch_active)` tuples, so this is
+/// hermetic and unit-testable while the async teardown that consumes it is not.
+pub(super) fn decide_kill_switch_teardown(
+    destroyed_path: &str,
+    is_auth_retry: bool,
+    survivors: impl IntoIterator<Item = (String, bool, bool)>,
+) -> KillSwitchTeardown {
+    if is_auth_retry {
+        return KillSwitchTeardown::Skip;
+    }
+    // A survivor keeps the firewall alive only if it is both still connected
+    // and was itself kill-switch-protected. Ignore the destroyed session's own
+    // lingering entry (SessDestroyed can race its tray removal).
+    let survivor = survivors
+        .into_iter()
+        .find(|(path, connected, ks_active)| path != destroyed_path && *connected && *ks_active);
+    match survivor {
+        Some((session_path, _, _)) => KillSwitchTeardown::RebindTo { session_path },
+        None => KillSwitchTeardown::Full,
+    }
+}
+
 /// React to a destroyed session: schedule its tray removal, then either release
 /// kill-switch rules (user-initiated disconnect) or surface a reconnect path
 /// (unexpected drop — auto-reconnect if enabled, else a notification).
@@ -176,28 +220,76 @@ fn handle_session_destroyed(
     });
     info!("Session destroyed, scheduled delayed removal");
 
-    // Check whether the user initiated this disconnect
+    // Classify the drop. USER_DISCONNECTED = a real user disconnect (tear the
+    // firewall down). AUTH_RETRY_SESSIONS = a wrong-password swap (suppress the
+    // reconnect prompt but leave the firewall alone — a replacement tunnel is
+    // coming). Drain both so the markers don't leak across sessions.
     let user_initiated = if let Ok(mut set) = super::session_ops::USER_DISCONNECTED.lock() {
         set.remove(&session_path)
     } else {
         false
     };
+    let auth_retry = if let Ok(mut set) = super::session_ops::AUTH_RETRY_SESSIONS.lock() {
+        set.remove(&session_path)
+    } else {
+        false
+    };
 
-    if user_initiated {
-        // Expected disconnect — release any kill-switch rules so the user's
-        // internet keeps working. No-op when helper not installed or kill-switch
-        // was never engaged.
+    if user_initiated || auth_retry {
+        // Expected disconnect — release kill-switch rules so the user's internet
+        // keeps working, UNLESS another protected session is still connected (the
+        // helper's kill-switch is a single global table; a blanket teardown would
+        // strip that survivor's protection — H2) or this was an auth-retry swap
+        // (Skip — H3). The pure decision runs against a live tray snapshot.
         let tray_clear = tray.clone();
+        let dbus_rebind = dbus.clone();
+        let destroyed = session_path.clone();
         glib::spawn_future_local(async move {
-            crate::dbus::killswitch::remove_rules().await;
-            crate::dbus::killswitch::remove_bypass_routes().await;
-            tray_clear.update(|t| {
-                for s in t.sessions.values_mut() {
-                    s.kill_switch_active = false;
+            let survivors = tray_clear
+                .update(|t| {
+                    t.sessions
+                        .iter()
+                        .map(|(p, s)| (p.clone(), s.status.is_connected(), s.kill_switch_active))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            match decide_kill_switch_teardown(&destroyed, auth_retry, survivors) {
+                KillSwitchTeardown::Full => {
+                    crate::dbus::killswitch::remove_rules().await;
+                    crate::dbus::killswitch::remove_bypass_routes().await;
+                    tray_clear.update(|t| {
+                        for s in t.sessions.values_mut() {
+                            s.kill_switch_active = false;
+                        }
+                        t.bypass_state = crate::tray::BypassState::Off;
+                    });
+                    crate::dialogs::show_killswitch_inactive_notification();
                 }
-                t.bypass_state = crate::tray::BypassState::Off;
-            });
-            crate::dialogs::show_killswitch_inactive_notification();
+                KillSwitchTeardown::RebindTo { session_path } => {
+                    // Keep the firewall up; rebind the global table to the
+                    // surviving protected tunnel's interface (the destroyed
+                    // session's `oifname accept` is now stale). Bypass routes
+                    // are global and independent — leave them in place.
+                    let settings = crate::settings::Settings::new();
+                    let allow_lan = settings.kill_switch_allow_lan();
+                    if let Err(e) = super::status_handler::apply_kill_switch(
+                        &dbus_rebind,
+                        &session_path,
+                        allow_lan,
+                    )
+                    .await
+                    {
+                        warn!("kill-switch: rebind to surviving session failed: {}", e);
+                    }
+                    let destroyed = destroyed.clone();
+                    tray_clear.update(move |t| {
+                        if let Some(s) = t.sessions.get_mut(&destroyed) {
+                            s.kill_switch_active = false;
+                        }
+                    });
+                }
+                KillSwitchTeardown::Skip => {}
+            }
         });
     } else if let Some((config_path, config_name)) = session_info
         && !config_path.is_empty()
@@ -263,4 +355,76 @@ fn spawn_auto_reconnect(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KillSwitchTeardown, decide_kill_switch_teardown};
+
+    const A: &str = "/net/openvpn/v3/sessions/aaaa";
+    const B: &str = "/net/openvpn/v3/sessions/bbbb";
+
+    // (path, is_connected, kill_switch_active)
+    fn sess(path: &str, connected: bool, ks: bool) -> (String, bool, bool) {
+        (path.to_string(), connected, ks)
+    }
+
+    #[test]
+    fn auth_retry_always_skips_teardown() {
+        // Even with no survivors, an auth-retry swap must leave the firewall up.
+        let d = decide_kill_switch_teardown(A, true, vec![]);
+        assert_eq!(d, KillSwitchTeardown::Skip);
+    }
+
+    #[test]
+    fn last_protected_session_tears_down_fully() {
+        // Only the destroyed session remains in the map (SessDestroyed races its
+        // own tray removal) — no survivor, so full teardown.
+        let d = decide_kill_switch_teardown(A, false, vec![sess(A, true, true)]);
+        assert_eq!(d, KillSwitchTeardown::Full);
+    }
+
+    #[test]
+    fn no_sessions_left_tears_down_fully() {
+        let d = decide_kill_switch_teardown(A, false, vec![]);
+        assert_eq!(d, KillSwitchTeardown::Full);
+    }
+
+    #[test]
+    fn surviving_protected_session_triggers_rebind() {
+        // H2 core: disconnect A while B is connected + kill-switch-active → keep
+        // the firewall up and rebind the global table to B, never a blanket wipe.
+        let d =
+            decide_kill_switch_teardown(A, false, vec![sess(A, false, true), sess(B, true, true)]);
+        assert_eq!(
+            d,
+            KillSwitchTeardown::RebindTo {
+                session_path: B.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn survivor_without_kill_switch_does_not_block_teardown() {
+        // B is connected but was never kill-switch-protected — nothing to
+        // preserve, so tearing down is correct.
+        let d = decide_kill_switch_teardown(A, false, vec![sess(B, true, false)]);
+        assert_eq!(d, KillSwitchTeardown::Full);
+    }
+
+    #[test]
+    fn disconnected_protected_survivor_does_not_block_teardown() {
+        // B carries a stale kill_switch_active flag but is no longer connected —
+        // it can't keep the firewall meaningful, so full teardown.
+        let d = decide_kill_switch_teardown(A, false, vec![sess(B, false, true)]);
+        assert_eq!(d, KillSwitchTeardown::Full);
+    }
+
+    #[test]
+    fn auth_retry_wins_even_with_protected_survivor() {
+        // Skip takes precedence over Rebind: an auth-retry swap must not touch
+        // the firewall at all, regardless of survivors.
+        let d = decide_kill_switch_teardown(A, true, vec![sess(B, true, true)]);
+        assert_eq!(d, KillSwitchTeardown::Skip);
+    }
 }

@@ -8,6 +8,15 @@ use tracing::{error, info, warn};
 pub(crate) static USER_DISCONNECTED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
+/// Session paths torn down by the auth-retry loop (wrong-password → recreate a
+/// fresh tunnel for the same config). Like `USER_DISCONNECTED` these suppress
+/// the SessDestroyed reconnect prompt, but they are NOT a user request to drop
+/// protection: a replacement session is coming, so the kill-switch teardown
+/// path must skip them. Keeping this separate from `USER_DISCONNECTED` is what
+/// stops an auth retry from stripping the firewall mid-swap (H3).
+pub(crate) static AUTH_RETRY_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
 /// Side-channel cache of (config_path, config_name) for sessions removed from
 /// the tray on `ConnDisconnected` before `SessDestroyed` arrives.
 ///

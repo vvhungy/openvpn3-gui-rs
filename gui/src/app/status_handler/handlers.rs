@@ -222,15 +222,19 @@ pub(super) fn handle_auth_failed(
             &format!("{}: Authentication Failed", config_name),
             &format!("Wrong credentials for '{}'. Retrying...", config_name),
         );
-        // Mark old session so SessDestroyed won't show reconnect prompt.
+        // Mark old session as an auth-retry teardown, NOT a user disconnect.
+        // Both suppress the SessDestroyed reconnect prompt, but the auth-retry
+        // marker also tells the kill-switch teardown path to leave the firewall
+        // in place — a replacement tunnel for the same config is coming, so
+        // dropping protection here would briefly expose traffic mid-swap (H3).
         // Poison-tolerant: a poisoned lock must not skip this bookkeeping
         // (best-effort insert; worst case SessDestroyed shows a redundant
         // reconnect prompt, which is safe).
-        if let Ok(mut set) = crate::app::session_ops::USER_DISCONNECTED.lock() {
+        if let Ok(mut set) = crate::app::session_ops::AUTH_RETRY_SESSIONS.lock() {
             set.insert(session_path.clone());
         } else {
             warn!(
-                "USER_DISCONNECTED lock poisoned — \
+                "AUTH_RETRY_SESSIONS lock poisoned — \
                  SessDestroyed may show reconnect prompt"
             );
         }
