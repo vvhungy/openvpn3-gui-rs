@@ -290,7 +290,7 @@ fn handle_session_destroyed(
                 KillSwitchTeardown::Skip => {}
             }
         });
-    } else if let Some((config_path, config_name)) = session_info
+    } else if let Some((config_path, config_name)) = session_info.as_ref()
         && !config_path.is_empty()
     {
         // Unexpected drop — keep rules in place; the notification's
@@ -301,18 +301,43 @@ fn handle_session_destroyed(
             // Settings::new() itself, so capturing a whole Settings here would
             // hold a live GSettings client for the reconnect window for nothing.
             let delay = settings.auto_reconnect_delay_seconds();
-            spawn_auto_reconnect(dbus, tray, action_tx, config_path, config_name, delay);
+            spawn_auto_reconnect(
+                dbus,
+                tray,
+                action_tx,
+                config_path.clone(),
+                config_name.clone(),
+                delay,
+            );
         } else {
             info!(
                 "Unexpected session drop for '{}', showing reconnect notification",
                 config_name
             );
             crate::dialogs::show_reconnect_notification(
-                config_path,
-                config_name,
+                config_path.clone(),
+                config_name.clone(),
                 action_tx.clone(),
                 tray.clone(),
             );
+        }
+    } else {
+        // Deliberate no-op, logged so it isn't silent (H4): either we have no
+        // captured identity for this path, or its config_path is empty — the
+        // race where Connected beat SessCreated and the identity backfill hadn't
+        // landed before the drop. With nothing to reconnect to, there's no
+        // notification or auto-reconnect to fire.
+        match session_info.as_ref() {
+            Some((cp, cn)) if cp.is_empty() => {
+                info!(
+                    "Unexpected drop for '{}' has no config_path (backfill not yet complete); reconnect suppressed",
+                    cn
+                );
+            }
+            None => {
+                info!("Session destroyed with no captured identity; no reconnect action");
+            }
+            _ => {}
         }
     }
 }
