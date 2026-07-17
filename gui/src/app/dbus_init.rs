@@ -303,7 +303,6 @@ async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedS
             last_bytes_out: 0,
             idle_started_at: None,
             idle_since: None,
-            auto_reconnect_attempted_at: None,
             kill_switch_active: false,
         },
         connected_path,

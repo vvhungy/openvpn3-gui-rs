@@ -98,23 +98,33 @@ async fn poll_connected_sessions(
             let bi = stats.get("BYTES_IN").copied().unwrap_or(0) as u64;
             let bo = stats.get("BYTES_OUT").copied().unwrap_or(0) as u64;
             let p = path.clone();
-            let trigger_reconnect = tray
+            // apply_stall_detection mutates the session's idle state; read back
+            // idle_since + config_path so the cooldown decision below can run
+            // against the config-keyed map OUTSIDE the tray lock (H5: the
+            // cooldown must outlive this session — see session_ops).
+            let (idle_since, config_path) = tray
                 .update(move |t| {
-                    if let Some(s) = t.sessions.get_mut(&p) {
-                        apply_stall_detection(s, bi, bo, stall_threshold);
-                        should_auto_reconnect_on_stall(
-                            s,
-                            auto_reconnect,
-                            stall_threshold,
-                            cooldown_secs,
-                        )
-                    } else {
-                        false
-                    }
+                    let s = t.sessions.get_mut(&p)?;
+                    apply_stall_detection(s, bi, bo, stall_threshold);
+                    Some((s.idle_since, s.config_path.clone()))
                 })
-                .unwrap_or(false);
+                .flatten()
+                .unwrap_or((None, String::new()));
+
+            let trigger_reconnect = !config_path.is_empty()
+                && should_auto_reconnect_on_stall(
+                    idle_since,
+                    super::session_ops::last_auto_reconnect_attempt(&config_path),
+                    auto_reconnect,
+                    stall_threshold,
+                    cooldown_secs,
+                );
 
             if trigger_reconnect {
+                // Stamp the attempt keyed by config_path BEFORE the disconnect —
+                // the SessDestroyed/recreate cycle would lose a per-session
+                // stamp (H5). Best-effort; poison-tolerant inside the helper.
+                super::session_ops::record_auto_reconnect_attempt(&config_path);
                 tracing::info!(
                     "Stall threshold exceeded for session {}, triggering auto-reconnect via disconnect+SessDestroyed path",
                     path

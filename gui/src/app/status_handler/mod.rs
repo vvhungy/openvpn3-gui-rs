@@ -334,7 +334,6 @@ mod tests {
             last_bytes_out: 888,
             idle_started_at: Some(std::time::Instant::now()),
             idle_since: Some(std::time::Instant::now()),
-            auto_reconnect_attempted_at: None,
             kill_switch_active: false,
         }
     }

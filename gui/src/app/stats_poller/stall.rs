@@ -74,15 +74,20 @@ pub fn apply_stall_detection(
 /// Returns true when:
 /// - `auto_reconnect` setting is enabled
 /// - stall detection is on (`threshold_secs > 0`)
-/// - session is idle past the stall threshold
-/// - cooldown window has elapsed since the last attempt for this session
+/// - session is idle past the stall threshold (`idle_since`)
+/// - cooldown window has elapsed since the last attempt (`last_attempt`)
 ///   (prevents loops against persistently dead servers)
 ///
-/// Marks `auto_reconnect_attempted_at` on the session when returning true so
-/// the caller doesn't need to remember to set it. The caller is responsible
-/// for issuing the disconnect — SessDestroyed then drives T1's reconnect path.
+/// Pure: `idle_since` and `last_attempt` are passed in so the caller controls
+/// their scope. `last_attempt` is read from a config_path-keyed map by the
+/// caller (see `session_ops::last_auto_reconnect_attempt`) — NOT from the
+/// session — so the cooldown survives the session destroy/recreate cycle that a
+/// stall-driven disconnect triggers (H5). The caller is responsible for both
+/// stamping the attempt (on true) and issuing the disconnect — SessDestroyed
+/// then drives the reconnect path.
 pub fn should_auto_reconnect_on_stall(
-    session: &mut crate::tray::SessionInfo,
+    idle_since: Option<std::time::Instant>,
+    last_attempt: Option<std::time::Instant>,
     auto_reconnect: bool,
     threshold_secs: u32,
     cooldown_secs: u64,
@@ -90,18 +95,17 @@ pub fn should_auto_reconnect_on_stall(
     if !auto_reconnect || threshold_secs == 0 {
         return false;
     }
-    let Some(since) = session.idle_since else {
+    let Some(since) = idle_since else {
         return false;
     };
     if since.elapsed().as_secs() < threshold_secs as u64 {
         return false;
     }
-    if let Some(last) = session.auto_reconnect_attempted_at
+    if let Some(last) = last_attempt
         && last.elapsed().as_secs() < cooldown_secs
     {
         return false;
     }
-    session.auto_reconnect_attempted_at = Some(std::time::Instant::now());
     true
 }
 
@@ -127,7 +131,6 @@ mod tests {
             last_bytes_out: 500,
             idle_started_at: None,
             idle_since: None,
-            auto_reconnect_attempted_at: None,
             kill_switch_active: false,
         }
     }
@@ -218,55 +221,50 @@ mod tests {
 
     #[test]
     fn test_should_reconnect_disabled_setting() {
-        let mut s = make_connected_session();
-        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
-        assert!(!should_auto_reconnect_on_stall(&mut s, false, 60, 60));
-        assert!(s.auto_reconnect_attempted_at.is_none());
+        let idle = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        assert!(!should_auto_reconnect_on_stall(idle, None, false, 60, 60));
     }
 
     #[test]
     fn test_should_reconnect_threshold_zero() {
-        let mut s = make_connected_session();
-        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
-        assert!(!should_auto_reconnect_on_stall(&mut s, true, 0, 60));
+        let idle = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        assert!(!should_auto_reconnect_on_stall(idle, None, true, 0, 60));
     }
 
     #[test]
     fn test_should_reconnect_not_idle() {
-        let mut s = make_connected_session();
-        s.idle_since = None;
-        assert!(!should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+        assert!(!should_auto_reconnect_on_stall(None, None, true, 60, 60));
     }
 
     #[test]
     fn test_should_reconnect_below_threshold() {
-        let mut s = make_connected_session();
-        s.idle_since = Some(std::time::Instant::now());
-        assert!(!should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+        let idle = Some(std::time::Instant::now());
+        assert!(!should_auto_reconnect_on_stall(idle, None, true, 60, 60));
     }
 
     #[test]
     fn test_should_reconnect_fires_past_threshold() {
-        let mut s = make_connected_session();
-        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
-        assert!(should_auto_reconnect_on_stall(&mut s, true, 60, 60));
-        assert!(s.auto_reconnect_attempted_at.is_some());
+        let idle = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        // No prior attempt → fires.
+        assert!(should_auto_reconnect_on_stall(idle, None, true, 60, 60));
     }
 
     #[test]
     fn test_should_reconnect_cooldown_blocks_loop() {
-        let mut s = make_connected_session();
-        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
-        s.auto_reconnect_attempted_at = Some(std::time::Instant::now());
-        assert!(!should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+        let idle = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        // A recent attempt (config-keyed in production; passed in here) blocks
+        // the loop against a dead server.
+        let last = Some(std::time::Instant::now());
+        assert!(!should_auto_reconnect_on_stall(idle, last, true, 60, 60));
     }
 
     #[test]
     fn test_should_reconnect_after_cooldown_expires() {
-        let mut s = make_connected_session();
-        s.idle_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
-        s.auto_reconnect_attempted_at =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
-        assert!(should_auto_reconnect_on_stall(&mut s, true, 60, 60));
+        let idle = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        // Cooldown elapsed → fires again. This is the H5 fix made testable:
+        // last_attempt outlives the session because the caller scopes it by
+        // config_path, so the second stall after a recreate still respects it.
+        let last = Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+        assert!(should_auto_reconnect_on_stall(idle, last, true, 60, 60));
     }
 }
