@@ -147,6 +147,21 @@ pub async fn restore_rp_filter(iface: &str, original: &str) -> Result<()> {
     Ok(())
 }
 
+/// Restore every recorded iface to its pre-apply rp_filter value. Best-effort
+/// per iface — an iface may have vanished since capture (e.g. WiFi unplugged
+/// mid-VPN); such failures are logged and skipped so one gone iface can't abort
+/// the rest. Replaces the three single-slot teardown sites that each previously
+/// held one `(iface, value)` pair; the apply path now records one entry per
+/// *touched* iface, so teardown must walk all of them to restore each original
+/// (G1: a physical switch wlan0→eth0 leaves both ifaces' originals recorded).
+pub async fn restore_rp_filter_all(originals: impl IntoIterator<Item = (String, String)>) {
+    for (iface, value) in originals {
+        if let Err(e) = restore_rp_filter(&iface, &value).await {
+            warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
+        }
+    }
+}
+
 fn rp_filter_path(iface: &str) -> String {
     format!("/proc/sys/net/ipv4/conf/{iface}/rp_filter")
 }

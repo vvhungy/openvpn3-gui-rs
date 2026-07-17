@@ -8,6 +8,7 @@
 //! D-Bus glue with no unit-testable pure surface.
 
 use anyhow::{Context, Result, bail};
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::AsyncWriteExt;
@@ -38,9 +39,15 @@ struct State {
     /// only tear down routing state we actually installed.
     bypass_routes_applied: bool,
     /// T2: (iface, original rp_filter value) captured at apply-time.
-    /// `RemoveBypassRoutes` takes this back so we can restore the iface's
-    /// rp_filter to its pre-apply value. `None` when routing not applied.
-    rp_filter_original: Option<(String, String)>,
+    /// One entry per *touched* iface: the iface's pre-apply rp_filter value.
+    /// `RemoveBypassRoutes` / shutdown / vanish-teardown each drain this and
+    /// restore every recorded iface. Empty when routing is not applied.
+    /// Keyed by iface (not a single slot) so a physical switch mid-VPN
+    /// (wlan0→eth0) preserves BOTH originals instead of dropping the new
+    /// iface's true value on re-apply (G1: stale-iface). Per-iface first-seen
+    /// wins: a re-apply on the same iface reads the "2" we wrote, so only the
+    /// first capture per iface is kept.
+    rp_filter_original: HashMap<String, String>,
 }
 
 #[derive(Default)]
@@ -321,15 +328,16 @@ impl KillSwitch {
         {
             let mut state = self.state.lock().expect("state mutex poisoned");
             state.bypass_routes_applied = true;
-            // Record the pre-apply rp_filter only on the FIRST apply — a
-            // re-apply (bypass list change, VPN reconnect, S30 auto-reconnect)
-            // sees rp_filter already at "2" because *we* set it, so
-            // `original_rpf` would be "2" and the eventual restore would be a
-            // no-op, leaving the iface stuck at loose. Guard on the slot
-            // being empty so the true original survives across N re-applies.
-            if state.rp_filter_original.is_none() {
-                state.rp_filter_original = Some((net.iface.clone(), original_rpf));
-            }
+            // First-seen-per-iface wins: a re-apply on the SAME iface reads
+            // the value we wrote ("2"), so only record an iface's true original
+            // the first time we touch it. Keyed by iface so a physical switch
+            // mid-VPN (wlan0→eth0) preserves BOTH originals — the old iface's
+            // value is restored at teardown even though it was captured on a
+            // prior apply, instead of being dropped on the floor (G1).
+            state
+                .rp_filter_original
+                .entry(net.iface.clone())
+                .or_insert(original_rpf);
         }
         info!(
             applied = applied.len(),
@@ -348,15 +356,12 @@ impl KillSwitch {
         let rpf = {
             let mut state = self.state.lock().expect("state mutex poisoned");
             state.bypass_routes_applied = false;
-            state.rp_filter_original.take()
+            state.rp_filter_original.drain().collect::<Vec<_>>()
         };
-        if let Some((iface, value)) = rpf {
-            // Best-effort restore — iface may have disappeared (e.g. user
-            // unplugged WiFi). Log and continue with rule/table teardown.
-            if let Err(e) = bypass::restore_rp_filter(&iface, &value).await {
-                warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
-            }
-        }
+        // Best-effort restore per touched iface — an iface may have
+        // disappeared (e.g. user unplugged WiFi). restore_rp_filter_all logs
+        // and skips gone ifaces; routing teardown below runs regardless.
+        bypass::restore_rp_filter_all(rpf).await;
         bypass::teardown_routing()
             .await
             .map_err(|e| fdo::Error::Failed(format!("bypass teardown: {e}")))?;
@@ -382,14 +387,14 @@ pub async fn cleanup_rules() {
             .lock()
             .expect("state mutex poisoned")
             .rp_filter_original
-            .take(),
-        None => None,
+            .drain()
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
     };
-    if let Some((iface, value)) = rpf
-        && let Err(e) = bypass::restore_rp_filter(&iface, &value).await
-    {
-        warn!(iface = %iface, err = ?e, "shutdown rp_filter restore failed (iface gone?)");
-    }
+    // Restore every touched iface's rp_filter before routing teardown. Empty
+    // when no bypass routing was ever applied (no-op). Per-iface best-effort —
+    // restore_rp_filter_all logs gone ifaces and continues.
+    bypass::restore_rp_filter_all(rpf).await;
     if let Err(e) = run_nft(nft::remove_rules_script()).await {
         warn!(err = ?e, "shutdown cleanup nft failed (often expected)");
     }
@@ -428,18 +433,16 @@ async fn teardown_bypass_on_vanish(state_arc: &Arc<Mutex<State>>) {
         let mut state = state_arc.lock().expect("state mutex poisoned");
         let rpf = if state.bypass_routes_applied {
             state.bypass_routes_applied = false;
-            state.rp_filter_original.take()
+            state.rp_filter_original.drain().collect::<Vec<_>>()
         } else {
-            None
+            Vec::new()
         };
         state.sender = None;
         state.watcher = None;
         rpf
     };
-    if let Some((iface, value)) = rpf {
-        if let Err(e) = bypass::restore_rp_filter(&iface, &value).await {
-            warn!(iface = %iface, err = ?e, "rp_filter restore failed (iface gone?)");
-        }
+    if !rpf.is_empty() {
+        bypass::restore_rp_filter_all(rpf).await;
         if let Err(e) = bypass::teardown_routing().await {
             error!(err = ?e, "auto-cleanup bypass routing failed");
         }
