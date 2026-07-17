@@ -174,6 +174,24 @@ pub(super) fn decide_kill_switch_teardown(
     }
 }
 
+/// Full kill-switch teardown: release rules + bypass routes, clear every
+/// session's `kill_switch_active` flag, reset bypass tray state, notify. The
+/// one path for "no protected survivor remains" — called both for the `Full`
+/// decision and as the fallback when a `RebindTo` can't actually keep a live
+/// rule bound to the survivor (apply_kill_switch returned Ok(false)/Err).
+/// Impure (D-Bus + tray + notification); no test surface.
+async fn full_killswitch_teardown(tray: &ksni::blocking::Handle<VpnTray>) {
+    crate::dbus::killswitch::remove_rules().await;
+    crate::dbus::killswitch::remove_bypass_routes().await;
+    tray.update(|t| {
+        for s in t.sessions.values_mut() {
+            s.kill_switch_active = false;
+        }
+        t.bypass_state = crate::tray::BypassState::Off;
+    });
+    crate::dialogs::show_killswitch_inactive_notification();
+}
+
 /// React to a destroyed session: schedule its tray removal, then either release
 /// kill-switch rules (user-initiated disconnect) or surface a reconnect path
 /// (unexpected drop — auto-reconnect if enabled, else a notification).
@@ -254,15 +272,7 @@ fn handle_session_destroyed(
                 .unwrap_or_default();
             match decide_kill_switch_teardown(&destroyed, auth_retry, survivors) {
                 KillSwitchTeardown::Full => {
-                    crate::dbus::killswitch::remove_rules().await;
-                    crate::dbus::killswitch::remove_bypass_routes().await;
-                    tray_clear.update(|t| {
-                        for s in t.sessions.values_mut() {
-                            s.kill_switch_active = false;
-                        }
-                        t.bypass_state = crate::tray::BypassState::Off;
-                    });
-                    crate::dialogs::show_killswitch_inactive_notification();
+                    full_killswitch_teardown(&tray_clear).await;
                 }
                 KillSwitchTeardown::RebindTo { session_path } => {
                     // Keep the firewall up; rebind the global table to the
@@ -271,21 +281,48 @@ fn handle_session_destroyed(
                     // are global and independent — leave them in place.
                     let settings = crate::settings::Settings::new();
                     let allow_lan = settings.kill_switch_allow_lan();
-                    if let Err(e) = super::status_handler::apply_kill_switch(
+                    // apply_kill_switch returns Ok(false) (not Err) when the
+                    // survivor can't anchor a live rule — device_name/server_ip
+                    // still empty, or the helper isn't installed. A swallowed
+                    // Ok(false) would leave the survivor flagged active while
+                    // the global table stays bound to the dead interface (leak),
+                    // so treat Ok(false) as a rebind failure and fall back to a
+                    // full teardown.
+                    let rebind_ok = match super::status_handler::apply_kill_switch(
                         &dbus_rebind,
                         &session_path,
                         allow_lan,
                     )
                     .await
                     {
-                        warn!("kill-switch: rebind to surviving session failed: {}", e);
-                    }
-                    let destroyed = destroyed.clone();
-                    tray_clear.update(move |t| {
-                        if let Some(s) = t.sessions.get_mut(&destroyed) {
-                            s.kill_switch_active = false;
+                        Ok(true) => true,
+                        Ok(false) => {
+                            warn!(
+                                "kill-switch: rebind to surviving session {} skipped (not ready / helper absent); falling back to full teardown",
+                                session_path
+                            );
+                            false
                         }
-                    });
+                        Err(e) => {
+                            warn!(
+                                "kill-switch: rebind to surviving session {} failed: {}; falling back to full teardown",
+                                session_path, e
+                            );
+                            false
+                        }
+                    };
+                    if rebind_ok {
+                        // Rebind succeeded: keep rules up, clear only the
+                        // destroyed session's flag.
+                        let destroyed = destroyed.clone();
+                        tray_clear.update(move |t| {
+                            if let Some(s) = t.sessions.get_mut(&destroyed) {
+                                s.kill_switch_active = false;
+                            }
+                        });
+                    } else {
+                        full_killswitch_teardown(&tray_clear).await;
+                    }
                 }
                 KillSwitchTeardown::Skip => {}
             }

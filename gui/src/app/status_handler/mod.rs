@@ -278,7 +278,14 @@ pub(super) async fn setup_status_handler(
                     // reconnect branch and the RECENT_DESTROYED_SESSIONS cache
                     // gate on !config_path.is_empty()). Backfill the real
                     // identity from the live session proxy while it's still up.
-                    if inserted_new && status.is_connected() {
+                    // Trigger on ANY newly-inserted status, not just Connected —
+                    // a fresh session's first StatusChange is usually Connecting
+                    // (precedes Connected), so gating on Connected would find
+                    // the entry already existing on the later transition and
+                    // never backfill. config_path/config_name exist for any
+                    // state, and backfill self-guards on config_path.is_empty()
+                    // so a later SessionCreated that fills the path wins.
+                    if inserted_new {
                         let conn_bf = conn.clone();
                         let tray_bf = tray_for_status.clone();
                         let path_bf = path.clone();

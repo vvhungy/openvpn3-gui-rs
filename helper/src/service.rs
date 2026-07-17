@@ -358,11 +358,8 @@ impl KillSwitch {
             state.bypass_routes_applied = false;
             state.rp_filter_original.drain().collect::<Vec<_>>()
         };
-        // Best-effort restore per touched iface — an iface may have
-        // disappeared (e.g. user unplugged WiFi). restore_rp_filter_all logs
-        // and skips gone ifaces; routing teardown below runs regardless.
-        bypass::restore_rp_filter_all(rpf).await;
-        bypass::teardown_routing()
+        // Restore rp_filter then tear down routing via the shared sequence (D6).
+        bypass::teardown_bypass_state(rpf)
             .await
             .map_err(|e| fdo::Error::Failed(format!("bypass teardown: {e}")))?;
         info!("bypass routes removed");
