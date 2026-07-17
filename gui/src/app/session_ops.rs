@@ -8,6 +8,45 @@ use tracing::{error, info, warn};
 pub(crate) static USER_DISCONNECTED: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
+/// Session paths torn down by the auth-retry loop (wrong-password → recreate a
+/// fresh tunnel for the same config). Like `USER_DISCONNECTED` these suppress
+/// the SessDestroyed reconnect prompt, but they are NOT a user request to drop
+/// protection: a replacement session is coming, so the kill-switch teardown
+/// path must skip them. Keeping this separate from `USER_DISCONNECTED` is what
+/// stops an auth retry from stripping the firewall mid-swap (H3).
+pub(crate) static AUTH_RETRY_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+/// Last stall-driven auto-reconnect attempt, keyed by **config_path** — the
+/// stable identity across a session's destroy/recreate cycle. A stall-driven
+/// disconnect tears down the session (SessDestroyed) and the reconnect builds a
+/// fresh one, so a per-session timestamp would be lost at exactly the boundary
+/// it needs to survive → against a dead server reconnect fired every
+/// `stall_threshold` instead of `cooldown_secs` (H5). Scoping by config_path
+/// makes the cooldown outlive the session it throttles.
+pub(crate) static AUTO_RECONNECT_ATTEMPTED_AT: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Read this config's last stall-driven reconnect attempt (for cooldown check).
+/// Poison-tolerant: a poisoned lock reads as "never attempted" (worst case one
+/// un-throttled reconnect, which is safe).
+pub(crate) fn last_auto_reconnect_attempt(config_path: &str) -> Option<std::time::Instant> {
+    AUTO_RECONNECT_ATTEMPTED_AT
+        .lock()
+        .ok()
+        .and_then(|m| m.get(config_path).copied())
+}
+
+/// Stamp that a stall-driven reconnect fired for this config now.
+/// Poison-tolerant: a poisoned lock skips the stamp (worst case one extra
+/// reconnect sooner, which is safe).
+pub(crate) fn record_auto_reconnect_attempt(config_path: &str) {
+    if let Ok(mut m) = AUTO_RECONNECT_ATTEMPTED_AT.lock() {
+        m.insert(config_path.to_string(), std::time::Instant::now());
+    }
+}
+
 /// Side-channel cache of (config_path, config_name) for sessions removed from
 /// the tray on `ConnDisconnected` before `SessDestroyed` arrives.
 ///
@@ -129,7 +168,6 @@ pub(crate) async fn connect_to_config(
                 last_bytes_out: 0,
                 idle_started_at: None,
                 idle_since: None,
-                auto_reconnect_attempted_at: None,
                 kill_switch_active: false,
             },
         );

@@ -8,6 +8,7 @@
 //! unit tests.
 
 mod retry;
+mod slots;
 
 pub(crate) use retry::{
     CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, next_attempt, should_retry_auth,
@@ -24,42 +25,10 @@ use crate::credentials::policy::{display_label_for, is_storable_field};
 use crate::dbus::session::SessionProxy;
 use crate::dbus::types::ClientAttentionType;
 
-/// Standard credential field labels — dialog always shows all 3 regardless
-/// of which slots the D-Bus queue currently holds. Extra dialog fields with
-/// no matching queue slot are silently ignored on submit.
-const STANDARD_FIELDS: [(&str, bool); 3] = [
-    ("Username", false),
-    ("Password", true),
-    ("One-Time Code", true),
-];
-
-/// Common D-Bus label variants seen from different OpenVPN3 servers.
-/// Used to probe the keyring when the actual queue slot label doesn't
-/// match the standard field label.
-fn keyring_label_variants(standard_label: &str) -> &'static [&'static str] {
-    match standard_label {
-        "Username" => &["username", "Enter Username", "Enter username"],
-        "Password" => &[
-            "password",
-            "Enter Password",
-            "Enter password",
-            "Your password",
-        ],
-        "One-Time Code" => &["one-time code", "Authenticator Code", "One Time Password"],
-        _ => &[],
-    }
-}
-
-/// Check whether a D-Bus label belongs to a standard field category.
-fn label_matches_category(label: &str, standard_label: &str) -> bool {
-    let lower = label.to_lowercase();
-    match standard_label {
-        "Username" => lower.contains("username"),
-        "Password" => lower.contains("password"),
-        // OTP / challenge: anything that isn't username or password
-        _ => !lower.contains("username") && !lower.contains("password"),
-    }
-}
+// Pure label/slot logic (STANDARD_FIELDS, build_labels_to_try, slot_mask,
+// label_matches_category, keyring_label_variants) + its unit tests live in the
+// `slots` sibling module.
+use slots::{STANDARD_FIELDS, build_labels_to_try, label_matches_category, slot_mask};
 
 /// Fetch credential input slots from D-Bus and show the credentials dialog.
 ///
@@ -213,22 +182,6 @@ async fn collect_credential_slots(
         }
     }
     slots
-}
-
-/// Build the ordered list of keyring labels to probe for a given set of slots.
-///
-/// Pure: the queue-slot labels first (as the server named them), then the three
-/// standard labels, then the per-standard common D-Bus label variants.
-/// Extracted from `request_credentials` so the label-accumulation is testable.
-fn build_labels_to_try(slots: &[(u32, u32, u32, String, bool)]) -> Vec<String> {
-    let mut labels: Vec<String> = slots.iter().map(|(_, _, _, l, _)| l.clone()).collect();
-    for (standard_label, _) in &STANDARD_FIELDS {
-        labels.push(standard_label.to_string());
-        for variant in keyring_label_variants(standard_label) {
-            labels.push(variant.to_string());
-        }
-    }
-    labels
 }
 
 /// Open the default keyring and unlock it once, returning a usable handle or
@@ -446,19 +399,6 @@ fn show_credentials_with_slots(
         },
         on_cancel,
     );
-}
-
-/// Look up the `mask` flag for a credential label among the D-Bus queue
-/// slots, or `false` when no slot carries that label.
-///
-/// Pure extraction of the per-label `.find().map().unwrap_or(false)` lookup so
-/// it is unit-testable in isolation.
-fn slot_mask(label: &str, slots: &[(u32, u32, u32, String, bool)]) -> bool {
-    slots
-        .iter()
-        .find(|(_, _, _, l, _)| l == label)
-        .map(|(_, _, _, _, m)| *m)
-        .unwrap_or(false)
 }
 
 /// User-facing hint for a credential *save* failure, given whether the
@@ -699,48 +639,7 @@ async fn submit_credentials(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_labels_to_try, keyring_unlock_hint, save_failure_hint, slot_mask};
-
-    #[test]
-    fn build_labels_starts_with_slot_labels() {
-        // Queue-slot labels are probed before the standard field names so the
-        // server's actual label wins when it matches a keyring attribute.
-        let slots = vec![(1, 0, 0, "Server User".to_string(), false)];
-        let labels = build_labels_to_try(&slots);
-        assert_eq!(labels.first().map(String::as_str), Some("Server User"));
-        assert!(labels.contains(&"Username".to_string()));
-        assert!(labels.contains(&"Password".to_string()));
-        assert!(labels.contains(&"One-Time Code".to_string()));
-    }
-
-    #[test]
-    fn build_labels_includes_common_variants() {
-        // Different OpenVPN3 servers emit varying label prose for the same
-        // field; all known variants are appended so the keyring is probed once
-        // per spelling.
-        let labels = build_labels_to_try(&[]);
-        assert!(labels.contains(&"Enter Password".to_string()));
-        assert!(labels.contains(&"Your password".to_string()));
-        assert!(labels.contains(&"one-time code".to_string()));
-    }
-
-    #[test]
-    fn slot_mask_finds_masked_label() {
-        let slots = vec![(1, 0, 0, "Password".to_string(), true)];
-        assert!(slot_mask("Password", &slots));
-    }
-
-    #[test]
-    fn slot_mask_unmasked_slot_is_false() {
-        let slots = vec![(1, 0, 0, "Username".to_string(), false)];
-        assert!(!slot_mask("Username", &slots));
-    }
-
-    #[test]
-    fn slot_mask_missing_label_is_false() {
-        let slots = vec![(1, 0, 0, "Password".to_string(), true)];
-        assert!(!slot_mask("Username", &slots));
-    }
+    use super::{keyring_unlock_hint, save_failure_hint};
 
     #[test]
     fn save_failure_hint_distinguishes_locked() {

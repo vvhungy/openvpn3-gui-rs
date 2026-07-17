@@ -6,7 +6,6 @@ use tracing::{debug, error, info, warn};
 
 use zbus::proxy::CacheProperties;
 
-use super::bypass_apply::apply_bypass_outcome_to_tray;
 use crate::config::{MANAGER_VERSION_MINIMUM, MANAGER_VERSION_RECOMMENDED, MIN_HELPER_VERSION};
 use crate::dbus::{
     configuration::{ConfigurationManagerProxy, ConfigurationProxy},
@@ -277,20 +276,32 @@ async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedS
     } else {
         None
     };
+    // Cold-start path (H1): a tunnel already up at GUI launch never emits a
+    // fresh Connected StatusChange, so the normal producer in
+    // upsert_session_state wouldn't stamp connected_at — Stats would render
+    // Duration/Since as "—". Stamp the GUI-launch instant instead. The openvpn3
+    // Session D-Bus interface exposes no connect timestamp, so this is an
+    // approximation (elapsed shown is "since GUI saw it"). `connected_path` is
+    // already `Some` exactly when status.is_connected(), so reuse it here
+    // instead of touching the `status` value (moved into the struct below).
+    let connected_at = if connected_path.is_some() {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     ScannedSession {
         entry: SessionInfo {
             session_path: path.to_string(),
             config_path,
             config_name,
             status,
-            connected_at: None,
+            connected_at,
             bytes_in: 0,
             bytes_out: 0,
             last_bytes_in: 0,
             last_bytes_out: 0,
             idle_started_at: None,
             idle_since: None,
-            auto_reconnect_attempted_at: None,
             kill_switch_active: false,
         },
         connected_path,
@@ -326,15 +337,7 @@ async fn reapply_firewall_on_startup(
     let dbus_clone = dbus.clone();
     let tray_clone = tray.clone();
     glib::spawn_future_local(async move {
-        if !bypass_cidrs.is_empty() {
-            let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
-            let outcome = if set_ok {
-                crate::dbus::killswitch::apply_bypass_routes().await
-            } else {
-                None
-            };
-            apply_bypass_outcome_to_tray(&tray_clone, outcome, "startup re-apply");
-        }
+        crate::app::bypass_apply::apply_bypass(&tray_clone, bypass_cidrs, "startup re-apply").await;
 
         if ks_enabled {
             for path in connected_paths {

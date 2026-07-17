@@ -250,13 +250,7 @@ async fn apply_bypass_live(
         crate::dbus::killswitch::clear_bypass_cidrs().await;
         tray.update(|t| t.bypass_state = crate::tray::BypassState::Off);
     } else {
-        let set_ok = crate::dbus::killswitch::set_bypass_cidrs(enabled).await;
-        let outcome = if set_ok {
-            crate::dbus::killswitch::apply_bypass_routes().await
-        } else {
-            None
-        };
-        crate::app::bypass_apply::apply_bypass_outcome_to_tray(&tray, outcome, "preferences save");
+        crate::app::bypass_apply::apply_bypass(&tray, enabled, "preferences save").await;
     }
 }
 

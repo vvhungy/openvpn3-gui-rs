@@ -12,8 +12,8 @@ use tracing::{info, warn};
 use crate::dbus::types::SessionStatus;
 use crate::tray::{SessionInfo, VpnTray};
 use handlers::{
-    ErrorAction, classify_error, clear_credential_attempts_on_connect, handle_auth_failed,
-    handle_conn_failed, handle_session_error, schedule_disconnected_removal,
+    ErrorAction, backfill_session_identity, classify_error, clear_credential_attempts_on_connect,
+    handle_auth_failed, handle_conn_failed, handle_session_error, schedule_disconnected_removal,
     send_status_notification, upsert_session_state,
 };
 
@@ -269,7 +269,30 @@ pub(super) async fn setup_status_handler(
                     // Update tray session state (connected_at, new sessions).
                     let path_for_timeout = path.clone();
                     let is_now_disconnected = status.is_disconnected();
-                    upsert_session_state(&tray_for_status, &path, status.clone());
+                    let inserted_new =
+                        upsert_session_state(&tray_for_status, &path, status.clone());
+
+                    // H4: if Connected won the race over SessionCreated, the
+                    // newly-inserted entry has an empty config_path and a later
+                    // unexpected drop would be silently swallowed (both the
+                    // reconnect branch and the RECENT_DESTROYED_SESSIONS cache
+                    // gate on !config_path.is_empty()). Backfill the real
+                    // identity from the live session proxy while it's still up.
+                    // Trigger on ANY newly-inserted status, not just Connected —
+                    // a fresh session's first StatusChange is usually Connecting
+                    // (precedes Connected), so gating on Connected would find
+                    // the entry already existing on the later transition and
+                    // never backfill. config_path/config_name exist for any
+                    // state, and backfill self-guards on config_path.is_empty()
+                    // so a later SessionCreated that fills the path wins.
+                    if inserted_new {
+                        let conn_bf = conn.clone();
+                        let tray_bf = tray_for_status.clone();
+                        let path_bf = path.clone();
+                        glib::spawn_future_local(async move {
+                            backfill_session_identity(&conn_bf, &tray_bf, &path_bf).await;
+                        });
+                    }
 
                     // Remove terminal sessions from the tray (3s delayed so the
                     // notification chain completes with the correct profile name).
@@ -334,7 +357,6 @@ mod tests {
             last_bytes_out: 888,
             idle_started_at: Some(std::time::Instant::now()),
             idle_since: Some(std::time::Instant::now()),
-            auto_reconnect_attempted_at: None,
             kill_switch_active: false,
         }
     }

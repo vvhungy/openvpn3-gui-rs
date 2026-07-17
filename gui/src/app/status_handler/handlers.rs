@@ -63,7 +63,6 @@ pub(super) fn build_unseen_session(path: &str, status: SessionStatus) -> Session
         last_bytes_out: 0,
         idle_started_at: None,
         idle_since: None,
-        auto_reconnect_attempted_at: None,
         kill_switch_active: false,
     }
 }
@@ -90,12 +89,14 @@ pub(super) fn clear_credential_attempts_on_connect(
 
 /// Upsert the tray session entry: stamp `connected_at` on a Connected
 /// transition for a known session, or insert a fallback entry for a path the
-/// tray has not yet seen. Impure tray glue.
+/// tray has not yet seen. Returns `true` when a new (unseen) session was just
+/// inserted, so the caller can backfill its real identity (H4 — see
+/// `backfill_session_identity`). Impure tray glue.
 pub(super) fn upsert_session_state(
     tray: &ksni::blocking::Handle<VpnTray>,
     path: &str,
     status: SessionStatus,
-) {
+) -> bool {
     let is_now_connected = status.is_connected();
     let path = path.to_string();
     tray.update(move |t| {
@@ -103,9 +104,65 @@ pub(super) fn upsert_session_state(
             if is_now_connected && session.connected_at.is_none() {
                 session.connected_at = Some(std::time::Instant::now());
             }
+            false
         } else {
             t.sessions
                 .insert(path.clone(), build_unseen_session(&path, status));
+            true
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// Fetch the real `config_path` + `config_name` for a session that was inserted
+/// via `build_unseen_session` (Connected won the race over SessionCreated, so
+/// the entry landed with an empty config_path). Without this, an unexpected drop
+/// of that session is silently swallowed: `handle_session_destroyed`'s reconnect
+/// branch gates on `!config_path.is_empty()`, and `schedule_disconnected_removal`
+/// skips the `RECENT_DESTROYED_SESSIONS` cache for the same reason — so neither
+/// auto-reconnect nor the notification ever fires (H4). Backfills only while the
+/// session is alive (by SessDestroyed the session is gone and the proxy fails).
+/// No-op if the entry no longer exists or already has a real config_path (e.g.
+/// a late SessCreated filled it). Impure async D-Bus + tray glue.
+pub(super) async fn backfill_session_identity(
+    conn: &zbus::Connection,
+    tray: &ksni::blocking::Handle<VpnTray>,
+    path: &str,
+) {
+    let Ok(obj_path) = zbus::zvariant::OwnedObjectPath::try_from(path) else {
+        return;
+    };
+    let proxy = match crate::dbus::session::SessionProxy::builder(conn).path(obj_path) {
+        Ok(builder) => match builder.build().await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("backfill identity: proxy build failed for {path}: {e}");
+                return;
+            }
+        },
+        Err(e) => {
+            warn!("backfill identity: proxy path failed for {path}: {e}");
+            return;
+        }
+    };
+    let config_path = proxy
+        .config_path()
+        .await
+        .ok()
+        .map(|p| p.as_str().to_string())
+        .filter(|s| !s.is_empty());
+    let config_name = proxy.config_name().await.ok();
+    let path = path.to_string();
+    tray.update(move |t| {
+        if let Some(s) = t.sessions.get_mut(&path)
+            && s.config_path.is_empty()
+        {
+            if let Some(cp) = config_path {
+                s.config_path = cp;
+            }
+            if let Some(cn) = config_name {
+                s.config_name = cn;
+            }
         }
     });
 }
@@ -222,15 +279,19 @@ pub(super) fn handle_auth_failed(
             &format!("{}: Authentication Failed", config_name),
             &format!("Wrong credentials for '{}'. Retrying...", config_name),
         );
-        // Mark old session so SessDestroyed won't show reconnect prompt.
+        // Mark old session as an auth-retry teardown, NOT a user disconnect.
+        // Both suppress the SessDestroyed reconnect prompt, but the auth-retry
+        // marker also tells the kill-switch teardown path to leave the firewall
+        // in place — a replacement tunnel for the same config is coming, so
+        // dropping protection here would briefly expose traffic mid-swap (H3).
         // Poison-tolerant: a poisoned lock must not skip this bookkeeping
         // (best-effort insert; worst case SessDestroyed shows a redundant
         // reconnect prompt, which is safe).
-        if let Ok(mut set) = crate::app::session_ops::USER_DISCONNECTED.lock() {
+        if let Ok(mut set) = crate::app::session_ops::AUTH_RETRY_SESSIONS.lock() {
             set.insert(session_path.clone());
         } else {
             warn!(
-                "USER_DISCONNECTED lock poisoned — \
+                "AUTH_RETRY_SESSIONS lock poisoned — \
                  SessDestroyed may show reconnect prompt"
             );
         }

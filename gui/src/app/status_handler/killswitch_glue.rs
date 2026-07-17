@@ -68,23 +68,10 @@ pub(super) fn on_connected(
 
     let tray_for_bypass = tray.clone();
     glib::spawn_future_local(async move {
-        // Push bypass CIDRs and install routing (replaces any prior state).
-        // Gate ApplyBypassRoutes on SetBypassCidrs success — if validation
-        // rejects the list, the helper retains its prior state and applying
-        // would install routes for the wrong CIDRs.
-        if !bypass_cidrs.is_empty() {
-            let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
-            let outcome = if set_ok {
-                crate::dbus::killswitch::apply_bypass_routes().await
-            } else {
-                None
-            };
-            crate::app::bypass_apply::apply_bypass_outcome_to_tray(
-                &tray_for_bypass,
-                outcome,
-                "session connect",
-            );
-        }
+        // Push bypass CIDRs and install routing (replaces any prior state). The
+        // SetBypassCidrs→ApplyBypassRoutes gate lives inside apply_bypass.
+        crate::app::bypass_apply::apply_bypass(&tray_for_bypass, bypass_cidrs, "session connect")
+            .await;
 
         // Kill-switch firewall — gated by user preference.
         if ks_enabled {

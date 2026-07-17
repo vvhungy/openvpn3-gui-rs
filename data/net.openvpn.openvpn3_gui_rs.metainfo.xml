@@ -57,6 +57,19 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.1" date="2026-07-17">
+      <description>
+        <p>Correctness release — five pre-existing bugs, several security-relevant:</p>
+        <ul>
+          <li>Kill-switch: disconnecting one session no longer strips firewall protection from other still-connected tunnels; a wrong-password auth-retry no longer drops the firewall mid-swap. (If rebind to a surviving tunnel can't anchor a live rule, the rules are torn down rather than left stale.)</li>
+          <li>Kill-switch / bypass: the physical interface's rp_filter is now restored correctly after a network change mid-VPN (e.g. WiFi → Ethernet) instead of being left loose.</li>
+          <li>Stats: Duration and Since now show real values for tunnels that were already up when the GUI launched, instead of "—".</li>
+          <li>Stall auto-reconnect now respects its cooldown across a session reconnect, instead of looping against a persistently dead server every stall interval.</li>
+          <li>An unexpected drop of a session that connected before the GUI saw it created now triggers reconnect/notification instead of being silently swallowed.</li>
+        </ul>
+        <p>Internal: split credential_handler under the 800-line gate; consolidated duplicated bypass apply/teardown sequences; refactored the stats refresh helper. No behavior change beyond the fixes above.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-07-16">
       <description>
         <p>Internal-only release closing the three-sprint complexity-reduction arc (S41–S43). No user-visible behaviour change; every high-cognitive-complexity hotspot in the tray app and killswitch helper has been decomposed into small, unit-tested pure functions behind thin async glue. Tagged as a minor version bump to mark the arc as a milestone rather than for any feature.</p>
