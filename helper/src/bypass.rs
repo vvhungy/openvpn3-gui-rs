@@ -162,6 +162,20 @@ pub async fn restore_rp_filter_all(originals: impl IntoIterator<Item = (String, 
     }
 }
 
+/// The rp_filter-restore-then-routing-teardown sequence shared by the two
+/// teardown paths (shutdown `cleanup_rules`, vanish `teardown_bypass_on_vanish`)
+/// — D6. Restores each recorded iface first (a leftover loose(2) survives a
+/// routing teardown, which only deletes ip-rules + flushes table 100), then
+/// tears the routing layer down. Returns the routing-teardown error so each
+/// caller can log at its own severity (shutdown = warn, vanish = error).
+/// `originals` is drained by the caller from the per-iface map.
+pub async fn teardown_bypass_state(
+    originals: impl IntoIterator<Item = (String, String)>,
+) -> Result<()> {
+    restore_rp_filter_all(originals).await;
+    teardown_routing().await
+}
+
 fn rp_filter_path(iface: &str) -> String {
     format!("/proc/sys/net/ipv4/conf/{iface}/rp_filter")
 }

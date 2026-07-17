@@ -6,7 +6,6 @@ use tracing::{debug, error, info, warn};
 
 use zbus::proxy::CacheProperties;
 
-use super::bypass_apply::apply_bypass_outcome_to_tray;
 use crate::config::{MANAGER_VERSION_MINIMUM, MANAGER_VERSION_RECOMMENDED, MIN_HELPER_VERSION};
 use crate::dbus::{
     configuration::{ConfigurationManagerProxy, ConfigurationProxy},
@@ -338,15 +337,7 @@ async fn reapply_firewall_on_startup(
     let dbus_clone = dbus.clone();
     let tray_clone = tray.clone();
     glib::spawn_future_local(async move {
-        if !bypass_cidrs.is_empty() {
-            let set_ok = crate::dbus::killswitch::set_bypass_cidrs(bypass_cidrs).await;
-            let outcome = if set_ok {
-                crate::dbus::killswitch::apply_bypass_routes().await
-            } else {
-                None
-            };
-            apply_bypass_outcome_to_tray(&tray_clone, outcome, "startup re-apply");
-        }
+        crate::app::bypass_apply::apply_bypass(&tray_clone, bypass_cidrs, "startup re-apply").await;
 
         if ks_enabled {
             for path in connected_paths {

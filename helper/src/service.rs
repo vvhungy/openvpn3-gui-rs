@@ -391,14 +391,12 @@ pub async fn cleanup_rules() {
             .collect::<Vec<_>>(),
         None => Vec::new(),
     };
-    // Restore every touched iface's rp_filter before routing teardown. Empty
-    // when no bypass routing was ever applied (no-op). Per-iface best-effort —
-    // restore_rp_filter_all logs gone ifaces and continues.
-    bypass::restore_rp_filter_all(rpf).await;
     if let Err(e) = run_nft(nft::remove_rules_script()).await {
         warn!(err = ?e, "shutdown cleanup nft failed (often expected)");
     }
-    if let Err(e) = bypass::teardown_routing().await {
+    // Restore rp_filter then tear down routing via the shared sequence (D6).
+    // Empty when no bypass routing was ever applied (both steps no-op).
+    if let Err(e) = bypass::teardown_bypass_state(rpf).await {
         warn!(err = ?e, "shutdown cleanup bypass routing failed");
     }
 }
@@ -441,11 +439,8 @@ async fn teardown_bypass_on_vanish(state_arc: &Arc<Mutex<State>>) {
         state.watcher = None;
         rpf
     };
-    if !rpf.is_empty() {
-        bypass::restore_rp_filter_all(rpf).await;
-        if let Err(e) = bypass::teardown_routing().await {
-            error!(err = ?e, "auto-cleanup bypass routing failed");
-        }
+    if let Err(e) = bypass::teardown_bypass_state(rpf).await {
+        error!(err = ?e, "auto-cleanup bypass routing failed");
     }
 }
 

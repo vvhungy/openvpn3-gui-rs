@@ -79,6 +79,34 @@ pub(crate) fn apply_bypass_outcome_to_tray(
     }
 }
 
+/// Push `cidrs` to the helper and install bypass routing, then reflect the
+/// outcome on the tray + fire the matching notification. Consolidates the
+/// set→apply→outcome sequence that was copy-pasted across the apply sites
+/// (cold-start re-apply, preferences toggle, session-connect glue) — D1.
+///
+/// `context` labels the failure log/notification so the source call site is
+/// identifiable. No-op when `cidrs` is empty: a toggle-OFF (preferences) does
+/// its own remove+clear and must not route through here.
+pub(crate) async fn apply_bypass(
+    tray: &ksni::blocking::Handle<VpnTray>,
+    cidrs: Vec<String>,
+    context: &str,
+) {
+    if cidrs.is_empty() {
+        return;
+    }
+    // Gate ApplyBypassRoutes on SetBypassCidrs success — if validation rejects
+    // the list the helper retains its prior state and applying would install
+    // routes for the wrong CIDRs.
+    let set_ok = crate::dbus::killswitch::set_bypass_cidrs(cidrs).await;
+    let outcome = if set_ok {
+        crate::dbus::killswitch::apply_bypass_routes().await
+    } else {
+        None
+    };
+    apply_bypass_outcome_to_tray(tray, outcome, context);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
