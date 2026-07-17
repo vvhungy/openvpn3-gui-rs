@@ -65,6 +65,9 @@ pub trait KillSwitch {
 
     fn ValidateBypassCidrs(&self, cidrs: Vec<String>) -> zbus::Result<Vec<String>>;
 
+    // The (applied, failed[(cidr, reason)]) return mirrors the helper's D-Bus
+    // signature `asaa{ss}` — a named struct would diverge from the wire
+    // contract, so the clippy lint is silenced intentionally here.
     #[allow(clippy::type_complexity)]
     fn ApplyBypassRoutes(&self) -> zbus::Result<(Vec<String>, Vec<(String, String)>)>;
 

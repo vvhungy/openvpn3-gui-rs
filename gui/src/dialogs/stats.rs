@@ -123,16 +123,15 @@ fn build_stats_window(
     window.set_child(Some(&outer));
 
     // Initial population with tray data; device_name resolved async on first tick.
-    refresh_rows(
-        &status_row,
-        &connected_row,
-        &duration_row,
-        &interface_row,
-        &bytes_in_row,
-        &bytes_out_row,
-        initial.as_ref(),
-        None,
-    );
+    let rows = StatsRows {
+        status: &status_row,
+        connected: &connected_row,
+        duration: &duration_row,
+        interface: &interface_row,
+        bytes_in: &bytes_in_row,
+        bytes_out: &bytes_out_row,
+    };
+    refresh_rows(&rows, initial.as_ref(), None);
 
     let tray_for_timer = tray.clone();
     let session_path_for_timer = session_path.clone();
@@ -189,30 +188,35 @@ fn build_stats_window(
                 dev_name = Some(s);
             }
 
-            refresh_rows(
-                &status_row_w,
-                &connected_row_w,
-                &duration_row_w,
-                &interface_row_w,
-                &bytes_in_row_w,
-                &bytes_out_row_w,
-                current.as_ref(),
-                dev_name.as_deref(),
-            );
+            let rows = StatsRows {
+                status: &status_row_w,
+                connected: &connected_row_w,
+                duration: &duration_row_w,
+                interface: &interface_row_w,
+                bytes_in: &bytes_in_row_w,
+                bytes_out: &bytes_out_row_w,
+            };
+            refresh_rows(&rows, current.as_ref(), dev_name.as_deref());
         }
     });
 
     window.upcast::<gtk4::Window>()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The six ActionRows the stats dialog refreshes each tick. Grouped so the
+/// refresh helper stays under clippy's argument threshold — and so adding a
+/// future row touches one place, not every call site + the signature.
+struct StatsRows<'a> {
+    status: &'a adw::ActionRow,
+    connected: &'a adw::ActionRow,
+    duration: &'a adw::ActionRow,
+    interface: &'a adw::ActionRow,
+    bytes_in: &'a adw::ActionRow,
+    bytes_out: &'a adw::ActionRow,
+}
+
 fn refresh_rows(
-    status_row: &adw::ActionRow,
-    connected_row: &adw::ActionRow,
-    duration_row: &adw::ActionRow,
-    interface_row: &adw::ActionRow,
-    bytes_in_row: &adw::ActionRow,
-    bytes_out_row: &adw::ActionRow,
+    rows: &StatsRows,
     session: Option<&crate::tray::SessionInfo>,
     device_name: Option<&str>,
 ) {
@@ -239,12 +243,12 @@ fn refresh_rows(
         ),
     };
 
-    status_row.set_subtitle(&status_txt);
-    connected_row.set_subtitle(&since_txt);
-    duration_row.set_subtitle(&duration_txt);
-    interface_row.set_subtitle(device_name.unwrap_or("—"));
-    bytes_in_row.set_subtitle(&format_bytes(bi));
-    bytes_out_row.set_subtitle(&format_bytes(bo));
+    rows.status.set_subtitle(&status_txt);
+    rows.connected.set_subtitle(&since_txt);
+    rows.duration.set_subtitle(&duration_txt);
+    rows.interface.set_subtitle(device_name.unwrap_or("—"));
+    rows.bytes_in.set_subtitle(&format_bytes(bi));
+    rows.bytes_out.set_subtitle(&format_bytes(bo));
 }
 
 /// Render `connected_at` as a local wall-clock timestamp.
