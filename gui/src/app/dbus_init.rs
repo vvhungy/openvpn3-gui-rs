@@ -277,13 +277,26 @@ async fn build_session_entry(session: &SessionProxy<'_>, path: &str) -> ScannedS
     } else {
         None
     };
+    // Cold-start path (H1): a tunnel already up at GUI launch never emits a
+    // fresh Connected StatusChange, so the normal producer in
+    // upsert_session_state wouldn't stamp connected_at — Stats would render
+    // Duration/Since as "—". Stamp the GUI-launch instant instead. The openvpn3
+    // Session D-Bus interface exposes no connect timestamp, so this is an
+    // approximation (elapsed shown is "since GUI saw it"). `connected_path` is
+    // already `Some` exactly when status.is_connected(), so reuse it here
+    // instead of touching the `status` value (moved into the struct below).
+    let connected_at = if connected_path.is_some() {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     ScannedSession {
         entry: SessionInfo {
             session_path: path.to_string(),
             config_path,
             config_name,
             status,
-            connected_at: None,
+            connected_at,
             bytes_in: 0,
             bytes_out: 0,
             last_bytes_in: 0,
