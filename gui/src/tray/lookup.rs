@@ -65,6 +65,14 @@ impl VpnTray {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| fallback.to_string())
     }
+
+    /// True if `config_path` is in the loaded config list. Sibling of
+    /// [`resolve_config_name`](Self::resolve_config_name) for the existence
+    /// check (the startup-connect gate) — keeps the path→config probe in one
+    /// place alongside the path→name lookup.
+    pub(crate) fn config_exists(&self, config_path: &str) -> bool {
+        self.configs.iter().any(|c| c.path == config_path)
+    }
 }
 
 /// Display name of the session at `session_path`, or [`FALLBACK_NAME`] if the
@@ -105,6 +113,14 @@ pub(crate) fn resolve_config_name_or(
 ) -> String {
     tray.update(|t| t.resolve_config_name_or(config_path, fallback))
         .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Whether `config_path` is in the tray's loaded config list, or `false` if
+/// the tray handle itself is gone. Thin adapter over the blocking `Handle`;
+/// used by the startup-connect existence gate.
+pub(crate) fn config_exists(tray: &Handle<VpnTray>, config_path: &str) -> bool {
+    tray.update(|t| t.config_exists(config_path))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -254,5 +270,13 @@ mod tests {
             tray.resolve_config_name_or("/missing.ovpn", "/etc/openvpn/x.ovpn"),
             "/etc/openvpn/x.ovpn"
         );
+    }
+
+    #[test]
+    fn config_exists_matches_by_path() {
+        let tray = tray_with_configs(&[cfg("/a.ovpn", "Alpha"), cfg("/b.ovpn", "Beta")]);
+        assert!(tray.config_exists("/b.ovpn"));
+        assert!(!tray.config_exists("/missing.ovpn"));
+        assert!(!tray.config_exists(""));
     }
 }

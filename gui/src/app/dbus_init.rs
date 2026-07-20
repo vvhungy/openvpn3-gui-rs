@@ -410,9 +410,7 @@ async fn startup_connect(
     path: &str,
     name: &str,
 ) {
-    let exists = tray
-        .update(|t| t.configs.iter().any(|c| c.path == path))
-        .unwrap_or(false);
+    let exists = crate::tray::config_exists(tray, path);
     if !exists {
         warn!(
             "Startup auto-connect: saved config path not found: {}",
