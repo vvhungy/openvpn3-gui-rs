@@ -57,6 +57,15 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.2" date="2026-07-20">
+      <description>
+        <p>Internal release — no user-visible behavior change.</p>
+        <ul>
+          <li>Unified the reconnect and first-run help notification scaffolds behind one builder; hoisted config-name-by-path resolution onto VpnTray; collapsed the connect/reconnect/disconnect/pause/restart/resume handlers behind one spawn_session_action helper.</li>
+          <li>The kill-switch helper service module went from zero tests to five hermetic tests pinning its vanish-teardown decision.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-07-17">
       <description>
         <p>Correctness release — five pre-existing bugs, several security-relevant:</p>
