@@ -391,16 +391,9 @@ async fn handle_startup_connect(
                 info!("Startup auto-connect: no specific config configured");
                 return;
             }
-            // Resolve a display name from the loaded config list
-            let name = tray
-                .update(|t| {
-                    t.configs
-                        .iter()
-                        .find(|c| c.path == path)
-                        .map(|c| c.name.clone())
-                })
-                .flatten()
-                .unwrap_or_else(|| path.clone());
+            // Resolve a display name from the loaded config list (canonical
+            // lookup on VpnTray; falls back to UNKNOWN_CONFIG_NAME).
+            let name = crate::tray::resolve_config_name(tray, &path);
             startup_connect(dbus, tray, settings, &path, &name).await;
         }
         _ => {} // "none" or unknown — do nothing

@@ -116,16 +116,8 @@ pub(crate) async fn connect_to_config(
     tray: &ksni::blocking::Handle<VpnTray>,
     settings: &Settings,
 ) -> anyhow::Result<()> {
-    // Get config name
-    let config_name = tray
-        .update(|t| {
-            t.configs
-                .iter()
-                .find(|c| c.path == config_path_str)
-                .map(|c| c.name.clone())
-        })
-        .flatten()
-        .unwrap_or_else(|| crate::tray::FALLBACK_NAME.to_string());
+    // Get config name (canonical VpnTray lookup; falls back to UNKNOWN_CONFIG_NAME).
+    let config_name = crate::tray::resolve_config_name(tray, config_path_str);
 
     // Save as most recent
     settings.set_most_recent_config(config_path_str, &config_name);
