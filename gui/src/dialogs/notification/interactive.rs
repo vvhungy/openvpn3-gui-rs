@@ -5,6 +5,7 @@
 //! daemon close.
 
 use std::future::Future;
+use std::pin::Pin;
 
 use futures::StreamExt;
 use tracing::warn;
@@ -143,21 +144,20 @@ struct NotifSpec<'a> {
     dedup_key: String,
 }
 
-/// Post an action-button notification and drive its `ActionInvoked` /
-/// `NotificationClosed` stream until the daemon closes it or `on_action`
-/// signals a terminal action. Shared scaffold for reconnect and first-run
-/// help — only the [`NotifSpec`] and the handler differ.
+/// Run an interactive notification to completion, dispatching each
+/// `ActionInvoked` signal to `on_action`. Returns when the handler signals a
+/// terminal action or the notification closes. Shared scaffold for reconnect
+/// and first-run help — only the [`NotifSpec`] and the handler differ.
 ///
-/// Generic over the handler (not `dyn`) so a closure may borrow its enclosing
-/// function's locals; the only constraint is that every call returns the *same*
-/// concrete future type. Both callers return a `'static` boxed future that owns
-/// its data (cloned per click — `ActionSender`/`Handle` are cheap Arc clones),
-/// which is what lets the handler run across `await` points without borrowing.
-async fn run_action_notification<F, Fut>(spec: NotifSpec<'_>, on_action: F) -> anyhow::Result<()>
-where
-    F: Fn(String) -> Fut,
-    Fut: Future<Output = bool>,
-{
+/// `on_action` returns a boxed `'static` future per click so it can `await`
+/// across the dispatch loop (`ActionSender`/`Handle` are cheap Arc clones,
+/// moved into the future rather than borrowed). Both callers already produce
+/// this boxed form, so the handler type is concrete — no `<F, Fut>` generics
+/// or where-clause needed.
+async fn run_action_notification(
+    spec: NotifSpec<'_>,
+    on_action: impl Fn(String) -> Pin<Box<dyn Future<Output = bool>>>,
+) -> anyhow::Result<()> {
     let conn = zbus::Connection::session().await?;
     subscribe_to_notification_signals(&conn).await?;
 
