@@ -57,9 +57,18 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.3" date="2026-07-20">
+      <description>
+        <p>Patch release restoring a behavior regressed in 0.4.2, plus continued internal cleanup.</p>
+        <ul>
+          <li>Restored the "VPN Connection" fallback for the most-recent-config name (and the config-path fallback for startup connect-specific) when a config is missing from the tray at connect time. 0.4.2's config-name-resolution hoist collapsed several distinct fallbacks onto "Unknown", which also broke the pre-0.3.11 keyring-credential migration lookup for the affected path.</li>
+          <li>Internal: folded the kill-switch notification scaffold into the shared builder; collapsed the over-general vanish-teardown decision enum to a thin pure function; added a config_exists tray lookup and smoke tests for the kill-switch glue and watcher modules.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.2" date="2026-07-20">
       <description>
-        <p>Internal release — no user-visible behavior change.</p>
+        <p>Internal refactor release. It regressed the most-recent-config fallback name from "VPN Connection" to "Unknown" when a config is missing from the tray at connect time (affecting the persisted most-recent label and the pre-0.3.11 keyring-migration lookup); that regression is fixed in 0.4.3.</p>
         <ul>
           <li>Unified the reconnect and first-run help notification scaffolds behind one builder; hoisted config-name-by-path resolution onto VpnTray; collapsed the connect/reconnect/disconnect/pause/restart/resume handlers behind one spawn_session_action helper.</li>
           <li>The kill-switch helper service module went from zero tests to five hermetic tests pinning its vanish-teardown decision.</li>
