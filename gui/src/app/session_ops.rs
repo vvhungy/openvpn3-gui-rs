@@ -116,8 +116,13 @@ pub(crate) async fn connect_to_config(
     tray: &ksni::blocking::Handle<VpnTray>,
     settings: &Settings,
 ) -> anyhow::Result<()> {
-    // Get config name (canonical VpnTray lookup; falls back to UNKNOWN_CONFIG_NAME).
-    let config_name = crate::tray::resolve_config_name(tray, config_path_str);
+    // Get config name (canonical VpnTray lookup). Fallback is FALLBACK_NAME
+    // ("VPN Connection"), NOT UNKNOWN_CONFIG_NAME: this name is persisted as
+    // most-recent AND drives the pre-0.3.11 keyring-migration lookup, so the
+    // sentinel must match. (v0.4.2 regression: D3 hoist collapsed this onto
+    // "Unknown"; restored v0.4.3.)
+    let config_name =
+        crate::tray::resolve_config_name_or(tray, config_path_str, crate::tray::FALLBACK_NAME);
 
     // Save as most recent
     settings.set_most_recent_config(config_path_str, &config_name);

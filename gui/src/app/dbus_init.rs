@@ -392,8 +392,11 @@ async fn handle_startup_connect(
                 return;
             }
             // Resolve a display name from the loaded config list (canonical
-            // lookup on VpnTray; falls back to UNKNOWN_CONFIG_NAME).
-            let name = crate::tray::resolve_config_name(tray, &path);
+            // lookup on VpnTray). Pre-0.4.2 fell back to the path itself — the
+            // most useful identifier when the name can't be resolved (the
+            // fallback is unreachable in practice: startup_connect's `exists`
+            // gate returns before `name` is used when the config is absent).
+            let name = crate::tray::resolve_config_name_or(tray, &path, &path);
             startup_connect(dbus, tray, settings, &path, &name).await;
         }
         _ => {} // "none" or unknown — do nothing

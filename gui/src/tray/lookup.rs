@@ -44,13 +44,26 @@ impl VpnTray {
     /// Display name of the config at `config_path`, or [`UNKNOWN_CONFIG_NAME`]
     /// if it is no longer in the loaded config list (e.g. removed between the
     /// menu render and the click, or deleted since last run). The single
-    /// canonical path→name lookup — every call site routes through here.
+    /// canonical path→name lookup — every call site routes through here, or
+    /// through [`Self::resolve_config_name_or`] when its fallback must NOT be
+    /// `UNKNOWN_CONFIG_NAME` (e.g. the persisted most-recent name, which has to
+    /// stay `"VPN Connection"` to match the pre-0.3.11 keyring-migration
+    /// sentinel — regression caught in v0.4.2 review, restored v0.4.3).
     pub(crate) fn resolve_config_name(&self, config_path: &str) -> String {
+        self.resolve_config_name_or(config_path, UNKNOWN_CONFIG_NAME)
+    }
+
+    /// Same lookup as [`resolve_config_name`](Self::resolve_config_name) but
+    /// with a caller-supplied `fallback` instead of the `UNKNOWN_CONFIG_NAME`
+    /// default. Use at sites where the fallback carries meaning (a persisted
+    /// label like `"VPN Connection"`, or the config path itself) rather than a
+    /// generic "Unknown".
+    pub(crate) fn resolve_config_name_or(&self, config_path: &str, fallback: &str) -> String {
         self.configs
             .iter()
             .find(|c| c.path == config_path)
             .map(|c| c.name.clone())
-            .unwrap_or_else(|| UNKNOWN_CONFIG_NAME.to_string())
+            .unwrap_or_else(|| fallback.to_string())
     }
 }
 
@@ -78,6 +91,20 @@ pub(crate) fn session_config_identity(
 pub(crate) fn resolve_config_name(tray: &Handle<VpnTray>, config_path: &str) -> String {
     tray.update(|t| t.resolve_config_name(config_path))
         .unwrap_or_else(|| UNKNOWN_CONFIG_NAME.to_string())
+}
+
+/// Variant of [`resolve_config_name`] with a caller-supplied `fallback`
+/// instead of [`UNKNOWN_CONFIG_NAME`] — for sites where the fallback carries
+/// meaning (the persisted most-recent name `"VPN Connection"`, or the config
+/// path). Same thin adapter over the blocking `Handle`; returns `fallback` too
+/// when the tray handle itself is gone.
+pub(crate) fn resolve_config_name_or(
+    tray: &Handle<VpnTray>,
+    config_path: &str,
+    fallback: &str,
+) -> String {
+    tray.update(|t| t.resolve_config_name_or(config_path, fallback))
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 #[cfg(test)]
@@ -207,5 +234,25 @@ mod tests {
         // deterministic: first match wins (mirrors the original `.find`).
         let tray = tray_with_configs(&[cfg("/dup.ovpn", "First"), cfg("/dup.ovpn", "Second")]);
         assert_eq!(tray.resolve_config_name("/dup.ovpn"), "First");
+    }
+
+    #[test]
+    fn resolve_config_name_or_uses_caller_fallback_when_missing() {
+        // The persisted most-recent name + keyring-migration sentinel must be
+        // FALLBACK_NAME, not UNKNOWN_CONFIG_NAME (v0.4.2 regression guard).
+        let tray = tray_with_configs(&[cfg("/a.ovpn", "Alpha")]);
+        assert_eq!(
+            tray.resolve_config_name_or("/missing.ovpn", FALLBACK_NAME),
+            "VPN Connection"
+        );
+        assert_eq!(
+            tray.resolve_config_name_or("/a.ovpn", FALLBACK_NAME),
+            "Alpha"
+        );
+        // The path-as-fallback variant (dbus_init connect-specific):
+        assert_eq!(
+            tray.resolve_config_name_or("/missing.ovpn", "/etc/openvpn/x.ovpn"),
+            "/etc/openvpn/x.ovpn"
+        );
     }
 }
