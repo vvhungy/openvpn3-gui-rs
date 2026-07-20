@@ -4,7 +4,6 @@
 //! `ActionInvoked`/`NotificationClosed`, dispatch on user action, exit on
 //! daemon close.
 
-use std::collections::HashMap;
 use std::future::Future;
 
 use futures::StreamExt;
@@ -162,29 +161,20 @@ where
     let conn = zbus::Connection::session().await?;
     subscribe_to_notification_signals(&conn).await?;
 
-    let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
-        HashMap::from([("urgency", zbus::zvariant::Value::U8(spec.urgency))]);
-
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.Notifications"),
-            "/org/freedesktop/Notifications",
-            Some("org.freedesktop.Notifications"),
-            "Notify",
-            &(
-                "openvpn3-gui-rs",
-                0u32, // replaces_id — always fresh (see reconnect comment)
-                spec.icon,
-                spec.summary,
-                spec.body.as_str(),
-                spec.actions,
-                hints,
-                spec.expire_timeout,
-            ),
-        )
-        .await?;
-
-    let notification_id: u32 = reply.body().deserialize()?;
+    // Single shared Notify call (core::send_notify) — interactive toasts are
+    // always fresh (replaces_id 0); the dedup map records the id for the
+    // withdraw path. See the reconnect comment for why replace is avoided here.
+    let notification_id: u32 = super::core::send_notify(
+        &conn,
+        spec.icon,
+        spec.summary,
+        spec.body.as_str(),
+        spec.actions,
+        spec.urgency,
+        0,
+        spec.expire_timeout,
+    )
+    .await?;
     if let Ok(mut map) = NOTIFICATION_IDS.lock() {
         map.insert(spec.dedup_key, notification_id);
     }

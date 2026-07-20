@@ -3,8 +3,6 @@
 //! Apply and remove share a dedup key so they replace each other rather than
 //! stacking when the user toggles state quickly.
 
-use std::collections::HashMap;
-
 use tracing::warn;
 
 use super::core::send_notification;
@@ -35,31 +33,24 @@ async fn send_killswitch_state(
     expire_timeout: i32,
 ) -> anyhow::Result<u32> {
     let conn = zbus::Connection::session().await?;
-    let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
-        HashMap::from([("urgency", zbus::zvariant::Value::U8(urgency))]);
     let replaces_id = NOTIFICATION_IDS
         .lock()
         .map(|m| *m.get(KILLSWITCH_STATE_KEY).unwrap_or(&0))
         .unwrap_or(0);
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.Notifications"),
-            "/org/freedesktop/Notifications",
-            Some("org.freedesktop.Notifications"),
-            "Notify",
-            &(
-                "openvpn3-gui-rs",
-                replaces_id,
-                "network-vpn",
-                summary,
-                body,
-                &[] as &[&str],
-                &hints,
-                expire_timeout,
-            ),
-        )
-        .await?;
-    let new_id: u32 = reply.body().deserialize()?;
+    // Single shared Notify call (core::send_notify) — no retry wrapper, since a
+    // stale replaces_id here just means the prior active/inactive toast was
+    // already reaped, and a fresh id is the correct fallback for state toggles.
+    let new_id = super::core::send_notify(
+        &conn,
+        "network-vpn",
+        summary,
+        body,
+        &[],
+        urgency,
+        replaces_id,
+        expire_timeout,
+    )
+    .await?;
     if let Ok(mut map) = NOTIFICATION_IDS.lock() {
         map.insert(KILLSWITCH_STATE_KEY.to_string(), new_id);
     }
