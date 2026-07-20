@@ -2,9 +2,12 @@
 //!
 //! `handle_tray_action` is a thin match dispatcher; each [`TrayAction`] variant
 //! delegates to a dedicated helper so neither the dispatcher nor any helper
-//! trips the cognitive-complexity gate. The one pure, branching piece —
-//! resolving a config's display name by path — is extracted into
-//! [`resolve_config_name`] and unit-tested.
+//! trips the cognitive-complexity gate. The session-lifecycle helpers
+//! (connect/reconnect/disconnect/pause/restart/resume) share one
+//! [`spawn_session_action`] scaffold for their spawn-on-error-notify tail.
+//! The one pure, branching piece — resolving a config's display name by path —
+//! lives on [`VpnTray`] (`resolve_config_name`) and is
+//! unit-tested in `tray::lookup`.
 
 use tracing::{error, info};
 
@@ -12,7 +15,7 @@ use gtk4::prelude::*;
 use gtk4::{Application as GtkApplication, ApplicationWindow};
 
 use crate::settings::Settings;
-use crate::tray::{ConfigInfo, TrayAction, VpnTray};
+use crate::tray::{TrayAction, VpnTray};
 
 use super::config_ops::{import_config, refresh_configs, remove_config};
 use super::session_ops::{connect_to_config, session_action};
@@ -54,6 +57,25 @@ pub(crate) fn handle_tray_action(
     }
 }
 
+/// Spawn a tray session action on the GLib main loop, surfacing failure as an
+/// error notification. Shared by the connect/reconnect/disconnect/pause/
+/// restart handlers (D4/D5) — only the underlying future and the failure
+/// wording differ, so each handler keeps its own clone/log/prelude and hands
+/// the ready future here.
+fn spawn_session_action(
+    verb: &'static str,
+    fail_title: &'static str,
+    fail_body: &'static str,
+    fut: impl std::future::Future<Output = anyhow::Result<()>> + 'static,
+) {
+    glib::spawn_future_local(async move {
+        if let Err(e) = fut.await {
+            error!("Failed to {}: {}", verb, e);
+            crate::dialogs::show_error_notification(fail_title, &format!("{}: {}", fail_body, e));
+        }
+    });
+}
+
 fn handle_connect(
     config_path: &str,
     dbus: &zbus::Connection,
@@ -65,15 +87,12 @@ fn handle_connect(
     let config_path = config_path.to_string();
     let tray = tray.clone();
     let settings = settings.clone();
-    glib::spawn_future_local(async move {
-        if let Err(e) = connect_to_config(&dbus, &config_path, &tray, &settings).await {
-            error!("Failed to connect: {}", e);
-            crate::dialogs::show_error_notification(
-                "Connection Failed",
-                &format!("Could not connect to VPN: {}", e),
-            );
-        }
-    });
+    spawn_session_action(
+        "connect",
+        "Connection Failed",
+        "Could not connect to VPN",
+        async move { connect_to_config(&dbus, &config_path, &tray, &settings).await },
+    );
 }
 
 fn handle_reconnect(
@@ -94,15 +113,12 @@ fn handle_reconnect(
     let config_path = config_path.to_string();
     let tray = tray.clone();
     let settings = settings.clone();
-    glib::spawn_future_local(async move {
-        if let Err(e) = connect_to_config(&dbus, &config_path, &tray, &settings).await {
-            error!("Failed to reconnect: {}", e);
-            crate::dialogs::show_error_notification(
-                "Reconnect Failed",
-                &format!("Could not reconnect to VPN: {}", e),
-            );
-        }
-    });
+    spawn_session_action(
+        "reconnect",
+        "Reconnect Failed",
+        "Could not reconnect to VPN",
+        async move { connect_to_config(&dbus, &config_path, &tray, &settings).await },
+    );
 }
 
 fn handle_statistics(
@@ -144,31 +160,27 @@ fn handle_disconnect(
     }
     let dbus = dbus.clone();
     let session_path = session_path.to_string();
-    glib::spawn_future_local(async move {
-        if let Err(e) = session_action(&dbus, &session_path, "disconnect").await {
-            error!("Failed to disconnect: {}", e);
-            crate::dialogs::show_error_notification(
-                "Disconnect Failed",
-                &format!("Could not disconnect VPN session: {}", e),
-            );
-        }
-        // Session destruction will be handled by SessionManagerEvent signal
-    });
+    spawn_session_action(
+        "disconnect",
+        "Disconnect Failed",
+        "Could not disconnect VPN session",
+        async move {
+            // Session destruction will be handled by SessionManagerEvent signal
+            session_action(&dbus, &session_path, "disconnect").await
+        },
+    );
 }
 
 fn handle_pause(session_path: &str, dbus: &zbus::Connection) {
     info!("Tray action: Pause {}", session_path);
     let dbus = dbus.clone();
     let session_path = session_path.to_string();
-    glib::spawn_future_local(async move {
-        if let Err(e) = session_action(&dbus, &session_path, "pause").await {
-            error!("Failed to pause: {}", e);
-            crate::dialogs::show_error_notification(
-                "Pause Failed",
-                &format!("Could not pause VPN session: {}", e),
-            );
-        }
-    });
+    spawn_session_action(
+        "pause",
+        "Pause Failed",
+        "Could not pause VPN session",
+        async move { session_action(&dbus, &session_path, "pause").await },
+    );
 }
 
 fn handle_resume(
@@ -180,44 +192,24 @@ fn handle_resume(
     let dbus = dbus.clone();
     let session_path = session_path.to_string();
     let tray = tray.clone();
-    glib::spawn_future_local(async move {
-        if let Err(e) = super::session_ops::resume_session(&dbus, &session_path, &tray).await {
-            error!("Failed to resume: {}", e);
-            crate::dialogs::show_error_notification(
-                "Resume Failed",
-                &format!("Could not resume VPN session: {}", e),
-            );
-        }
-    });
+    spawn_session_action(
+        "resume",
+        "Resume Failed",
+        "Could not resume VPN session",
+        async move { super::session_ops::resume_session(&dbus, &session_path, &tray).await },
+    );
 }
 
 fn handle_restart(session_path: &str, dbus: &zbus::Connection) {
     info!("Tray action: Restart {}", session_path);
     let dbus = dbus.clone();
     let session_path = session_path.to_string();
-    glib::spawn_future_local(async move {
-        if let Err(e) = session_action(&dbus, &session_path, "restart").await {
-            error!("Failed to restart: {}", e);
-            crate::dialogs::show_error_notification(
-                "Restart Failed",
-                &format!("Could not restart VPN session: {}", e),
-            );
-        }
-    });
-}
-
-/// Resolve a config's display name by path, falling back to `"Unknown"`.
-///
-/// Extracted from the `RemoveConfig` / `ForgetCredentials` arms so the
-/// name-resolution branching is pure and unit-testable. The tray handle's
-/// `update` (the impure part) is queried at each call site and the resulting
-/// `Vec<ConfigInfo>` fed in here.
-fn resolve_config_name(configs: &[ConfigInfo], config_path: &str) -> String {
-    configs
-        .iter()
-        .find(|c| c.path == config_path)
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| "Unknown".to_string())
+    spawn_session_action(
+        "restart",
+        "Restart Failed",
+        "Could not restart VPN session",
+        async move { session_action(&dbus, &session_path, "restart").await },
+    );
 }
 
 fn handle_remove_config(
@@ -241,10 +233,7 @@ fn handle_remove_config(
     }
 
     // Get config name for confirmation dialog
-    let name = resolve_config_name(
-        &tray.update(|t| t.configs.clone()).unwrap_or_default(),
-        &config_path,
-    );
+    let name = crate::tray::resolve_config_name(&tray, &config_path);
 
     let parent = parent.clone();
     // Clone for the closure: the dialog borrows `name` for its label,
@@ -297,10 +286,7 @@ fn handle_forget_credentials(
     // Resolve the display name for the confirm dialog. Key the
     // keyring delete on config_path (S35 scheme) — never the name,
     // which two configs may share and would cross-wipe.
-    let name = resolve_config_name(
-        &tray.update(|t| t.configs.clone()).unwrap_or_default(),
-        &config_path,
-    );
+    let name = crate::tray::resolve_config_name(&tray, &config_path);
 
     let parent = parent.clone();
     let key = format!("forget-{}", config_path);
@@ -433,43 +419,5 @@ fn handle_quit(
         crate::dialogs::show_quit_confirmation_dialog(Some(parent.upcast_ref()), gtk_app);
     } else {
         gtk_app.quit();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cfg(path: &str, name: &str) -> ConfigInfo {
-        ConfigInfo {
-            path: path.to_string(),
-            name: name.to_string(),
-        }
-    }
-
-    #[test]
-    fn resolve_config_name_matches_by_path() {
-        let configs = [cfg("/a.ovpn", "Alpha"), cfg("/b.ovpn", "Beta")];
-        assert_eq!(resolve_config_name(&configs, "/b.ovpn"), "Beta");
-    }
-
-    #[test]
-    fn resolve_config_name_unknown_when_missing() {
-        let configs = [cfg("/a.ovpn", "Alpha")];
-        assert_eq!(resolve_config_name(&configs, "/missing.ovpn"), "Unknown");
-    }
-
-    #[test]
-    fn resolve_config_name_unknown_when_empty() {
-        let configs: [ConfigInfo; 0] = [];
-        assert_eq!(resolve_config_name(&configs, "/anything.ovpn"), "Unknown");
-    }
-
-    #[test]
-    fn resolve_config_name_first_match_wins_on_duplicate_paths() {
-        // Duplicate paths aren't expected, but resolution must stay
-        // deterministic: first match wins (mirrors the original `.find`).
-        let configs = [cfg("/dup.ovpn", "First"), cfg("/dup.ovpn", "Second")];
-        assert_eq!(resolve_config_name(&configs, "/dup.ovpn"), "First");
     }
 }

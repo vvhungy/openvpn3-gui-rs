@@ -1,6 +1,6 @@
 # Maintainer: HungVV <vvhung@yahoo.com>
 pkgname=openvpn3-gui-rs
-pkgver=0.4.1
+pkgver=0.4.2
 pkgrel=1
 pkgdesc="System tray indicator for OpenVPN3 VPN tunnels, written in Rust with GTK4"
 arch=('x86_64' 'aarch64')
