@@ -2,9 +2,12 @@
 //!
 //! `handle_tray_action` is a thin match dispatcher; each [`TrayAction`] variant
 //! delegates to a dedicated helper so neither the dispatcher nor any helper
-//! trips the cognitive-complexity gate. The one pure, branching piece —
-//! resolving a config's display name by path — is extracted into
-//! [`resolve_config_name`] and unit-tested.
+//! trips the cognitive-complexity gate. The session-lifecycle helpers
+//! (connect/reconnect/disconnect/pause/restart/resume) share one
+//! [`spawn_session_action`] scaffold for their spawn-on-error-notify tail.
+//! The one pure, branching piece — resolving a config's display name by path —
+//! lives on [`VpnTray`] (`resolve_config_name`) and is
+//! unit-tested in `tray::lookup`.
 
 use tracing::{error, info};
 
