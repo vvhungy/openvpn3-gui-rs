@@ -15,6 +15,53 @@ use crate::settings::Settings;
 /// Returns the notification ID assigned by the daemon.
 /// If `replaces_id` is stale (notification already reaped), falls back to
 /// a fresh notification silently.
+/// Send one `org.freedesktop.Notifications.Notify` call and return the
+/// daemon-assigned id. Shared transport primitive — every notification path
+/// routes through here (the fire-and-forget retry wrapper below, the kill-switch
+/// state toasts, and the interactive action-button loop), so the Notify
+/// tuple construction lives in exactly one place. `actions` is empty for
+/// non-interactive toasts; `replaces_id`/`expire_timeout` are caller-controlled.
+// 8 args mirror the org.freedesktop.Notifications.Notify signature 1:1;
+// grouping into a struct would just re-spread these fields at every call site.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn send_notify(
+    conn: &zbus::Connection,
+    icon: &str,
+    summary: &str,
+    body: &str,
+    actions: &[&str],
+    urgency: u8,
+    replaces_id: u32,
+    expire_timeout: i32,
+) -> anyhow::Result<u32> {
+    let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
+        HashMap::from([("urgency", zbus::zvariant::Value::U8(urgency))]);
+    let reply = conn
+        .call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "Notify",
+            &(
+                "openvpn3-gui-rs",
+                replaces_id,
+                icon,
+                summary,
+                body,
+                actions,
+                &hints,
+                expire_timeout,
+            ),
+        )
+        .await?;
+    Ok(reply.body().deserialize()?)
+}
+
+/// Send a notification, optionally replacing an existing one.
+/// Returns the notification ID assigned by the daemon.
+/// If `replaces_id` is stale (notification already reaped), falls back to
+/// a fresh notification silently. Fire-and-forget toasts use the fixed
+/// `network-vpn` icon, no actions, and the daemon-default expiry (-1).
 pub(super) async fn send_dbus_notification(
     summary: &str,
     body: &str,
@@ -22,36 +69,16 @@ pub(super) async fn send_dbus_notification(
     replaces_id: u32,
 ) -> anyhow::Result<u32> {
     let conn = zbus::Connection::session().await?;
-    let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
-        HashMap::from([("urgency", zbus::zvariant::Value::U8(urgency))]);
     let mut rid = replaces_id;
     loop {
-        let reply = conn
-            .call_method(
-                Some("org.freedesktop.Notifications"),
-                "/org/freedesktop/Notifications",
-                Some("org.freedesktop.Notifications"),
-                "Notify",
-                &(
-                    "openvpn3-gui-rs",
-                    rid,
-                    "network-vpn",
-                    summary,
-                    body,
-                    &[] as &[&str],
-                    &hints,
-                    -1i32,
-                ),
-            )
-            .await;
-        match reply {
-            Ok(r) => return Ok(r.body().deserialize()?),
+        match send_notify(&conn, "network-vpn", summary, body, &[], urgency, rid, -1).await {
+            Ok(id) => return Ok(id),
             Err(_) if rid != 0 => {
                 // Stale replaces_id — retry as a fresh notification.
                 rid = 0;
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         }
     }
 }

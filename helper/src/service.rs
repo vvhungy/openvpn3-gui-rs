@@ -415,42 +415,34 @@ async fn watch_and_cleanup(conn: Connection, sender: String, state_arc: Arc<Mute
     }
 }
 
-/// Plan for tearing down bypass-routing state when the GUI D-Bus client
+/// Per-iface rp_filter originals to restore when the GUI D-Bus client
 /// vanishes. Pure decision over a state snapshot — the caller owns the
 /// `State` mutations (`bypass_routes_applied = false`, `sender = None`,
-/// `watcher = None`) and the async `bypass::teardown_bypass_state` call.
+/// `watcher = None`, `rp_filter_original.clear()`) and the async
+/// `bypass::teardown_bypass_state` call.
 ///
-/// `Skip` when routing was never applied (the common no-op: the GUI crashed
-/// before any `ApplyBypassRoutes`). `Teardown` when an apply succeeded — the
-/// recorded per-iface rp_filter originals MUST be restored, or the physical
-/// iface stays at loose (`2`) until reboot. The gate is the
-/// `bypass_routes_applied` flag, NOT whether the map happens to be populated,
-/// so the decision stays correct under partial/tampered state (the flag wins
-/// over a stale-but-populated map and over an applied-but-empty map alike).
-enum VanishRoutingAction {
-    /// Bypass routing was never applied — nothing to restore.
-    Skip,
-    /// Restore these per-iface rp_filter originals, then tear down routing.
-    Teardown {
-        rp_filter_originals: Vec<(String, String)>,
-    },
-}
-
-/// Decide whether the vanish path must tear down bypass-routing state. Pure —
-/// no I/O, does not mutate `rp_filter_original` (the caller clears it).
-fn decide_vanish_routing_action(
+/// Returns the cloned originals when an apply succeeded
+/// (`bypass_routes_applied == true`), else an empty `Vec`. Routing
+/// infrastructure (table 100, the priority-100 ip-rules, loose rp_filter) is
+/// torn down unconditionally by `bypass::teardown_bypass_state` — an empty
+/// `Vec` skips only the rp_filter restore, which is the correct no-op when
+/// routing was never applied.
+///
+/// The gate is the `bypass_routes_applied` flag, NOT whether the map happens
+/// to be populated, so the decision stays correct under partial/tampered
+/// state (the flag wins over a stale-but-populated map and over an
+/// applied-but-empty map alike).
+fn originals_to_restore(
     bypass_routes_applied: bool,
     rp_filter_original: &HashMap<String, String>,
-) -> VanishRoutingAction {
+) -> Vec<(String, String)> {
     if bypass_routes_applied {
-        VanishRoutingAction::Teardown {
-            rp_filter_originals: rp_filter_original
-                .iter()
-                .map(|(iface, val)| (iface.clone(), val.clone()))
-                .collect(),
-        }
+        rp_filter_original
+            .iter()
+            .map(|(iface, val)| (iface.clone(), val.clone()))
+            .collect()
     } else {
-        VanishRoutingAction::Skip
+        Vec::new()
     }
 }
 
@@ -465,20 +457,20 @@ async fn teardown_bypass_on_vanish(state_arc: &Arc<Mutex<State>>) {
     // forwarding state. Restore rp_filter first, then teardown.
     let rpf = {
         let mut state = state_arc.lock().expect("state mutex poisoned");
-        let action =
-            decide_vanish_routing_action(state.bypass_routes_applied, &state.rp_filter_original);
-        // Reset the vanish-relevant flags regardless of the decision, matching
-        // the pre-extract mutations.
+        // Compute the originals to restore before clearing. Routing infra is
+        // torn down unconditionally below (an empty Vec skips only rp_filter
+        // restore); originals_to_restore gates the rp_filter list on the
+        // `bypass_routes_applied` flag.
+        let rpf = originals_to_restore(state.bypass_routes_applied, &state.rp_filter_original);
+        // Reset vanish-relevant flags + clear the originals map. The map is
+        // cleared unconditionally — on the !applied path any residual entries
+        // are tamper/partial-state that should not survive (not a match of the
+        // pre-extract mutations, which drained only when applied).
         state.bypass_routes_applied = false;
         state.sender = None;
         state.watcher = None;
         state.rp_filter_original.clear();
-        match action {
-            VanishRoutingAction::Teardown {
-                rp_filter_originals,
-            } => rp_filter_originals,
-            VanishRoutingAction::Skip => Vec::new(),
-        }
+        rpf
     };
     if let Err(e) = bypass::teardown_bypass_state(rpf).await {
         error!(err = ?e, "auto-cleanup bypass routing failed");
@@ -537,13 +529,16 @@ async fn run_nft_list() -> Result<String> {
 mod tests {
     use super::*;
 
-    // --- decide_vanish_routing_action (I6: the pure half of vanish teardown) ---
+    // --- originals_to_restore (I6: the pure half of vanish teardown) ---
     //
     // service.rs had zero tests before this; the vanish gate was tangled with
     // a Mutex lock + an async nft shell-out, so the flag-vs-map precedence
     // (the gate is `bypass_routes_applied`, not whether the originals map is
     // populated) was untestable. These pin every branch + the two precedence
-    // invariants + input-immutability.
+    // invariants + input-immutability. Assert on the returned Vec directly —
+    // the caller passes it to bypass::teardown_bypass_state, which tears down
+    // routing infra unconditionally (an empty Vec = skip rp_filter restore
+    // only), so the Vec contents are the observable contract.
 
     fn map_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -553,70 +548,53 @@ mod tests {
     }
 
     #[test]
-    fn vanish_applied_with_originals_tears_them_down() {
+    fn originals_restored_when_applied_with_populated_map() {
         // Happy path: apply succeeded on two ifaces (G1 wlan0→eth0 mid-VPN).
         let map = map_of(&[("wlan0", "0"), ("eth0", "1")]);
-        match decide_vanish_routing_action(true, &map) {
-            VanishRoutingAction::Teardown {
-                rp_filter_originals,
-            } => {
-                // Order-independent (HashMap iter order is not stable).
-                let mut got = rp_filter_originals;
-                got.sort();
-                assert_eq!(
-                    got,
-                    vec![
-                        ("eth0".to_string(), "1".to_string()),
-                        ("wlan0".to_string(), "0".to_string())
-                    ]
-                );
-            }
-            VanishRoutingAction::Skip => panic!("applied ⇒ must Teardown"),
-        }
+        let mut got = originals_to_restore(true, &map);
+        // Order-independent (HashMap iter order is not stable).
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("eth0".to_string(), "1".to_string()),
+                ("wlan0".to_string(), "0".to_string())
+            ]
+        );
     }
 
     #[test]
-    fn vanish_not_applied_with_empty_map_skips() {
+    fn no_originals_when_not_applied_with_empty_map() {
         // Common no-op: GUI crashed before any ApplyBypassRoutes.
-        assert!(matches!(
-            decide_vanish_routing_action(false, &HashMap::new()),
-            VanishRoutingAction::Skip
-        ));
+        assert!(originals_to_restore(false, &HashMap::new()).is_empty());
     }
 
     #[test]
-    fn vanish_applied_with_empty_map_still_tears_down() {
+    fn applied_with_empty_map_restores_nothing_but_signals_teardown() {
         // Degenerate but pinned: flag says applied but map is empty (apply on
         // a system where rp_filter was already loose, or partial tamper).
-        // Returning Skip here would be a bug — routing/ip-rules may be live.
-        // The FLAG wins, not the map.
-        match decide_vanish_routing_action(true, &HashMap::new()) {
-            VanishRoutingAction::Teardown {
-                rp_filter_originals,
-            } => {
-                assert!(rp_filter_originals.is_empty(), "no originals to restore");
-            }
-            VanishRoutingAction::Skip => panic!("applied flag ⇒ must Teardown even with empty map"),
-        }
+        // A non-empty Vec here would be wrong, but so would a signal to skip
+        // routing teardown — routing/ip-rules may be live. The FLAG wins, not
+        // the map: the Vec is empty (nothing to restore) yet the caller still
+        // tears down routing infra (asserted by teardown_bypass_state's
+        // contract, not here).
+        assert!(originals_to_restore(true, &HashMap::new()).is_empty());
     }
 
     #[test]
-    fn vanish_not_applied_but_map_populated_skips() {
+    fn no_originals_when_not_applied_but_map_populated() {
         // Inverse precedence: shouldn't happen in normal flow (a prior remove
-        // drains the map), but if state is inconsistent the FLAG wins — Skip
-        // avoids a spurious restore of stale entries.
+        // drains the map), but if state is inconsistent the FLAG wins — the
+        // stale entries must NOT be restored.
         let map = map_of(&[("wlan0", "0")]);
-        assert!(matches!(
-            decide_vanish_routing_action(false, &map),
-            VanishRoutingAction::Skip
-        ));
+        assert!(originals_to_restore(false, &map).is_empty());
     }
 
     #[test]
-    fn vanish_decision_does_not_mutate_input_map() {
-        // Pure: the caller clears the map itself; the decision must not drain.
+    fn originals_to_restore_does_not_mutate_input_map() {
+        // Pure: the caller clears the map itself; the fn must not drain.
         let map = map_of(&[("wlan0", "0")]);
-        let _ = decide_vanish_routing_action(true, &map);
+        let _ = originals_to_restore(true, &map);
         assert_eq!(map.get("wlan0"), Some(&"0".to_string()));
         assert_eq!(map.len(), 1);
     }

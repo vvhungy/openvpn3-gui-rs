@@ -4,9 +4,11 @@
 //! to per-session connection-state transitions lives here, so the main loop
 //! stays focused on connection-lifecycle dispatch + auth fan-out.
 //!
-//! No testable pure surface — async D-Bus glue + side effects (notifications,
-//! firewall calls). One-shot semantics covered indirectly by the status_handler
-//! integration smoke test.
+//! Most of this module is async D-Bus glue + side effects (notifications,
+//! firewall calls) with no testable pure surface; the pause-teardown gate is
+//! the exception and is extracted as [`should_teardown_on_pause`] so it is
+//! unit-testable in isolation. One-shot semantics are covered indirectly by
+//! the status_handler integration smoke test.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
@@ -101,9 +103,21 @@ pub(super) fn on_connected(
     });
 }
 
+/// Pure decision: whether the kill-switch firewall should be torn down when a
+/// session pauses. Returns `true` only when the kill-switch is enabled AND the
+/// user has not set block-during-pause (which keeps rules up to stay protected
+/// while paused). Separated from [`on_paused`] so the gate is unit-testable
+/// without a D-Bus connection or live firewall (I6 pure/impure split).
+fn should_teardown_on_pause(enable_kill_switch: bool, block_during_pause: bool) -> bool {
+    enable_kill_switch && !block_during_pause
+}
+
 pub(super) fn on_paused(tray: &ksni::blocking::Handle<VpnTray>) {
     let settings = crate::settings::Settings::new();
-    if !settings.enable_kill_switch() || settings.kill_switch_block_during_pause() {
+    if !should_teardown_on_pause(
+        settings.enable_kill_switch(),
+        settings.kill_switch_block_during_pause(),
+    ) {
         return;
     }
     let tray = tray.clone();
@@ -116,4 +130,20 @@ pub(super) fn on_paused(tray: &ksni::blocking::Handle<VpnTray>) {
         });
         crate::dialogs::show_killswitch_inactive_notification();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_teardown_on_pause;
+
+    #[test]
+    fn teardown_on_pause_only_when_enabled_and_not_blocking() {
+        // Kill-switch disabled → no teardown regardless of the block flag.
+        assert!(!should_teardown_on_pause(false, false));
+        assert!(!should_teardown_on_pause(false, true));
+        // Enabled + block-during-pause → keep rules (stay protected while paused).
+        assert!(!should_teardown_on_pause(true, true));
+        // Enabled + not blocking → tear the firewall down on pause.
+        assert!(should_teardown_on_pause(true, false));
+    }
 }

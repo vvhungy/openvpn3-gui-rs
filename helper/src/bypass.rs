@@ -169,6 +169,13 @@ pub async fn restore_rp_filter_all(originals: impl IntoIterator<Item = (String, 
 /// tears the routing layer down. Returns the routing-teardown error so each
 /// caller can log at its own severity (shutdown = warn, vanish = error).
 /// `originals` is drained by the caller from the per-iface map.
+///
+/// Contract relied on by the vanish path: routing infrastructure (table 100,
+/// the priority-100 ip-rules) is torn down UNCONDITIONALLY — an empty
+/// `originals` skips only the rp_filter restore, not `teardown_routing`. So a
+/// caller that applied routing but has no rp_filter originals to restore still
+/// passes an empty iterator and gets a full routing teardown (no stale
+/// table/rules left behind on a GUI crash).
 pub async fn teardown_bypass_state(
     originals: impl IntoIterator<Item = (String, String)>,
 ) -> Result<()> {
