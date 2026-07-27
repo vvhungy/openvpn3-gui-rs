@@ -41,23 +41,14 @@ impl VpnTray {
             .unwrap_or_else(|| (FALLBACK_NAME.to_string(), String::new()))
     }
 
-    /// Display name of the config at `config_path`, or [`UNKNOWN_CONFIG_NAME`]
-    /// if it is no longer in the loaded config list (e.g. removed between the
-    /// menu render and the click, or deleted since last run). The single
-    /// canonical path→name lookup — every call site routes through here, or
-    /// through [`Self::resolve_config_name_or`] when its fallback must NOT be
-    /// `UNKNOWN_CONFIG_NAME` (e.g. the persisted most-recent name, which has to
-    /// stay `"VPN Connection"` to match the pre-0.3.11 keyring-migration
-    /// sentinel — regression caught in v0.4.2 review, restored v0.4.3).
-    pub(crate) fn resolve_config_name(&self, config_path: &str) -> String {
-        self.resolve_config_name_or(config_path, UNKNOWN_CONFIG_NAME)
-    }
-
-    /// Same lookup as [`resolve_config_name`](Self::resolve_config_name) but
-    /// with a caller-supplied `fallback` instead of the `UNKNOWN_CONFIG_NAME`
-    /// default. Use at sites where the fallback carries meaning (a persisted
-    /// label like `"VPN Connection"`, or the config path itself) rather than a
-    /// generic "Unknown".
+    /// Display name of the config at `config_path`, or `fallback` if it is no
+    /// longer in the loaded config list (e.g. removed between the menu render
+    /// and the click, or deleted since last run). The single canonical path→name
+    /// lookup — every call site routes through the free-fn adapter below. Pass
+    /// [`UNKNOWN_CONFIG_NAME`] for a generic "Unknown" label, or a caller-chosen
+    /// string where the fallback carries meaning (the persisted most-recent name
+    /// `"VPN Connection"` to match the pre-0.3.11 keyring-migration sentinel, or
+    /// the config path itself).
     pub(crate) fn resolve_config_name_or(&self, config_path: &str, fallback: &str) -> String {
         self.configs
             .iter()
@@ -97,8 +88,7 @@ pub(crate) fn session_config_identity(
 /// the config is gone from the tray's loaded list, or the tray handle itself
 /// is gone. Thin adapter over the blocking `Handle`.
 pub(crate) fn resolve_config_name(tray: &Handle<VpnTray>, config_path: &str) -> String {
-    tray.update(|t| t.resolve_config_name(config_path))
-        .unwrap_or_else(|| UNKNOWN_CONFIG_NAME.to_string())
+    resolve_config_name_or(tray, config_path, UNKNOWN_CONFIG_NAME)
 }
 
 /// Variant of [`resolve_config_name`] with a caller-supplied `fallback`
@@ -223,14 +213,17 @@ mod tests {
     #[test]
     fn resolve_config_name_matches_by_path() {
         let tray = tray_with_configs(&[cfg("/a.ovpn", "Alpha"), cfg("/b.ovpn", "Beta")]);
-        assert_eq!(tray.resolve_config_name("/b.ovpn"), "Beta");
+        assert_eq!(
+            tray.resolve_config_name_or("/b.ovpn", UNKNOWN_CONFIG_NAME),
+            "Beta"
+        );
     }
 
     #[test]
     fn resolve_config_name_unknown_when_missing() {
         let tray = tray_with_configs(&[cfg("/a.ovpn", "Alpha")]);
         assert_eq!(
-            tray.resolve_config_name("/missing.ovpn"),
+            tray.resolve_config_name_or("/missing.ovpn", UNKNOWN_CONFIG_NAME),
             UNKNOWN_CONFIG_NAME
         );
     }
@@ -239,7 +232,7 @@ mod tests {
     fn resolve_config_name_unknown_when_empty() {
         let tray = tray_with_configs(&[]);
         assert_eq!(
-            tray.resolve_config_name("/anything.ovpn"),
+            tray.resolve_config_name_or("/anything.ovpn", UNKNOWN_CONFIG_NAME),
             UNKNOWN_CONFIG_NAME
         );
     }
@@ -249,7 +242,10 @@ mod tests {
         // Duplicate paths aren't expected, but resolution must stay
         // deterministic: first match wins (mirrors the original `.find`).
         let tray = tray_with_configs(&[cfg("/dup.ovpn", "First"), cfg("/dup.ovpn", "Second")]);
-        assert_eq!(tray.resolve_config_name("/dup.ovpn"), "First");
+        assert_eq!(
+            tray.resolve_config_name_or("/dup.ovpn", UNKNOWN_CONFIG_NAME),
+            "First"
+        );
     }
 
     #[test]
