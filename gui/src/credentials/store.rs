@@ -325,10 +325,10 @@ impl CredentialStore {
     /// items are deliberately NOT matched here: a name is not unique, so
     /// deleting by name reintroduces the cross-wipe. Such orphans are
     /// harmless (never read again once the path key is populated; migrated on
-    /// read otherwise) and age out with [`clear_all_async`].
+    /// read otherwise) and age out with [`Self::clear_all_async`].
     ///
-    /// The middle ground between [`delete_async`] (one label, full triple) and
-    /// [`clear_all_async`] (every config, by `application` only). Used when a
+    /// The middle ground between [`Self::delete_async`] (one label, full triple) and
+    /// [`Self::clear_all_async`] (every config, by `application` only). Used when a
     /// config is removed so its saved username/password don't orphan in the
     /// keyring. Returns the number of items deleted.
     pub async fn delete_for_config_async(&self, config_id: &str) -> Result<usize> {

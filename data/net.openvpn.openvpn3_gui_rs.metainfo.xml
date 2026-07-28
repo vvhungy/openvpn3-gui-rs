@@ -57,6 +57,16 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.4" date="2026-07-28">
+      <description>
+        <p>Patch release fixing two notification-toast bugs on the state-change path, plus doc-accuracy cleanup.</p>
+        <ul>
+          <li>Fixed a duplicate notification toast: a malformed reply from the desktop notification daemon could fire a second toast on top of one already shown. Deserialize failures are now terminal instead of being retried.</li>
+          <li>Fixed a dropped kill-switch / split-tunneling state toast: when the previous toast had already been dismissed, the replacing notification could error and be silently lost. It now retries once as a fresh toast so the state change is always signalled.</li>
+          <li>Internal: split the notification transport into a typed error plus a shared, unit-tested retry policy used by both send paths; resolved nine dangling rustdoc intra-doc links.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.3" date="2026-07-20">
       <description>
         <p>Patch release restoring a behavior regressed in 0.4.2, plus continued internal cleanup.</p>
