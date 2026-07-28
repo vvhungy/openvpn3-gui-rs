@@ -4,7 +4,6 @@
 
 use tracing::warn;
 
-use super::dedup::NOTIFICATION_IDS;
 use crate::settings::Settings;
 
 /// Shared dedup key for bypass apply notifications — success and failure share
@@ -18,25 +17,19 @@ async fn send_bypass_state(
     expire_timeout: i32,
 ) -> anyhow::Result<u32> {
     let conn = zbus::Connection::session().await?;
-    let replaces_id = NOTIFICATION_IDS
-        .lock()
-        .map(|m| *m.get(BYPASS_STATE_KEY).unwrap_or(&0))
-        .unwrap_or(0);
-    let new_id = super::core::send_notify(
+    // Shared state-toast sender: replaces the prior bypass toast via
+    // BYPASS_STATE_KEY, and on a stale (reaped) replaces_id retries once as a
+    // fresh toast rather than dropping the state change (S47-T3).
+    super::core::send_state_notification(
         &conn,
+        BYPASS_STATE_KEY,
         "network-vpn",
         summary,
         body,
-        &[],
         urgency,
-        replaces_id,
         expire_timeout,
     )
-    .await?;
-    if let Ok(mut map) = NOTIFICATION_IDS.lock() {
-        map.insert(BYPASS_STATE_KEY.to_string(), new_id);
-    }
-    Ok(new_id)
+    .await
 }
 
 /// Fired when bypass routes are successfully installed. One-shot

@@ -6,7 +6,6 @@
 use tracing::warn;
 
 use super::core::send_notification;
-use super::dedup::NOTIFICATION_IDS;
 use crate::settings::Settings;
 
 /// Show a one-shot info notification when the kill-switch helper package is
@@ -33,28 +32,19 @@ async fn send_killswitch_state(
     expire_timeout: i32,
 ) -> anyhow::Result<u32> {
     let conn = zbus::Connection::session().await?;
-    let replaces_id = NOTIFICATION_IDS
-        .lock()
-        .map(|m| *m.get(KILLSWITCH_STATE_KEY).unwrap_or(&0))
-        .unwrap_or(0);
-    // Single shared Notify call (core::send_notify) — no retry wrapper, since a
-    // stale replaces_id here just means the prior active/inactive toast was
-    // already reaped, and a fresh id is the correct fallback for state toggles.
-    let new_id = super::core::send_notify(
+    // Shared state-toast sender: replaces the prior active/inactive toast via
+    // KILLSWITCH_STATE_KEY, and on a stale (reaped) replaces_id retries once as
+    // a fresh toast rather than dropping the state change (S47-T3).
+    super::core::send_state_notification(
         &conn,
+        KILLSWITCH_STATE_KEY,
         "network-vpn",
         summary,
         body,
-        &[],
         urgency,
-        replaces_id,
         expire_timeout,
     )
-    .await?;
-    if let Ok(mut map) = NOTIFICATION_IDS.lock() {
-        map.insert(KILLSWITCH_STATE_KEY.to_string(), new_id);
-    }
-    Ok(new_id)
+    .await
 }
 
 pub fn show_killswitch_active_notification() {
