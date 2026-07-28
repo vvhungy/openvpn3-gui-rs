@@ -223,7 +223,8 @@ async fn open_and_unlock_keyring() -> Option<oo7::Keyring> {
 /// underlying error was a lock/refusal.
 ///
 /// Pure (bool -> message) so the locked-vs-generic branch is unit-testable; the
-/// impure error classification ([`is_locked_error`]) stays at the call site.
+/// impure error classification ([`crate::credentials::store::is_locked_error`])
+/// stays at the call site.
 fn keyring_unlock_hint(locked: bool) -> &'static str {
     if locked {
         "Keyring is locked. Enter credentials manually."
@@ -405,7 +406,8 @@ fn show_credentials_with_slots(
 /// underlying keyring error was a lock/refusal.
 ///
 /// Pure (bool -> message) so the locked-vs-generic branch is unit-testable; the
-/// impure error classification ([`is_locked_error`]) stays at the call site.
+/// impure error classification ([`crate::credentials::store::is_locked_error`])
+/// stays at the call site.
 fn save_failure_hint(locked: bool) -> &'static str {
     if locked {
         "Keyring is locked — credentials could not be saved."

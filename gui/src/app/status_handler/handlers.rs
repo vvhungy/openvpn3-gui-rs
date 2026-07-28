@@ -227,16 +227,16 @@ pub(super) fn send_status_notification(prev_info: Option<(String, &str)>, status
 /// count for the retry decision in [`handle_auth_failed`].
 ///
 /// Extracted to keep `handle_auth_failed` under the complexity gate. The
-/// pure retry *gate* lives in [`credential_handler::should_retry_auth`]
+/// pure retry *gate* lives in [`crate::app::credential_handler::should_retry_auth`]
 /// (unit-tested); this is the impure glue that mutates the live counter map.
 ///
-/// - empty path → [`MAX_CREDENTIAL_ATTEMPTS`], so the retry gate always answers
+/// - empty path → [`crate::app::credential_handler::MAX_CREDENTIAL_ATTEMPTS`], so the retry gate always answers
 ///   false (straight to disconnect). Also avoids `next_attempt`'s empty-key
 ///   debug_assert (see its doc) — an empty key would be a shared bucket across
 ///   all un-keyed failures.
 /// - poisoned bookkeeping lock → log and treat as a first attempt (count 1), so
 ///   a prior panic elsewhere can't brick auth-retry bookkeeping.
-/// - otherwise → [`next_attempt`] on the live map.
+/// - otherwise → [`crate::app::credential_handler::next_attempt`] on the live map.
 pub(super) fn record_auth_attempt(config_path: &str) -> u32 {
     use crate::app::credential_handler::{
         CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, next_attempt,

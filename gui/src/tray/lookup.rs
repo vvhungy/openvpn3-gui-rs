@@ -58,7 +58,7 @@ impl VpnTray {
     }
 
     /// True if `config_path` is in the loaded config list. Sibling of
-    /// [`resolve_config_name`](Self::resolve_config_name) for the existence
+    /// [`resolve_config_name`] for the existence
     /// check (the startup-connect gate) — keeps the path→config probe in one
     /// place alongside the path→name lookup.
     pub(crate) fn config_exists(&self, config_path: &str) -> bool {
