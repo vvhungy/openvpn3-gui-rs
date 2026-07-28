@@ -1,8 +1,10 @@
 //! Core transport + simple fire-and-forget notifications.
 //!
-//! `send_dbus_notification` is the low-level shim around
-//! `org.freedesktop.Notifications.Notify`; it transparently retries with a
-//! fresh id when `replaces_id` is stale.
+//! `send_notify` is the low-level shim around
+//! `org.freedesktop.Notifications.Notify` (one call, one reply). The
+//! `send_dbus_notification` and `send_state_notification` wrappers sit on top of
+//! it, sharing the [`next_retry_id`] policy: a stale `replaces_id` retries once
+//! as a fresh toast, a deserialize failure is terminal.
 
 use std::collections::HashMap;
 
@@ -34,8 +36,9 @@ impl From<SendError> for anyhow::Error {
     }
 }
 
-/// Retry policy for the fire-and-forget wrapper — pure, so it is unit-testable
-/// without a live D-Bus session (S47-T4). Given the failure and the
+/// Shared retry policy for both send wrappers (`send_dbus_notification` and
+/// `send_state_notification`) — pure, so it is unit-testable without a live
+/// D-Bus session (S47-T4). Given the failure and the
 /// `replaces_id` that was used, returns `Some(new_id)` to retry with that id,
 /// or `None` to stop (terminal).
 ///
