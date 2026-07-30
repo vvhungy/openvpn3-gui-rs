@@ -3,6 +3,12 @@
 //! Dynamic dialog for collecting VPN credentials from the user.
 //! Supports any combination of fields: username, password, OTP, etc.
 //!
+//! Entry buffers are cleared on submit and cancel (#9) so the secret never
+//! lingers in a live GTK widget after the dialog dismisses; the String copies
+//! handed to `on_submit` are owned by the callback and freed on its drop.
+//! Threading `Zeroizing<String>` through the D-Bus submit + keyring chain is
+//! out of scope: `zbus` and `oo7` own those buffers and take `&str` / `&[u8]`.
+//!
 //! No testable pure surface — GTK widget builder.
 
 use std::cell::Cell;
@@ -93,6 +99,13 @@ where
 
     // Dynamically create entry fields for each credential slot
     let mut entry_getters: Vec<(String, Box<dyn Fn() -> String>)> = Vec::new();
+    // #9: a matching clear-callback per entry so the GTK text buffer (which
+    // holds the secret in heap memory until the widget drops) is wiped the
+    // moment the values are collected — never left populated after submit or
+    // cancel. The String copies handed to `on_submit` are owned by that
+    // callback and freed on its drop; the widget buffer is the one copy that
+    // outlives the value collection, so this is where clearing pays off.
+    let mut entry_clearers: Vec<Box<dyn Fn()>> = Vec::new();
     let mut first_empty_entry: Option<gtk4::Widget> = None;
     let has_storable = fields.iter().any(|f| f.can_store);
 
@@ -122,6 +135,8 @@ where
             grid.attach(&entry, 1, row, 1, 1);
             let entry_clone = entry.clone();
             entry_getters.push((field_key, Box::new(move || entry_clone.text().to_string())));
+            let clearer = entry.clone();
+            entry_clearers.push(Box::new(move || clearer.set_text("")));
         } else {
             let entry = Entry::builder()
                 .hexpand(true)
@@ -136,6 +151,8 @@ where
             grid.attach(&entry, 1, row, 1, 1);
             let entry_clone = entry.clone();
             entry_getters.push((field_key, Box::new(move || entry_clone.text().to_string())));
+            let clearer = entry.clone();
+            entry_clearers.push(Box::new(move || clearer.set_text("")));
         }
     }
 
@@ -153,6 +170,11 @@ where
     // Guard against double-fire
     let handled = Rc::new(Cell::new(false));
     let entry_getters = Rc::new(entry_getters);
+    let entry_clearers = Rc::new(entry_clearers);
+
+    // Wipe every entry buffer. Called from both submit and cancel so the
+    // secret never lingers in a live widget after the dialog dismisses.
+    let clear_all = move || entry_clearers.iter().for_each(|clear| clear());
 
     vbox.append(&make_button_row(
         "Cancel",
@@ -160,11 +182,13 @@ where
         {
             let window = window.clone();
             let handled = handled.clone();
+            let clear_all = clear_all.clone();
             move || {
                 if handled.get() {
                     return;
                 }
                 handled.set(true);
+                clear_all();
                 on_cancel();
                 window.close();
             }
@@ -180,6 +204,10 @@ where
                     .iter()
                     .map(|(label, getter)| (label.clone(), getter()))
                     .collect();
+                // Clear immediately after collecting — the copies in `values`
+                // are now the only live representation; the widget buffers are
+                // redundant and must not outlive this point.
+                clear_all();
                 let remember = remember_check.is_active();
                 on_submit(values, remember);
                 window.close();

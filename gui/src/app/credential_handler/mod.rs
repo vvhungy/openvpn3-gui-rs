@@ -104,6 +104,7 @@ pub(crate) async fn request_credentials(
     // *absent* and silently blanked fields.
     resolve_keyring_values(
         &labels_to_try,
+        &slots,
         keyring.as_ref(),
         &cred_store,
         &cred_key,
@@ -239,8 +240,15 @@ fn keyring_unlock_hint(locked: bool) -> &'static str {
 /// labels (e.g. OTP) are skipped. Outcome is classified so a *locked/error*
 /// read never reads as *absent*. Extracted from `request_credentials`'s read
 /// loop. Impure async glue — no unit surface.
+///
+/// `slots` is the live D-Bus queue so the read path applies the **same**
+/// storability policy as the write path: previously it passed a hardcoded
+/// `mask=true`, which made the read side try to prefill any field the server
+/// marked masked — including one-time codes the write side correctly refuses
+/// to store (#14). Now both sides agree through [`slot_mask`].
 async fn resolve_keyring_values(
     labels: &[String],
+    slots: &[(u32, u32, u32, String, bool)],
     keyring: Option<&oo7::Keyring>,
     cred_store: &crate::credentials::CredentialStore,
     cred_key: &str,
@@ -254,7 +262,7 @@ async fn resolve_keyring_values(
         if resolved.contains_key(label) {
             continue;
         }
-        if !is_storable_field(label, true) {
+        if !is_storable_field(label, slot_mask(label, slots)) {
             continue;
         }
         match cred_store
