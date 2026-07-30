@@ -267,6 +267,11 @@ fn handle_session_destroyed(
     action_tx: &crate::tray::ActionSender,
     session_path: String,
 ) {
+    // The session is gone — its connection-timeout watcher (if any) can no
+    // longer be current, so drop the generation entry rather than let
+    // TIMEOUT_GEN leak one slot per dead session (#2, T4).
+    super::timeout_watcher::remove_timeout_gen(&session_path);
+
     // Capture config info before removing from tray. Fall back to
     // RECENT_DESTROYED_SESSIONS — status_handler removes the entry from
     // tray.sessions 3s after Disconnected, but SessDestroyed can arrive

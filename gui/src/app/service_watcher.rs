@@ -157,6 +157,17 @@ async fn handle_sessions_service_lost(tray: &ksni::blocking::Handle<VpnTray>) {
         t.bypass_state = BypassState::Off;
     });
 
+    // The session manager is gone, so every cached "recently destroyed"
+    // session is dead too — drain the map rather than let it accumulate one
+    // entry per session ever connected across service restarts (#2, T4).
+    if let Ok(mut map) = crate::app::session_ops::RECENT_DESTROYED_SESSIONS.lock() {
+        map.clear();
+    }
+    // Every tracked notification `replaces_id` is now stale as well; drop them
+    // so a reconnect after restart doesn't try to replace a toast that no
+    // longer exists.
+    crate::dialogs::clear_notification_dedup();
+
     if had_sessions {
         crate::dialogs::show_killswitch_inactive_notification();
         crate::dialogs::show_info_notification(

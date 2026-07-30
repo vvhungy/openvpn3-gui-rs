@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use tracing::warn;
 
-use super::dedup::NOTIFICATION_IDS;
+use super::dedup::{self, NOTIFICATION_IDS};
 use crate::settings::Settings;
 
 /// Which stage of a `send_notify` attempt failed. The distinction drives the
@@ -174,9 +174,7 @@ pub(super) async fn send_state_notification(
             },
         }
     };
-    if let Ok(mut map) = NOTIFICATION_IDS.lock() {
-        map.insert(dedup_key.to_string(), new_id);
-    }
+    dedup::record(dedup_key, new_id);
     Ok(new_id)
 }
 
@@ -198,9 +196,7 @@ pub(super) fn send_notification(summary: &str, body: &str, urgency: u8) {
     glib::spawn_future_local(async move {
         match send_dbus_notification(&summary, &body, urgency, replaces_id).await {
             Ok(new_id) => {
-                if let Ok(mut map) = NOTIFICATION_IDS.lock() {
-                    map.insert(key, new_id);
-                }
+                dedup::record(&key, new_id);
             }
             Err(e) => warn!("Failed to send notification: {}", e),
         }
@@ -237,9 +233,7 @@ pub fn show_connection_notification(config_name: &str, status: &str) {
     glib::spawn_future_local(async move {
         match send_dbus_notification(&title, &status, 1, replaces_id).await {
             Ok(new_id) => {
-                if let Ok(mut map) = NOTIFICATION_IDS.lock() {
-                    map.insert(key, new_id);
-                }
+                dedup::record(&key, new_id);
             }
             Err(e) => warn!("Failed to send notification: {}", e),
         }
