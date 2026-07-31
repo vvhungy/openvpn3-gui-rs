@@ -256,11 +256,6 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
-    /// Create a new CredentialStore instance
-    pub fn new() -> Result<Self> {
-        Ok(Self {})
-    }
-
     /// Create a new CredentialStore instance (sync wrapper)
     pub fn new_sync() -> Self {
         Self {}
@@ -466,11 +461,6 @@ impl CredentialStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_new_succeeds() {
-        assert!(CredentialStore::new().is_ok());
-    }
 
     #[test]
     fn test_default_creates_instance() {

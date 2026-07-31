@@ -39,17 +39,14 @@ impl Application {
 
         let settings = Settings::new();
         crate::autostart::sync_gsettings_from_fs(&settings);
-        let credentials = CredentialStore::new()?;
 
-        if args.clear_secret_storage {
-            info!("Clearing secret storage");
-            let rt = tokio::runtime::Handle::current();
-            match rt.block_on(credentials.clear_all_async()) {
-                Ok(0) => info!("No saved credentials found"),
-                Ok(n) => info!("Cleared {} saved credential(s)", n),
-                Err(e) => error!("Failed to clear credentials: {}", e),
-            }
-        }
+        // `--clear-secret-storage` is handled after the window appears (below, in
+        // `connect_startup`) rather than with a blocking `rt.block_on` here:
+        // clearing can trigger the Secret Service unlock prompt, and doing it on
+        // the launch thread froze the window+tray until the prompt resolved
+        // (#15). The flag threads into the startup closure so the clear runs on
+        // the glib main loop and reports via the notification system.
+        let clear_secret_storage = args.clear_secret_storage;
 
         // Create D-Bus system connection (for OpenVPN3)
         let rt = tokio::runtime::Handle::current();
@@ -90,6 +87,40 @@ impl Application {
             // so GTK doesn't warn about dialogs without a transient parent.
             let parent_window = ApplicationWindow::builder().application(gtk_app).build();
             super::set_dialog_parent(parent_window.clone());
+
+            // `--clear-secret-storage`: run off the launch thread (#15) so a
+            // locked Secret Service (unlock prompt) no longer freezes the
+            // window+tray at startup. Reports the outcome through the existing
+            // notification surface once the clear resolves.
+            if clear_secret_storage {
+                info!("Clearing secret storage (async, post-startup)");
+                glib::spawn_future_local(async move {
+                    let store = CredentialStore::default();
+                    match store.clear_all_async().await {
+                        Ok(0) => {
+                            info!("No saved credentials found");
+                            crate::dialogs::show_info_notification(
+                                "Secret Storage",
+                                "No saved credentials were found.",
+                            );
+                        }
+                        Ok(n) => {
+                            info!("Cleared {} saved credential(s)", n);
+                            crate::dialogs::show_info_notification(
+                                "Secret Storage Cleared",
+                                &format!("Cleared {n} saved credential(s)."),
+                            );
+                        }
+                        Err(e) => {
+                            error!("Failed to clear credentials: {}", e);
+                            crate::dialogs::show_error_notification(
+                                "Clear Failed",
+                                "Could not clear saved credentials (is the secret service running?).",
+                            );
+                        }
+                    }
+                });
+            }
 
             // Wire up the action receiver on the glib main loop
             let dbus = dbus_conn.clone();
@@ -232,9 +263,6 @@ impl Application {
                 }
             }
         });
-
-        // suppress unused variable warning for credentials (held for its lifetime)
-        let _ = credentials;
 
         let _hold = gtk_app.hold();
         let code = gtk_app.run();

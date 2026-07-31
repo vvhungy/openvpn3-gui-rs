@@ -2,6 +2,7 @@
 //!
 //! Testable pure surface: `validate_method_missing` (+ its test).
 
+use anyhow::Context;
 use tracing::{error, info, warn};
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::OwnedObjectPath;
@@ -93,7 +94,15 @@ pub(crate) async fn import_config(
     name: &str,
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let config_content = std::fs::read_to_string(path)?;
+    // Read off the GTK main-loop thread (#6): `import_config` is an async fn
+    // driven by `glib::spawn_future_local`, so a blocking `read_to_string`
+    // froze the UI+tray on a large config or a slow/hung FS (NFS, FUSE).
+    // `spawn_blocking` moves it onto the tokio worker pool; the owned path is
+    // the only capture, so the D-Bus Import below still runs on the async task.
+    let path_owned = path.to_path_buf();
+    let config_content = tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_owned))
+        .await
+        .context("Config read task was cancelled")??;
     let config_manager = ConfigurationManagerProxy::builder(dbus)
         .cache_properties(CacheProperties::No)
         .build()
