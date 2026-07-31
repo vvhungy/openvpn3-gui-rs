@@ -5,13 +5,51 @@
 //! `send_dbus_notification` and `send_state_notification` wrappers sit on top of
 //! it, sharing the [`next_retry_id`] policy: a stale `replaces_id` retries once
 //! as a fresh toast, a deserialize failure is terminal.
+//!
+//! Every send path routes through [`with_key_serialized`] (#13) so the
+//! replaces_id read → Notify → record span is atomic per key: a rapid same-key
+//! burst replaces instead of stacking duplicate toasts.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, LazyLock};
 
+use futures::lock::Mutex;
 use tracing::warn;
 
 use super::dedup::{self, NOTIFICATION_IDS};
 use crate::settings::Settings;
+
+/// Per-key serialization locks for `Notify` sends (#13). A rapid same-key burst
+/// raced the synchronous `replaces_id` read against the async send+record, so
+/// two callers both saw a stale id and each produced a fresh toast. Routing
+/// every send through [`with_key_serialized`] makes the read→send→record span
+/// atomic per key: the second caller waits for the first to record before it
+/// reads, then replaces the first's toast instead of stacking a new one.
+///
+/// Keys are notification summaries / config names (bounded by the app's
+/// notification surface), so the registry does not need its own cap.
+static SEND_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Run `f` while holding the per-key async lock, so concurrent same-key sends
+/// serialize. The `Arc<Mutex<()>>` is created lazily and reused across calls;
+/// `futures::lock::Mutex` is executor-agnostic so it works under `glib`'s
+/// `spawn_future_local`.
+async fn with_key_serialized<F, Fut, R>(key: &str, f: F) -> R
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = R>,
+{
+    let lock = {
+        let mut regs = SEND_LOCKS
+            .lock()
+            .expect("notification SEND_LOCKS registry poisoned");
+        regs.entry(key.to_string()).or_default().clone()
+    };
+    let _guard = lock.lock().await;
+    f().await
+}
 
 /// Which stage of a `send_notify` attempt failed. The distinction drives the
 /// retry policy: a failed Notify *call* with a stale `replaces_id` is
@@ -158,24 +196,31 @@ pub(super) async fn send_state_notification(
     urgency: u8,
     expire_timeout: i32,
 ) -> anyhow::Result<u32> {
-    let mut rid = NOTIFICATION_IDS
-        .lock()
-        .map(|m| resolve_replaces_id(&m, dedup_key))
-        .unwrap_or(0);
-    let new_id = loop {
-        match send_notify(conn, icon, summary, body, &[], urgency, rid, expire_timeout).await {
-            Ok(id) => break id,
-            Err(e) => match next_retry_id(&e, rid) {
-                Some(new_rid) => {
-                    rid = new_rid;
-                    continue;
-                }
-                None => return Err(e.into()),
-            },
-        }
-    };
-    dedup::record(dedup_key, new_id);
-    Ok(new_id)
+    // #13: serialize same-key sends. The read of `rid`, the Notify call(s), and
+    // the record of `new_id` are one atomic span per key, so a concurrent
+    // same-key caller waits for this one to record before reading its replaces_id.
+    let dedup_key = dedup_key.to_string();
+    with_key_serialized(&dedup_key, || async {
+        let mut rid = NOTIFICATION_IDS
+            .lock()
+            .map(|m| resolve_replaces_id(&m, &dedup_key))
+            .unwrap_or(0);
+        let new_id = loop {
+            match send_notify(conn, icon, summary, body, &[], urgency, rid, expire_timeout).await {
+                Ok(id) => break id,
+                Err(e) => match next_retry_id(&e, rid) {
+                    Some(new_rid) => {
+                        rid = new_rid;
+                        continue;
+                    }
+                    None => return Err(e.into()),
+                },
+            }
+        };
+        dedup::record(&dedup_key, new_id);
+        Ok(new_id)
+    })
+    .await
 }
 
 /// Fire-and-forget notification, deduped on `summary`. A second call with the
@@ -189,17 +234,21 @@ pub(super) fn send_notification(summary: &str, body: &str, urgency: u8) {
     let summary = summary.to_string();
     let body = body.to_string();
     let key = summary.clone();
-    let replaces_id = NOTIFICATION_IDS
-        .lock()
-        .map(|m| *m.get(&key).unwrap_or(&0))
-        .unwrap_or(0);
     glib::spawn_future_local(async move {
-        match send_dbus_notification(&summary, &body, urgency, replaces_id).await {
-            Ok(new_id) => {
-                dedup::record(&key, new_id);
+        // #13: read replaces_id inside the per-key lock so a rapid burst
+        // serializes — the second caller sees the first caller's freshly
+        // recorded id and replaces its toast instead of stacking a new one.
+        with_key_serialized(&key, || async {
+            let replaces_id = NOTIFICATION_IDS
+                .lock()
+                .map(|m| *m.get(&key).unwrap_or(&0))
+                .unwrap_or(0);
+            match send_dbus_notification(&summary, &body, urgency, replaces_id).await {
+                Ok(new_id) => dedup::record(&key, new_id),
+                Err(e) => warn!("Failed to send notification: {}", e),
             }
-            Err(e) => warn!("Failed to send notification: {}", e),
-        }
+        })
+        .await;
     });
 }
 
@@ -226,17 +275,20 @@ pub fn show_connection_notification(config_name: &str, status: &str) {
     let title = format!("VPN: {}", config_name);
     let status = status.to_string();
     let key = config_name.to_string();
-    let replaces_id = NOTIFICATION_IDS
-        .lock()
-        .map(|m| *m.get(&key).unwrap_or(&0))
-        .unwrap_or(0);
     glib::spawn_future_local(async move {
-        match send_dbus_notification(&title, &status, 1, replaces_id).await {
-            Ok(new_id) => {
-                dedup::record(&key, new_id);
+        // #13: same per-key serialization as send_notification — rapid status
+        // transitions for one config must replace, not stack.
+        with_key_serialized(&key, || async {
+            let replaces_id = NOTIFICATION_IDS
+                .lock()
+                .map(|m| *m.get(&key).unwrap_or(&0))
+                .unwrap_or(0);
+            match send_dbus_notification(&title, &status, 1, replaces_id).await {
+                Ok(new_id) => dedup::record(&key, new_id),
+                Err(e) => warn!("Failed to send notification: {}", e),
             }
-            Err(e) => warn!("Failed to send notification: {}", e),
-        }
+        })
+        .await;
     });
 }
 
