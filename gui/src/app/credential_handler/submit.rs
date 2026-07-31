@@ -111,6 +111,35 @@ fn sanitize_for_log(s: &str) -> String {
         .collect()
 }
 
+/// True iff any slot's required value is empty or absent.
+///
+/// Pure decision logic extracted from `submit_credentials`'s pre-flight guard.
+/// A slot is "skipped" when its label has no submitted value, or that value is
+/// empty. Used to short-circuit *before* consuming any D-Bus slots, so the
+/// dialog can safely re-show against the still-valid queue.
+fn any_required_field_empty(
+    slots: &[(u32, u32, u32, String, bool)],
+    values: &[(String, String)],
+) -> bool {
+    slots.iter().any(|(_, _, _, label, _)| {
+        resolve_slot_value(label, values)
+            .map(str::is_empty)
+            .unwrap_or(true)
+    })
+}
+
+/// Look up the submitted value for a slot label.
+///
+/// Pure resolver extracted from the repeated `values.iter().find(...)` in
+/// `submit_credentials` (used in both the pre-flight guard and the submit
+/// loop). Returns the value string, or `None` if the label has no entry.
+fn resolve_slot_value<'a>(label: &str, values: &'a [(String, String)]) -> Option<&'a str> {
+    values
+        .iter()
+        .find(|(l, _)| l == label)
+        .map(|(_, v)| v.as_str())
+}
+
 /// Submit credentials to all input slots by matching labels, then call Ready() + Connect().
 /// Returns `Ok(true)` if all slots were provided and connection started.
 /// Returns `Ok(false)` if some slots were skipped (empty values) — caller should re-show dialog.
@@ -129,24 +158,13 @@ pub(super) async fn submit_credentials(
     // Check if all fields are filled before consuming any slots.
     // If any field is empty, return early — no slots are consumed,
     // so the dialog can safely re-show with the same (still-valid) slots.
-    let any_skipped = slots.iter().any(|(_, _, _, label, _)| {
-        values
-            .iter()
-            .find(|(l, _)| l == label)
-            .map(|(_, v)| v.is_empty())
-            .unwrap_or(true)
-    });
-    if any_skipped {
+    if any_required_field_empty(slots, values) {
         return Ok(false);
     }
 
     // All fields filled — provide values to each slot.
     for (att_type, group, id, label, _mask) in slots {
-        let value = values
-            .iter()
-            .find(|(l, _)| l == label)
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+        let value = resolve_slot_value(label, values).unwrap_or("");
         match session
             .UserInputProvide(*att_type, *group, *id, value)
             .await
@@ -186,11 +204,6 @@ pub(super) async fn submit_credentials(
         }
     }
 
-    if any_skipped {
-        // Not all slots filled — caller should re-show dialog for remaining slots
-        return Ok(false);
-    }
-
     // All slots provided — try to connect
     match session.Ready().await {
         Ok(()) => {
@@ -211,7 +224,16 @@ pub(super) async fn submit_credentials(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_for_log;
+    use super::{any_required_field_empty, resolve_slot_value, sanitize_for_log};
+
+    // Slot tuple: (att_type, group, id, label, mask). att/group/id are opaque
+    // to the pure logic under test; mask is unused by both helpers.
+    fn make_slots(labels: &[&str]) -> Vec<(u32, u32, u32, String, bool)> {
+        labels
+            .iter()
+            .map(|l| (1, 0, 0, (*l).to_string(), false))
+            .collect()
+    }
 
     #[test]
     fn sanitize_for_log_strips_newlines_and_controls() {
@@ -224,5 +246,75 @@ mod tests {
         assert_eq!(sanitize_for_log("normal label"), "normal label");
         // Non-control, non-ASCII stays readable.
         assert_eq!(sanitize_for_log("café"), "café");
+    }
+
+    #[test]
+    fn any_required_field_empty_false_when_all_filled() {
+        let slots = make_slots(&["Username", "Password"]);
+        let values = vec![
+            ("Username".into(), "alice".into()),
+            ("Password".into(), "hunter2".into()),
+        ];
+        assert!(!any_required_field_empty(&slots, &values));
+    }
+
+    #[test]
+    fn any_required_field_empty_true_when_one_value_empty() {
+        let slots = make_slots(&["Username", "Password"]);
+        let values = vec![
+            ("Username".into(), "alice".into()),
+            ("Password".into(), "".into()),
+        ];
+        assert!(any_required_field_empty(&slots, &values));
+    }
+
+    #[test]
+    fn any_required_field_empty_true_when_all_empty() {
+        let slots = make_slots(&["Username", "Password"]);
+        let values = vec![
+            ("Username".into(), "".into()),
+            ("Password".into(), "".into()),
+        ];
+        assert!(any_required_field_empty(&slots, &values));
+    }
+
+    #[test]
+    fn any_required_field_empty_true_on_label_mismatch() {
+        // A slot whose label has no submitted value is treated as skipped —
+        // the guard must not assume values cover every slot label (servers
+        // use varying labels like "Username" vs "Enter username").
+        let slots = make_slots(&["Username", "Password"]);
+        let values = vec![("Username".into(), "alice".into())];
+        assert!(any_required_field_empty(&slots, &values));
+    }
+
+    #[test]
+    fn any_required_field_empty_false_with_no_slots() {
+        // Vacuous: an empty slot list has nothing to skip.
+        assert!(!any_required_field_empty(&[], &[]));
+    }
+
+    #[test]
+    fn resolve_slot_value_hit() {
+        let values = vec![
+            ("Username".into(), "alice".into()),
+            ("Password".into(), "hunter2".into()),
+        ];
+        assert_eq!(resolve_slot_value("Password", &values), Some("hunter2"));
+        assert_eq!(resolve_slot_value("Username", &values), Some("alice"));
+    }
+
+    #[test]
+    fn resolve_slot_value_miss_returns_none() {
+        let values = vec![("Username".into(), "alice".into())];
+        assert_eq!(resolve_slot_value("Password", &values), None);
+    }
+
+    #[test]
+    fn resolve_slot_value_empty_string_is_some_empty() {
+        // An empty value is still a *present* entry — distinct from absent.
+        // The emptiness decision belongs to the guard, not the resolver.
+        let values = vec![("Password".into(), "".into())];
+        assert_eq!(resolve_slot_value("Password", &values), Some(""));
     }
 }
