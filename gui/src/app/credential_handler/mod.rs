@@ -1,14 +1,20 @@
 //! Username / password credential request flow
 //!
-//! Async D-Bus dispatch + retry orchestration. The pure auth-failure counter
-//! and its unit tests live in [`retry`], re-exported here so existing
+//! Orchestration + dialog construction. The pure auth-failure counter and its
+//! unit tests live in [`retry`], re-exported here so existing
 //! `credential_handler::next_attempt` / `CREDENTIAL_ATTEMPTS` /
 //! `MAX_CREDENTIAL_ATTEMPTS` call paths stay valid. Label-mapping /
 //! storability helpers live in `crate::credentials::policy` with their own
 //! unit tests.
+//!
+//! Sibling modules own the two halves this one dispatches to:
+//! - [`keyring`] — open/unlock, read-back, persist (secret-store side).
+//! - [`submit`] — push values to the D-Bus input queue and act on the outcome.
 
+mod keyring;
 mod retry;
 mod slots;
+mod submit;
 
 pub(crate) use retry::{
     CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, active_attempt_total, next_attempt,
@@ -26,10 +32,13 @@ use crate::credentials::policy::{display_label_for, is_storable_field};
 use crate::dbus::session::SessionProxy;
 use crate::dbus::types::ClientAttentionType;
 
+use keyring::{open_and_unlock_keyring, resolve_keyring_values};
+use submit::{SubmitContext, handle_submit_outcome, submit_credentials};
+
 // Pure label/slot logic (STANDARD_FIELDS, build_labels_to_try, slot_mask,
 // label_matches_category, keyring_label_variants) + its unit tests live in the
 // `slots` sibling module.
-use slots::{STANDARD_FIELDS, build_labels_to_try, label_matches_category, slot_mask};
+use slots::{STANDARD_FIELDS, build_labels_to_try, label_matches_category};
 
 /// Fetch credential input slots from D-Bus and show the credentials dialog.
 ///
@@ -186,99 +195,6 @@ async fn collect_credential_slots(
     slots
 }
 
-/// Open the default keyring and unlock it once, returning a usable handle or
-/// `None` (after a single user-facing notification) if either step fails.
-///
-/// Extracted from `request_credentials`. Dropping the handle on unlock failure
-/// keeps the read loop below from logging N near-identical `warn!` lines.
-/// Impure async glue — no unit surface.
-async fn open_and_unlock_keyring() -> Option<oo7::Keyring> {
-    let mut keyring = match oo7::Keyring::new().await {
-        Ok(k) => Some(k),
-        Err(e) => {
-            warn!("Failed to open keyring — saved credentials unavailable: {e}");
-            crate::dialogs::show_error_notification(
-                "Saved Credentials Unavailable",
-                "Could not open the keyring. Enter credentials manually.",
-            );
-            None
-        }
-    };
-    if let Some(k) = &keyring
-        && let Err(e) = crate::credentials::store::ensure_unlocked(k).await
-    {
-        warn!("Failed to unlock keyring — pre-fill disabled: {e}");
-        crate::dialogs::show_error_notification(
-            "Saved Credentials Unavailable",
-            keyring_unlock_hint(crate::credentials::store::is_locked_error(&e)),
-        );
-        // Drop the handle so the read loop short-circuits. Otherwise it stays
-        // `Some` and every label logs its own read-failure `warn!` (N
-        // near-identical lines for one root cause). One notification + one log
-        // line above is enough; pre-fill is simply blank.
-        keyring = None;
-    }
-    keyring
-}
-
-/// Human-readable hint for a keyring *unlock* failure, given whether the
-/// underlying error was a lock/refusal.
-///
-/// Pure (bool -> message) so the locked-vs-generic branch is unit-testable; the
-/// impure error classification ([`crate::credentials::store::is_locked_error`])
-/// stays at the call site.
-fn keyring_unlock_hint(locked: bool) -> &'static str {
-    if locked {
-        "Keyring is locked. Enter credentials manually."
-    } else {
-        "Could not unlock the keyring. Enter credentials manually."
-    }
-}
-
-/// Resolve keyring values into `resolved`, keyed by label.
-///
-/// Prefilled entries already in `resolved` win and are skipped; non-storable
-/// labels (e.g. OTP) are skipped. Outcome is classified so a *locked/error*
-/// read never reads as *absent*. Extracted from `request_credentials`'s read
-/// loop. Impure async glue — no unit surface.
-///
-/// `slots` is the live D-Bus queue so the read path applies the **same**
-/// storability policy as the write path: previously it passed a hardcoded
-/// `mask=true`, which made the read side try to prefill any field the server
-/// marked masked — including one-time codes the write side correctly refuses
-/// to store (#14). Now both sides agree through [`slot_mask`].
-async fn resolve_keyring_values(
-    labels: &[String],
-    slots: &[(u32, u32, u32, String, bool)],
-    keyring: Option<&oo7::Keyring>,
-    cred_store: &crate::credentials::CredentialStore,
-    cred_key: &str,
-    config_name: &str,
-    resolved: &mut HashMap<String, String>,
-) {
-    let Some(k) = keyring else {
-        return;
-    };
-    for label in labels {
-        if resolved.contains_key(label) {
-            continue;
-        }
-        if !is_storable_field(label, slot_mask(label, slots)) {
-            continue;
-        }
-        match cred_store
-            .get_with_keyring(k, cred_key, config_name, label)
-            .await
-        {
-            Ok(Some(val)) => {
-                resolved.insert(label.clone(), val);
-            }
-            Ok(None) => {} // genuinely absent — leave blank
-            Err(e) => warn!("Failed to read saved credential '{label}': {e}"),
-        }
-    }
-}
-
 /// Show the credentials dialog with a **pre-built** slot list.
 ///
 /// On `Ok(false)` (some fields left empty), re-shows the same dialog with
@@ -409,309 +325,4 @@ fn show_credentials_with_slots(
         },
         on_cancel,
     );
-}
-
-/// User-facing hint for a credential *save* failure, given whether the
-/// underlying keyring error was a lock/refusal.
-///
-/// Pure (bool -> message) so the locked-vs-generic branch is unit-testable; the
-/// impure error classification ([`crate::credentials::store::is_locked_error`])
-/// stays at the call site.
-fn save_failure_hint(locked: bool) -> &'static str {
-    if locked {
-        "Keyring is locked — credentials could not be saved."
-    } else {
-        "Could not save credentials to the keyring."
-    }
-}
-
-/// Persist submitted "remembered" credentials to the keyring, one label at a
-/// time.
-///
-/// Extracted from the dialog submit callback's `Ok(true)` arm. Only storable
-/// fields (username/password, not OTP) are written; the "save failed"
-/// notification fires at most once per submit (a locked keyring fails every
-/// label but the user needs one toast for the single root cause). Impure async
-/// glue — no unit surface.
-async fn save_remembered_credentials(
-    values: &[(String, String)],
-    slots: &[(u32, u32, u32, String, bool)],
-    cred_key: &str,
-    store: &crate::credentials::CredentialStore,
-) {
-    let mut save_failure_notified = false;
-    for (label, value) in values {
-        if !is_storable_field(label, slot_mask(label, slots)) {
-            continue;
-        }
-        if let Err(e) = store.set_async(cred_key, label, value).await {
-            // A failed "remember" must not be silent — the user believes
-            // credentials were saved when they weren't.
-            warn!("Failed to save credential '{}' to keyring: {}", label, e);
-            if !save_failure_notified {
-                save_failure_notified = true;
-                crate::dialogs::show_error_notification(
-                    "Credential Save Failed",
-                    save_failure_hint(crate::credentials::store::is_locked_error(&e)),
-                );
-            }
-        }
-    }
-}
-
-/// Delete submitted credentials from the keyring when "remember" was unticked.
-///
-/// Extracted from the dialog submit callback's `Ok(true)` arm. Delete failure
-/// is lower-stakes than save failure (worst case: a stale entry), so it only
-/// logs. Impure async glue — no unit surface.
-async fn delete_remembered_credentials(
-    values: &[(String, String)],
-    slots: &[(u32, u32, u32, String, bool)],
-    cred_key: &str,
-    store: &crate::credentials::CredentialStore,
-) {
-    for (label, _value) in values {
-        if !is_storable_field(label, slot_mask(label, slots)) {
-            continue;
-        }
-        if let Err(e) = store.delete_async(cred_key, label).await {
-            warn!(
-                "Failed to delete credential '{}' from keyring: {}",
-                label, e
-            );
-        }
-    }
-}
-
-/// Resources captured by the credentials-dialog submit callback, bundled so the
-/// outcome handler receives them as one value (and stays under the argument-count
-/// lint). All owned; moved into whichever submit branch consumes them.
-struct SubmitContext {
-    dbus: zbus::Connection,
-    session_path: String,
-    config_path: String,
-    config_name: String,
-    cred_key: String,
-    slots: Vec<(u32, u32, u32, String, bool)>,
-    prev_snapshot: Rc<HashMap<String, String>>,
-}
-
-/// Act on the outcome of submitting credentials to D-Bus.
-///
-/// Extracted from the credentials-dialog submit callback so its three-way
-/// `match` — all-provided (persist) / partial (re-show prefilled) / error
-/// (re-dispatch or notify) — is isolated from the callback's value-capture
-/// plumbing, which reduced the callback to a single delegated call. Impure
-/// async glue — no unit surface.
-async fn handle_submit_outcome(
-    outcome: anyhow::Result<bool>,
-    values: Vec<(String, String)>,
-    remember: bool,
-    ctx: SubmitContext,
-) {
-    match outcome {
-        Ok(true) => {
-            // All slots provided and Connect() sent — counter is cleared by
-            // status_handler when is_connected() fires. Persist only storable
-            // credentials (username/password, not OTP).
-            let store = crate::credentials::CredentialStore::default();
-            if remember {
-                save_remembered_credentials(&values, &ctx.slots, &ctx.cred_key, &store).await;
-            } else {
-                delete_remembered_credentials(&values, &ctx.slots, &ctx.cred_key, &store).await;
-            }
-        }
-        Ok(false) => {
-            // Some fields left empty — no slots were consumed, so re-show the
-            // same dialog with pre-filled values.
-            let merged: HashMap<String, String> = (*ctx.prev_snapshot)
-                .clone()
-                .into_iter()
-                .chain(values.into_iter().filter(|(_, v)| !v.is_empty()))
-                .collect();
-
-            show_credentials_with_slots(
-                ctx.dbus,
-                ctx.session_path,
-                ctx.config_path,
-                ctx.config_name,
-                &ctx.slots,
-                &merged,
-            );
-        }
-        Err(e) => {
-            let err_str = format!("{}", e);
-            if err_str.contains("User input not required") {
-                info!(
-                    "Session '{}' queue reset, re-dispatching credentials",
-                    ctx.config_name
-                );
-                super::credential_handler::request_credentials(
-                    &ctx.dbus,
-                    &ctx.session_path,
-                    &ctx.config_path,
-                    &ctx.config_name,
-                    Default::default(),
-                )
-                .await;
-            } else {
-                error!("Failed to submit credentials: {}", e);
-                crate::dialogs::show_error_notification(
-                    "Authentication Failed",
-                    &format!("Server rejected credentials for '{}'.", ctx.config_name),
-                );
-            }
-        }
-    }
-}
-
-/// Replace control characters in a peer-controlled string before logging it
-/// (#10 / T7, defense-in-depth). Slot labels and error messages come from the
-/// D-Bus queue / daemon reply; a `\n`-bearing label would otherwise forge a
-/// fresh log line. C0 controls → `?`; tabs/spaces kept verbatim so the value
-/// stays readable.
-fn sanitize_for_log(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_control() && c != ' ' { '?' } else { c })
-        .collect()
-}
-
-/// Submit credentials to all input slots by matching labels, then call Ready() + Connect().
-/// Returns `Ok(true)` if all slots were provided and connection started.
-/// Returns `Ok(false)` if some slots were skipped (empty values) — caller should re-show dialog.
-async fn submit_credentials(
-    dbus: &zbus::Connection,
-    session_path: &str,
-    slots: &[(u32, u32, u32, String, bool)],
-    values: &[(String, String)],
-) -> anyhow::Result<bool> {
-    let session_path_obj = OwnedObjectPath::try_from(session_path)?;
-    let session = SessionProxy::builder(dbus)
-        .path(session_path_obj)?
-        .build()
-        .await?;
-
-    // Check if all fields are filled before consuming any slots.
-    // If any field is empty, return early — no slots are consumed,
-    // so the dialog can safely re-show with the same (still-valid) slots.
-    let any_skipped = slots.iter().any(|(_, _, _, label, _)| {
-        values
-            .iter()
-            .find(|(l, _)| l == label)
-            .map(|(_, v)| v.is_empty())
-            .unwrap_or(true)
-    });
-    if any_skipped {
-        return Ok(false);
-    }
-
-    // All fields filled — provide values to each slot.
-    for (att_type, group, id, label, _mask) in slots {
-        let value = values
-            .iter()
-            .find(|(l, _)| l == label)
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
-        match session
-            .UserInputProvide(*att_type, *group, *id, value)
-            .await
-        {
-            Ok(()) => {
-                info!(
-                    "Provided input for slot '{}' on session {}",
-                    sanitize_for_log(label),
-                    session_path
-                );
-            }
-            Err(e) => {
-                // Match on the structured D-Bus error, not a re-formatted Display
-                // (#10 / T7): formatting the whole error and substring-matching it
-                // could swallow an unrelated error whose Display happens to contain
-                // the phrase. Only genuine `MethodError`s from the daemon are
-                // inspected, and we read the structured `detail` arg. Anything else
-                // is a real failure → propagate.
-                if let zbus::Error::MethodError(_name, detail, _reply) = &e {
-                    let d = detail.as_deref().unwrap_or("");
-                    if d.contains("already-provided") {
-                        info!(
-                            "Slot '{}' already provided, skipping",
-                            sanitize_for_log(label)
-                        );
-                        continue;
-                    } else if d.contains("User input not required") {
-                        info!(
-                            "Slot '{}' — session queue reset, aborting",
-                            sanitize_for_log(label)
-                        );
-                        anyhow::bail!("User input not required");
-                    }
-                }
-                return Err(e.into());
-            }
-        }
-    }
-
-    if any_skipped {
-        // Not all slots filled — caller should re-show dialog for remaining slots
-        return Ok(false);
-    }
-
-    // All slots provided — try to connect
-    match session.Ready().await {
-        Ok(()) => {
-            session.Connect().await?;
-            info!("Session connected after credentials: {}", session_path);
-            Ok(true)
-        }
-        Err(e) => {
-            // May need dynamic challenge — the StatusChange handler will dispatch
-            info!(
-                "Session still not ready after credentials (may need more input): {}",
-                e
-            );
-            Ok(true)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{keyring_unlock_hint, sanitize_for_log, save_failure_hint};
-
-    #[test]
-    fn sanitize_for_log_strips_newlines_and_controls() {
-        // A peer-controlled label bearing a newline must not forge a log line.
-        assert_eq!(
-            sanitize_for_log("username\r\n[ERROR] forged"),
-            "username??[ERROR] forged"
-        );
-        assert_eq!(sanitize_for_log("a\tb"), "a?b");
-        assert_eq!(sanitize_for_log("normal label"), "normal label");
-        // Non-control, non-ASCII stays readable.
-        assert_eq!(sanitize_for_log("café"), "café");
-    }
-
-    #[test]
-    fn save_failure_hint_distinguishes_locked() {
-        assert_eq!(
-            save_failure_hint(true),
-            "Keyring is locked — credentials could not be saved."
-        );
-        assert_eq!(
-            save_failure_hint(false),
-            "Could not save credentials to the keyring."
-        );
-    }
-
-    #[test]
-    fn keyring_unlock_hint_distinguishes_locked() {
-        assert_eq!(
-            keyring_unlock_hint(true),
-            "Keyring is locked. Enter credentials manually."
-        );
-        assert_eq!(
-            keyring_unlock_hint(false),
-            "Could not unlock the keyring. Enter credentials manually."
-        );
-    }
 }
