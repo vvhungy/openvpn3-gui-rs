@@ -448,6 +448,41 @@ mod tests {
     }
 
     #[test]
+    fn cidr_is_v6_missing_slash_is_error() {
+        // No prefix — the classifier rejects rather than guessing a family, so
+        // a bare host address can't sneak through as a /32-ish bypass.
+        assert!(cidr_is_v6("10.0.0.0").is_err());
+        assert!(cidr_is_v6("2001:db8::").is_err());
+    }
+
+    #[test]
+    fn cidr_is_v6_invalid_ip_is_error() {
+        assert!(cidr_is_v6("999.999.999.999/24").is_err());
+        assert!(cidr_is_v6("not-an-ip/8").is_err());
+    }
+
+    #[test]
+    fn cidr_is_v6_ipv4_mapped_ipv6_is_v6() {
+        // Valid-but-superficially-similar input (CLAUDE.md L55): looks v4 but
+        // is a legal v6 address. Misclassifying it lands the bypass rule in the
+        // v4 set — wrong family installed = potential leak.
+        assert!(cidr_is_v6("::ffff:10.0.0.1/128").unwrap());
+    }
+
+    #[test]
+    fn split_by_family_rejects_batch_with_any_invalid() {
+        // Security: the helper is the trust boundary. One malformed entry in a
+        // batch must fail the *whole* call rather than silently dropping the bad
+        // one and installing rules for the survivors (partial install = leak).
+        let cidrs = vec![
+            "10.0.0.0/8".to_string(),
+            "not-a-cidr".to_string(),
+            "2001:db8::/32".to_string(),
+        ];
+        assert!(split_by_family(&cidrs).is_err());
+    }
+
+    #[test]
     fn rp_filter_path_format() {
         assert_eq!(
             rp_filter_path("wlan0"),
