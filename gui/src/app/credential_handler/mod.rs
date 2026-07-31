@@ -11,7 +11,8 @@ mod retry;
 mod slots;
 
 pub(crate) use retry::{
-    CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, next_attempt, should_retry_auth,
+    CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, active_attempt_total, next_attempt,
+    should_retry_auth, should_retry_auth_globally,
 };
 
 use std::collections::HashMap;
@@ -564,6 +565,17 @@ async fn handle_submit_outcome(
     }
 }
 
+/// Replace control characters in a peer-controlled string before logging it
+/// (#10 / T7, defense-in-depth). Slot labels and error messages come from the
+/// D-Bus queue / daemon reply; a `\n`-bearing label would otherwise forge a
+/// fresh log line. C0 controls → `?`; tabs/spaces kept verbatim so the value
+/// stays readable.
+fn sanitize_for_log(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() && c != ' ' { '?' } else { c })
+        .collect()
+}
+
 /// Submit credentials to all input slots by matching labels, then call Ready() + Connect().
 /// Returns `Ok(true)` if all slots were provided and connection started.
 /// Returns `Ok(false)` if some slots were skipped (empty values) — caller should re-show dialog.
@@ -607,19 +619,34 @@ async fn submit_credentials(
             Ok(()) => {
                 info!(
                     "Provided input for slot '{}' on session {}",
-                    label, session_path
+                    sanitize_for_log(label),
+                    session_path
                 );
             }
             Err(e) => {
-                let err_str = format!("{}", e);
-                if err_str.contains("already-provided") {
-                    info!("Slot '{}' already provided, skipping", label);
-                } else if err_str.contains("User input not required") {
-                    info!("Slot '{}' — session queue reset, aborting", label);
-                    anyhow::bail!("User input not required");
-                } else {
-                    return Err(e.into());
+                // Match on the structured D-Bus error, not a re-formatted Display
+                // (#10 / T7): formatting the whole error and substring-matching it
+                // could swallow an unrelated error whose Display happens to contain
+                // the phrase. Only genuine `MethodError`s from the daemon are
+                // inspected, and we read the structured `detail` arg. Anything else
+                // is a real failure → propagate.
+                if let zbus::Error::MethodError(_name, detail, _reply) = &e {
+                    let d = detail.as_deref().unwrap_or("");
+                    if d.contains("already-provided") {
+                        info!(
+                            "Slot '{}' already provided, skipping",
+                            sanitize_for_log(label)
+                        );
+                        continue;
+                    } else if d.contains("User input not required") {
+                        info!(
+                            "Slot '{}' — session queue reset, aborting",
+                            sanitize_for_log(label)
+                        );
+                        anyhow::bail!("User input not required");
+                    }
                 }
+                return Err(e.into());
             }
         }
     }
@@ -649,7 +676,20 @@ async fn submit_credentials(
 
 #[cfg(test)]
 mod tests {
-    use super::{keyring_unlock_hint, save_failure_hint};
+    use super::{keyring_unlock_hint, sanitize_for_log, save_failure_hint};
+
+    #[test]
+    fn sanitize_for_log_strips_newlines_and_controls() {
+        // A peer-controlled label bearing a newline must not forge a log line.
+        assert_eq!(
+            sanitize_for_log("username\r\n[ERROR] forged"),
+            "username??[ERROR] forged"
+        );
+        assert_eq!(sanitize_for_log("a\tb"), "a?b");
+        assert_eq!(sanitize_for_log("normal label"), "normal label");
+        // Non-control, non-ASCII stays readable.
+        assert_eq!(sanitize_for_log("café"), "café");
+    }
 
     #[test]
     fn save_failure_hint_distinguishes_locked() {

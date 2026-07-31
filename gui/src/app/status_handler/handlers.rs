@@ -239,12 +239,22 @@ pub(super) fn send_status_notification(prev_info: Option<(String, &str)>, status
 /// - otherwise → [`crate::app::credential_handler::next_attempt`] on the live map.
 pub(super) fn record_auth_attempt(config_path: &str) -> u32 {
     use crate::app::credential_handler::{
-        CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, next_attempt,
+        CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, active_attempt_total, next_attempt,
+        should_retry_auth_globally,
     };
     if config_path.is_empty() {
         MAX_CREDENTIAL_ATTEMPTS
     } else if let Ok(mut attempts) = CREDENTIAL_ATTEMPTS.lock() {
-        next_attempt(&mut attempts, std::time::Instant::now(), config_path)
+        let now = std::time::Instant::now();
+        let per_config = next_attempt(&mut attempts, now, config_path);
+        // #3: defense-in-depth global cap. The per-config budget is keyed on the
+        // peer-assigned path, which could rotate; the window-wide total bounds a
+        // rotation storm. When the global budget is spent, trip the per-config
+        // gate so the caller disconnects instead of auto-retrying forever.
+        if !should_retry_auth_globally(active_attempt_total(&attempts, now)) {
+            return MAX_CREDENTIAL_ATTEMPTS;
+        }
+        per_config
     } else {
         warn!(
             "CREDENTIAL_ATTEMPTS lock poisoned — \

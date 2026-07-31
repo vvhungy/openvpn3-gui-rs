@@ -74,7 +74,12 @@ pub fn show_config_import_dialog<F>(
     F: Fn(String, std::path::PathBuf) + 'static,
 {
     let parent = parent.cloned();
-    let key = format!("config_import:{}", path.display());
+    // #4: canonicalize before keying so the same file reached via a symlink or
+    // a `..` path dedups to one import window. Falls back to the raw path if
+    // canonicalization fails (the file may not exist yet); that loses dedup but
+    // never blocks the import.
+    let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let key = format!("config_import:{}", canon.display());
     // Bypass the modal-funnel: this fires from the FileChooser response
     // callback, where the chooser is still mapped (its close is deferred).
     // `present_keyed` would route to that chooser and never build the

@@ -272,24 +272,41 @@ fn handle_session_destroyed(
     // TIMEOUT_GEN leak one slot per dead session (#2, T4).
     super::timeout_watcher::remove_timeout_gen(&session_path);
 
-    // Capture config info before removing from tray. Fall back to
-    // RECENT_DESTROYED_SESSIONS — status_handler removes the entry from
-    // tray.sessions 3s after Disconnected, but SessDestroyed can arrive
-    // several seconds later (~9s in the resume-after-long-pause path), so
-    // without this cache the reconnect notification silently fails to fire.
-    let session_info = tray
+    // Capture config info + the survivor snapshot BEFORE removing from tray or
+    // spawning async teardown (#6). Fall back to RECENT_DESTROYED_SESSIONS —
+    // status_handler removes the entry from tray.sessions 3s after Disconnected,
+    // but SessDestroyed can arrive several seconds later (~9s in the
+    // resume-after-long-pause path), so without this cache the reconnect
+    // notification silently fails to fire.
+    //
+    // The survivor snapshot is taken here (synchronously, at destroy time) — not
+    // inside the spawned teardown future — so the kill-switch decision reflects
+    // the exact state when the session died, immune to the 5s delayed removal
+    // racing the teardown (a survivor could be torn down or change state in the
+    // gap between scheduling the teardown and the future's first poll).
+    let (session_info, survivors_at_destroy) = tray
         .update(|t| {
-            t.sessions
+            let info = t
+                .sessions
                 .get(&session_path)
-                .map(|s| (s.config_path.clone(), s.config_name.clone()))
+                .map(|s| (s.config_path.clone(), s.config_name.clone()));
+            let survivors = t
+                .sessions
+                .iter()
+                .map(|(p, s)| (p.clone(), s.status.is_connected(), s.kill_switch_active))
+                .collect::<Vec<_>>();
+            (info, survivors)
         })
-        .flatten()
-        .or_else(|| {
-            super::session_ops::RECENT_DESTROYED_SESSIONS
-                .lock()
-                .ok()
-                .and_then(|mut m| m.remove(&session_path))
-        });
+        .map(|(info, survivors)| {
+            let info = info.or_else(|| {
+                super::session_ops::RECENT_DESTROYED_SESSIONS
+                    .lock()
+                    .ok()
+                    .and_then(|mut m| m.remove(&session_path))
+            });
+            (info, survivors)
+        })
+        .unwrap_or((None, Vec::new()));
 
     // Delay removal so status notifications complete with the correct profile
     // name. The status_handler also schedules a 3s delayed removal on
@@ -330,14 +347,9 @@ fn handle_session_destroyed(
         let dbus_rebind = dbus.clone();
         let destroyed = session_path.clone();
         glib::spawn_future_local(async move {
-            let survivors = tray_clear
-                .update(|t| {
-                    t.sessions
-                        .iter()
-                        .map(|(p, s)| (p.clone(), s.status.is_connected(), s.kill_switch_active))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            // #6: use the survivor snapshot captured at destroy time, not a
+            // freshly re-read live one — see the comment at capture site above.
+            let survivors = survivors_at_destroy;
             match decide_kill_switch_teardown(&destroyed, auth_retry, survivors) {
                 KillSwitchTeardown::Full => {
                     full_killswitch_teardown(&tray_clear).await;
