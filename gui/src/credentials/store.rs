@@ -451,8 +451,14 @@ impl CredentialStore {
         // "forget this field" fully cleans up regardless of which scheme stored
         // the secret. Ordering: hashed first (the live scheme), raw path second
         // (legacy). A miss in either is a no-op.
-        delete_matching(&keyring, &config_id_key(config_id), key).await?;
-        delete_matching(&keyring, config_id, key).await?;
+        //
+        // Run both before propagating: a transient search error on the hashed
+        // form must not skip the raw-path delete and leave an orphan behind on
+        // an "uncheck Remember" (best-effort across both forms).
+        let hashed = delete_matching(&keyring, &config_id_key(config_id), key).await;
+        let raw = delete_matching(&keyring, config_id, key).await;
+        hashed?;
+        raw?;
 
         Ok(())
     }

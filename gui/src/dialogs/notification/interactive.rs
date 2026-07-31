@@ -240,6 +240,10 @@ async fn run_action_notification(
             // error must not kill the listener for a persistent toast.
             Err(e) => {
                 warn!("Interactive notification stream error: {e}");
+                // Backoff so a stream that keeps erroring can't busy-spin while
+                // we hold the toast open. 1s caps latency to the next genuine
+                // ActionInvoked/NotificationClosed.
+                glib::timeout_future_seconds(1).await;
                 continue;
             }
         };

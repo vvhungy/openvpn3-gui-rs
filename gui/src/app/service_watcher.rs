@@ -34,6 +34,10 @@ pub(crate) async fn watch_service_restart(
             StreamItem::Deliver(m) => m,
             StreamItem::SkipTransientError(e) => {
                 warn!("Service watcher stream error: {}", e);
+                // Avoid a busy-spin if the bus keeps yielding transient errors
+                // (a flapping connection). 1s caps the restart-detection latency
+                // and bounds CPU while the stream stays unhealthy.
+                glib::timeout_future_seconds(1).await;
                 continue;
             }
         };

@@ -19,6 +19,7 @@ pub(crate) fn is_storable_field(label: &str, mask: bool) -> bool {
     let lower = label.to_lowercase();
     let is_credential = lower.contains("username") || lower.contains("password") || mask;
     let is_single_use = lower.contains("one-time")
+        || lower.contains("one time")
         || lower.contains("otp")
         || lower.contains("code")
         || lower.contains("challenge");
@@ -70,6 +71,7 @@ mod tests {
         // even when masked, regardless of label casing.
         for label in [
             "One-Time Code",
+            "One Time Password",
             "OTP",
             "TOTP",
             "Two-Factor Code",
