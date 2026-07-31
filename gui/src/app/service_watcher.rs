@@ -29,7 +29,18 @@ pub(crate) async fn watch_service_restart(
     }
 
     let mut stream = MessageStream::from(dbus);
-    while let Some(Ok(msg)) = stream.next().await {
+    while let Some(res) = stream.next().await {
+        let msg = match classify_stream_item(res) {
+            StreamItem::Deliver(m) => m,
+            StreamItem::SkipTransientError(e) => {
+                warn!("Service watcher stream error: {}", e);
+                // Avoid a busy-spin if the bus keeps yielding transient errors
+                // (a flapping connection). 1s caps the restart-detection latency
+                // and bounds CPU while the stream stays unhealthy.
+                glib::timeout_future_seconds(1).await;
+                continue;
+            }
+        };
         let Some((name, old_owner, new_owner)) = parse_name_owner_changed(&msg) else {
             continue;
         };
@@ -39,6 +50,30 @@ pub(crate) async fn watch_service_restart(
         } else if is_service_lost(&name, OPENVPN3_SESSIONS_SERVICE, &old_owner, &new_owner) {
             handle_sessions_service_lost(tray).await;
         }
+    }
+}
+
+/// What the watcher loop should do with one item yielded by the message stream.
+#[derive(Debug)]
+enum StreamItem {
+    /// A decoded message to inspect for `NameOwnerChanged`.
+    Deliver(zbus::Message),
+    /// A transient stream error: log it and keep polling — never stop.
+    SkipTransientError(zbus::Error),
+}
+
+/// Classify one `MessageStream` item.
+///
+/// The point of this fn is the *absence* of a "stop watching" outcome. The loop
+/// used to be written `while let Some(Ok(msg)) = stream.next().await`, which
+/// treats the first `Err` as end-of-stream and silently kills the watcher for
+/// the rest of the process lifetime — after that, a sessionmgr crash never tears
+/// the kill-switch down and the firewall outlives the tunnel. Extracted so the
+/// no-terminal-error property is unit-assertable rather than only reviewable.
+fn classify_stream_item(item: Result<zbus::Message, zbus::Error>) -> StreamItem {
+    match item {
+        Ok(m) => StreamItem::Deliver(m),
+        Err(e) => StreamItem::SkipTransientError(e),
     }
 }
 
@@ -125,6 +160,17 @@ async fn handle_sessions_service_lost(tray: &ksni::blocking::Handle<VpnTray>) {
         t.sessions.clear();
         t.bypass_state = BypassState::Off;
     });
+
+    // The session manager is gone, so every cached "recently destroyed"
+    // session is dead too — drain the map rather than let it accumulate one
+    // entry per session ever connected across service restarts (#2, T4).
+    if let Ok(mut map) = crate::app::session_ops::RECENT_DESTROYED_SESSIONS.lock() {
+        map.clear();
+    }
+    // Every tracked notification `replaces_id` is now stale as well; drop them
+    // so a reconnect after restart doesn't try to replace a toast that no
+    // longer exists.
+    crate::dialogs::clear_notification_dedup();
 
     if had_sessions {
         crate::dialogs::show_killswitch_inactive_notification();
@@ -236,5 +282,31 @@ mod tests {
             ":1.42",
             ":1.43"
         ));
+    }
+
+    #[test]
+    fn stream_error_is_skipped_not_terminal() {
+        // #4: a transient stream error must not end the watcher. There is no
+        // "stop" variant to classify into, so a future edit reintroducing a
+        // terminal path has to change this enum and trip this test.
+        let item = classify_stream_item(Err(zbus::Error::InvalidReply));
+        assert!(matches!(item, StreamItem::SkipTransientError(_)));
+    }
+
+    #[test]
+    fn every_stream_item_outcome_keeps_watching() {
+        // Enumerate the taxonomy (CLAUDE.md §D-Bus: a classifier test asserts
+        // every variant). Both outcomes continue the loop — Deliver inspects the
+        // message, SkipTransientError logs and polls again.
+        for err in [
+            zbus::Error::InvalidReply,
+            zbus::Error::Unsupported,
+            zbus::Error::InvalidField,
+        ] {
+            match classify_stream_item(Err(err)) {
+                StreamItem::SkipTransientError(_) => {}
+                StreamItem::Deliver(_) => panic!("an Err must not be delivered as a message"),
+            }
+        }
     }
 }

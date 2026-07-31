@@ -1,6 +1,6 @@
 [package]
 name = "openvpn3-gui-rs"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["HungVV <vvhung@yahoo.com>"]
@@ -27,6 +27,13 @@ ksni = { version = "0.3", features = ["blocking"] }
 
 # Secret storage (oo7 is the modern Rust secret-service crate)
 oo7 = "0.4"
+
+# One-way hash of the config D-Bus path for the keyring `config-id` attribute,
+# so the (unencrypted, searchable) attribute leaks no path metadata.
+sha2 = "0.10"
+
+# Best-effort zeroization of credential strings held in memory after submit.
+zeroize = { version = "1", features = ["alloc"] }
 
 # Logging
 tracing = "0.1"

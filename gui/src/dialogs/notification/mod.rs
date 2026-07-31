@@ -9,6 +9,13 @@ mod dedup;
 mod interactive;
 mod killswitch;
 
+/// Drop every tracked notification `replaces_id`. Exposed so the session
+/// lifecycle can prune the dedup map when the sessions service vanishes
+/// permanently (#2, T4) — at that point every toast it tracked is stale.
+pub(crate) fn clear_notification_dedup() {
+    dedup::clear_all();
+}
+
 pub use bypass::{
     show_bypass_active_notification, show_bypass_drift_notification,
     show_bypass_failed_notification, show_bypass_partial_notification,

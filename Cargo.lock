@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "openvpn3-gui-rs"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1511,15 +1511,17 @@ dependencies = [
  "ksni",
  "libadwaita",
  "oo7",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]
 name = "openvpn3-killswitch-helper"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "futures",

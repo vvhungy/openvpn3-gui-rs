@@ -2,7 +2,10 @@
 //!
 //! Both reconnect and first-run help follow the same pattern: subscribe to
 //! `ActionInvoked`/`NotificationClosed`, dispatch on user action, exit on
-//! daemon close.
+//! daemon close. A terminal user action (Reconnect/Dismiss) also closes the
+//! toast explicitly (#11) — a critical-urgency toast would otherwise persist —
+//! and every `AddMatch` is paired with a `RemoveMatch` at teardown (#12) so the
+//! bus match-rule count stays flat across reconnect cycles.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -73,6 +76,52 @@ async fn subscribe_to_notification_signals(conn: &zbus::Connection) -> anyhow::R
         .await?;
     }
     Ok(())
+}
+
+/// Remove the `ActionInvoked` + `NotificationClosed` match rules added by
+/// [`subscribe_to_notification_signals`]. Pairs every `AddMatch` with a
+/// `RemoveMatch` (#12): the log viewer does this explicitly at teardown
+/// (`logs/mod.rs:379-388`), and doing it here — rather than relying on the
+/// connection dropping — keeps the bus match-rule count stable across many
+/// reconnect cycles even if a future change extends the connection's lifetime.
+/// Best-effort: a failed remove is logged, never fatal.
+async fn unsubscribe_notification_signals(conn: &zbus::Connection) {
+    for member in &["ActionInvoked", "NotificationClosed"] {
+        if let Err(e) = conn
+            .call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "RemoveMatch",
+                &format!(
+                    "type='signal',interface='org.freedesktop.Notifications',member='{}'",
+                    member
+                ),
+            )
+            .await
+        {
+            warn!("Failed to remove match rule for {member}: {e}");
+        }
+    }
+}
+
+/// Ask the notification daemon to close `notification_id` (#11). Best-effort:
+/// a persistent (never-expire) toast stays on screen after a terminal user
+/// action (Reconnect/Dismiss) unless we explicitly dismiss it — the action
+/// handler only tells *us* to stop listening, it does not close the toast.
+async fn close_notification(conn: &zbus::Connection, notification_id: u32) {
+    if let Err(e) = conn
+        .call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "CloseNotification",
+            &notification_id,
+        )
+        .await
+    {
+        warn!("Failed to close notification {notification_id}: {e}");
+    }
 }
 
 /// Handle one `ActionInvoked` key for the reconnect dialog.
@@ -180,10 +229,28 @@ async fn run_action_notification(
     }
 
     let mut stream = zbus::MessageStream::from(&conn);
-    while let Some(Ok(msg)) = stream.next().await {
+    // `terminal_action` distinguishes "we broke because the user picked
+    // Reconnect/Dismiss" (toast still on screen → close it, #11) from "we broke
+    // because the daemon closed the toast" (nothing to close).
+    let mut terminal_action = false;
+    while let Some(res) = stream.next().await {
+        let msg = match res {
+            Ok(m) => m,
+            // Mirror the service-watcher resilience (T2 #4): a transient stream
+            // error must not kill the listener for a persistent toast.
+            Err(e) => {
+                warn!("Interactive notification stream error: {e}");
+                // Backoff so a stream that keeps erroring can't busy-spin while
+                // we hold the toast open. 1s caps latency to the next genuine
+                // ActionInvoked/NotificationClosed.
+                glib::timeout_future_seconds(1).await;
+                continue;
+            }
+        };
         match classify_notification_signal(&msg, notification_id) {
             Some(NotifSignal::Action(action_key)) => {
                 if on_action(action_key).await {
+                    terminal_action = true;
                     break;
                 }
             }
@@ -191,6 +258,15 @@ async fn run_action_notification(
             None => {}
         }
     }
+
+    if terminal_action {
+        // #11: a critical-urgency toast persists until explicitly closed; the
+        // action handler only signals us, it does not dismiss the toast.
+        close_notification(&conn, notification_id).await;
+    }
+    // #12: pair every AddMatch with a RemoveMatch so the bus match-rule count
+    // stays flat across reconnect cycles.
+    unsubscribe_notification_signals(&conn).await;
 
     Ok(())
 }

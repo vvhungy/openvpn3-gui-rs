@@ -57,6 +57,20 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.5" date="2026-07-31">
+      <description>
+        <p>Patch release of hardening from a whole-source review: a client-side trust-boundary fix, kill-switch lifecycle resilience, credential + keyring hygiene, memory bounds, and main-loop responsiveness. No behaviour-visible API change.</p>
+        <ul>
+          <li>Security: the browser-authentication URI sent by the VPN server is now scheme-checked before being opened; only http/https reach the default handler, so a malicious server can no longer open a file://, javascript:, or custom-handler URI on the client.</li>
+          <li>Kill-switch: pausing one tunnel no longer strips firewall protection from other still-connected tunnels; the service-watcher and session-lifecycle signal loops no longer die permanently on a transient D-Bus stream error or a session-manager restart.</li>
+          <li>Credential hygiene: one-time / OTP / challenge values are never persisted to the keyring; the config D-Bus path is stored as a one-way hash in the keyring attribute so a keyring-file leak reveals no config metadata; entry buffers are cleared after submit.</li>
+          <li>Memory: per-tab log viewers are now capped (RSS no longer climbs in a verbose session); the timeout, recently-destroyed-session, and notification-dedup maps are pruned.</li>
+          <li>Responsiveness: config import and --clear-secret-storage no longer block the GTK main loop / freeze the window on a slow filesystem or a locked secret service.</li>
+          <li>Notifications: a persistent toast now closes on Reconnect/Dismiss; match rules are removed at teardown; rapid same-key notifications replace instead of stacking duplicates.</li>
+          <li>Defense-in-depth: exported logs are written 0600; peer-controlled labels are control-char-sanitized before logging; auth-retry has a global cap across config paths; duplicate-import dedup uses canonical paths.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.4" date="2026-07-28">
       <description>
         <p>Patch release fixing two notification-toast bugs on the state-change path, plus doc-accuracy cleanup.</p>

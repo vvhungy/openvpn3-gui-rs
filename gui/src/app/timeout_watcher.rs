@@ -59,5 +59,17 @@ pub(super) fn spawn_timeout_watcher(tray: &ksni::blocking::Handle<VpnTray>, path
                 ),
             );
         }
+        // Drain: this watcher was the current generation and has now fired, so
+        // its entry is stale — a later Connecting transition re-spawns a fresh
+        // watcher. Without this, TIMEOUT_GEN grew one entry per session ever
+        // connected (#2, T4).
+        TIMEOUT_GEN.with(|tg| tg.borrow_mut().remove(&path));
     });
+}
+
+/// Drop the timeout-generation entry for a session. Called when a session is
+/// destroyed — its watcher (if any) can no longer be current, so keeping the
+/// entry leaks one slot per dead session (#2, T4).
+pub(super) fn remove_timeout_gen(path: &str) {
+    TIMEOUT_GEN.with(|tg| tg.borrow_mut().remove(path));
 }

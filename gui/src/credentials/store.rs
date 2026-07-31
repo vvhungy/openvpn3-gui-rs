@@ -3,10 +3,26 @@
 //! Provides secure storage for VPN credentials using the freedesktop Secret Service API.
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 /// Application identifier for the secret collection
 const APP_ID: &str = "net.openvpn.openvpn3-gui-rs";
+
+/// One-way keyring attribute for a config's unique D-Bus object path.
+///
+/// Secret Service stores attributes **unencrypted** — they index the collection
+/// so callers can search without unlocking it. A raw object path here would
+/// therefore leak which configs are stored and which fields each has to anyone
+/// who can read the keyring file (backup leak, lost laptop). A SHA-256 digest
+/// keeps the value unique and searchable without revealing the path.
+///
+/// `v1:` prefix lets a future scheme change detect the encoding. Pure — the
+/// attribute contract + collision behaviour is unit-tested.
+fn config_id_key(config_path: &str) -> String {
+    let digest = Sha256::digest(config_path.as_bytes());
+    format!("v1:{digest:x}")
+}
 
 /// Classify whether a credential error means "the keyring is locked (or
 /// the user declined the unlock prompt, so it stayed locked)".
@@ -71,7 +87,9 @@ pub(crate) async fn ensure_unlocked(keyring: &oo7::Keyring) -> Result<()> {
 fn search_attrs_for_config(config_id: &str) -> std::collections::HashMap<&str, String> {
     let mut attributes = std::collections::HashMap::new();
     attributes.insert("application", APP_ID.to_string());
-    attributes.insert("config-id", config_id.to_string());
+    // Hashed so the unencrypted attribute reveals no path (#3); uniqueness is
+    // preserved because the hash is deterministic on the unique D-Bus path.
+    attributes.insert("config-id", config_id_key(config_id));
     attributes
 }
 
@@ -90,6 +108,52 @@ fn legacy_search_attrs(
     attributes.insert("config-id", config_name.to_string());
     attributes.insert("key", key.to_string());
     attributes
+}
+
+/// Read the first secret matching `application` + `config-id` + `key`.
+///
+/// `config_id_attr` is already the value to store under `config-id` — callers
+/// pass [`config_id_key`] for the hashed scheme or the raw path for the
+/// pre-0.4.5 backward-compat probe. Returns `Ok(None)` on a clean miss.
+/// Factored so the read path can try both key forms without duplicating the
+/// decode chain.
+async fn read_secret_for(
+    keyring: &oo7::Keyring,
+    config_id_attr: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    let attributes = legacy_search_attrs(config_id_attr, key);
+    // `legacy_search_attrs` builds the exact `application + config-id + key`
+    // triple we need; it is named for its original caller but is a generic
+    // three-field attribute map, so reuse it here rather than duplicate.
+    let items = keyring
+        .search_items(&attributes)
+        .await
+        .context("Failed to search for credential")?;
+    if let Some(item) = items.first() {
+        let secret = item.secret().await.context("Failed to retrieve secret")?;
+        let password = String::from_utf8(secret.to_vec()).context("Invalid UTF-8 in secret")?;
+        Ok(Some(password))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Delete every item matching `application` + `config-id` + `key`.
+///
+/// Like [`read_secret_for`], `config_id_attr` is the resolved attribute value
+/// (hashed or raw path). Best-effort across matched items: each delete is
+/// reported independently so one failure doesn't mask the rest.
+async fn delete_matching(keyring: &oo7::Keyring, config_id_attr: &str, key: &str) -> Result<()> {
+    let attributes = legacy_search_attrs(config_id_attr, key);
+    let items = keyring
+        .search_items(&attributes)
+        .await
+        .context("Failed to search for credential")?;
+    for item in items {
+        item.delete().await.context("Failed to delete credential")?;
+    }
+    Ok(())
 }
 
 /// One-time migration of a single secret from the legacy name-keyed scheme to
@@ -159,9 +223,15 @@ async fn migrate_legacy_secret(
     // create fails, the old secret survives.
     let mut new_attrs = search_attrs_for_config(config_id);
     new_attrs.insert("key", key.to_string());
-    let label = format!("OpenVPN3 GUI: {} - {}", config_id, key);
+    // Generic label (#3): re-storing under the hashed path key must not re-leak
+    // the path in the human-facing label.
     if let Err(e) = keyring
-        .create_item(&label, &new_attrs, password.as_bytes(), true)
+        .create_item(
+            "OpenVPN3 GUI credential",
+            &new_attrs,
+            password.as_bytes(),
+            true,
+        )
         .await
     {
         warn!("Legacy credential migration: re-store failed for '{config_id}/{key}': {e}");
@@ -186,11 +256,6 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
-    /// Create a new CredentialStore instance
-    pub fn new() -> Result<Self> {
-        Ok(Self {})
-    }
-
     /// Create a new CredentialStore instance (sync wrapper)
     pub fn new_sync() -> Self {
         Self {}
@@ -231,25 +296,21 @@ impl CredentialStore {
         legacy_config_name: &str,
         key: &str,
     ) -> Result<Option<String>> {
-        use std::collections::HashMap;
-
-        let mut attributes = HashMap::new();
-        attributes.insert("application", APP_ID);
-        attributes.insert("config-id", config_id);
-        attributes.insert("key", key);
-
-        let items = keyring
-            .search_items(&attributes)
-            .await
-            .context("Failed to search for credential")?;
-
-        if let Some(item) = items.first() {
-            let secret = item.secret().await.context("Failed to retrieve secret")?;
-            let password = String::from_utf8(secret.to_vec()).context("Invalid UTF-8 in secret")?;
-            return Ok(Some(password));
+        // Try the hashed config-id first (post-0.4.5 scheme, #3): the unencrypted
+        // attribute reveals no path, while the deterministic hash keeps the
+        // value unique and searchable.
+        if let Some(val) = read_secret_for(keyring, &config_id_key(config_id), key).await? {
+            return Ok(Some(val));
         }
 
-        // Miss under the path key — try migrating from the legacy name-keyed
+        // Backward-compat: pre-0.4.5 stored the raw path as `config-id`. A
+        // transparent re-read keeps an upgrade from blanking saved credentials;
+        // the old entry lingers until the user re-saves (documented limitation).
+        if let Some(val) = read_secret_for(keyring, config_id, key).await? {
+            return Ok(Some(val));
+        }
+
+        // Miss under both path keys — try migrating from the legacy name-keyed
         // scheme before reporting absence.
         migrate_legacy_secret(keyring, config_id, legacy_config_name, key).await
     }
@@ -270,14 +331,17 @@ impl CredentialStore {
         ensure_unlocked(&keyring).await?;
 
         let mut attributes = HashMap::new();
-        attributes.insert("application", APP_ID);
-        attributes.insert("config-id", config_id);
-        attributes.insert("key", key);
+        attributes.insert("application", APP_ID.to_string());
+        // Hashed config-id (#3): the unencrypted attribute reveals no path. The
+        // label is path-agnostic for the same reason — a human-facing label
+        // would re-leak what the hash hides.
+        attributes.insert("config-id", config_id_key(config_id));
+        attributes.insert("key", key.to_string());
 
-        let label = format!("OpenVPN3 GUI: {} - {}", config_id, key);
+        let label = "OpenVPN3 GUI credential";
 
         keyring
-            .create_item(&label, &attributes, value.as_bytes(), true)
+            .create_item(label, &attributes, value.as_bytes(), true)
             .await
             .context("Failed to store credential")?;
 
@@ -344,11 +408,23 @@ impl CredentialStore {
         // credential_handler::request_credentials.
         ensure_unlocked(&keyring).await?;
 
-        let attributes = search_attrs_for_config(config_id);
-        let items = keyring
-            .search_items(&attributes)
+        // Match both the hashed (#3) and pre-0.4.5 raw-path entries so removing
+        // a config wipes its secrets regardless of which scheme stored them.
+        let hashed_attrs = search_attrs_for_config(config_id);
+        let mut items = keyring
+            .search_items(&hashed_attrs)
             .await
             .context("Failed to search for credentials")?;
+
+        let mut raw_attrs = std::collections::HashMap::new();
+        raw_attrs.insert("application", APP_ID.to_string());
+        raw_attrs.insert("config-id", config_id.to_string());
+        items.extend(
+            keyring
+                .search_items(&raw_attrs)
+                .await
+                .context("Failed to search for legacy credentials")?,
+        );
 
         let count = items.len();
         for item in items {
@@ -361,7 +437,6 @@ impl CredentialStore {
     /// Delete a credential asynchronously
     pub async fn delete_async(&self, config_id: &str, key: &str) -> Result<()> {
         use oo7::Keyring;
-        use std::collections::HashMap;
 
         let keyring = Keyring::new().await.context("Failed to open keyring")?;
 
@@ -372,19 +447,18 @@ impl CredentialStore {
         // file backend.
         ensure_unlocked(&keyring).await?;
 
-        let mut attributes = HashMap::new();
-        attributes.insert("application", APP_ID);
-        attributes.insert("config-id", config_id);
-        attributes.insert("key", key);
-
-        let items = keyring
-            .search_items(&attributes)
-            .await
-            .context("Failed to search for credential")?;
-
-        for item in items {
-            item.delete().await.context("Failed to delete credential")?;
-        }
+        // Delete both the hashed (#3) and the pre-0.4.5 raw-path entries, so a
+        // "forget this field" fully cleans up regardless of which scheme stored
+        // the secret. Ordering: hashed first (the live scheme), raw path second
+        // (legacy). A miss in either is a no-op.
+        //
+        // Run both before propagating: a transient search error on the hashed
+        // form must not skip the raw-path delete and leave an orphan behind on
+        // an "uncheck Remember" (best-effort across both forms).
+        let hashed = delete_matching(&keyring, &config_id_key(config_id), key).await;
+        let raw = delete_matching(&keyring, config_id, key).await;
+        hashed?;
+        raw?;
 
         Ok(())
     }
@@ -395,11 +469,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_succeeds() {
-        assert!(CredentialStore::new().is_ok());
-    }
-
-    #[test]
     fn test_default_creates_instance() {
         let _store = CredentialStore::default();
     }
@@ -408,11 +477,21 @@ mod tests {
     fn search_attrs_for_config_includes_config_id_not_key() {
         // The per-config delete must scope by config-id but NOT key, so removing
         // a config wipes all its stored labels (username + password + OTP), not
-        // just one. This pins the contract: include application + config-id,
-        // exclude key.
+        // just one. This pins the contract: include application + config-id
+        // (hashed, #3), exclude key.
         let attrs = search_attrs_for_config("work-vpn");
         assert_eq!(attrs.get("application").map(|s| s.as_str()), Some(APP_ID));
-        assert_eq!(attrs.get("config-id").map(|s| s.as_str()), Some("work-vpn"));
+        assert_eq!(
+            attrs.get("config-id").map(|s| s.as_str()),
+            Some(config_id_key("work-vpn").as_str()),
+            "config-id must be the hashed path, not the raw path (#3)"
+        );
+        // The hash must NOT equal the raw path — that's the whole point.
+        assert_ne!(
+            attrs.get("config-id").map(|s| s.as_str()),
+            Some("work-vpn"),
+            "the raw path must not appear verbatim in the unencrypted attribute"
+        );
         assert!(
             !attrs.contains_key("key"),
             "per-config delete must NOT include the `key` attribute, or it would only match one field"
@@ -421,6 +500,61 @@ mod tests {
             attrs.len(),
             2,
             "exactly application + config-id, nothing else"
+        );
+    }
+
+    // --- config_id_key (#3) ---
+
+    #[test]
+    fn config_id_key_is_deterministic_and_path_specific() {
+        // Same path → same digest (searchability depends on this).
+        assert_eq!(
+            config_id_key("/net/openvpn/v3/configuration/cfg/1"),
+            config_id_key("/net/openvpn/v3/configuration/cfg/1")
+        );
+        // Different paths → different digests (config isolation).
+        assert_ne!(
+            config_id_key("/net/openvpn/v3/configuration/cfg/1"),
+            config_id_key("/net/openvpn/v3/configuration/cfg/2")
+        );
+    }
+
+    #[test]
+    fn config_id_key_hides_the_raw_path() {
+        // The attribute is stored unencrypted for searchability, so it must not
+        // contain the path or any recognizable fragment of it.
+        let path = "/net/openvpn/v3/configuration/cfg/1";
+        let key = config_id_key(path);
+        assert!(
+            !key.contains(path),
+            "hashed config-id must not embed the raw path"
+        );
+        assert!(
+            !key.contains("openvpn") && !key.contains("configuration"),
+            "hashed config-id must not leak recognizable path tokens"
+        );
+        assert!(
+            key.starts_with("v1:"),
+            "version prefix must tag the encoding scheme for future migrations"
+        );
+        // Same-named configs on different paths must collide-proof (the #2 fix
+        // invariant survives hashing): distinct paths stay distinct even if the
+        // trailing path segment is identical.
+        assert_ne!(config_id_key("/a/cfg/1"), config_id_key("/b/cfg/1"));
+    }
+
+    #[test]
+    fn config_id_key_is_one_way() {
+        // Not a real inversion test (can't prove a negative over all inputs),
+        // but pin the digest shape: 64 hex chars after the v1: prefix, so a
+        // future regression to a reversible encoding (e.g. base64 of the path)
+        // changes the length/charset and trips this.
+        let key = config_id_key("/net/openvpn/v3/configuration/cfg/1");
+        let digest = key.strip_prefix("v1:").unwrap_or(&key);
+        assert_eq!(digest.len(), 64, "expected SHA-256 hex (64 chars)");
+        assert!(
+            digest.chars().all(|c| c.is_ascii_hexdigit()),
+            "digest must be lowercase hex"
         );
     }
 

@@ -5,7 +5,9 @@
 //! Challenge/OTP is now handled by the credentials dialog (always shows 3
 //! fields) rather than a separate single-field dialog.
 //!
-//! No testable pure surface — async dispatch with no branching logic to unit test.
+//! The only pure surface is [`classify_auth_uri`], which gates the
+//! server-controlled browser-auth URI before it reaches the default handler;
+//! the dispatch fns themselves are async with no branching logic to unit test.
 
 use tracing::{info, warn};
 
@@ -90,22 +92,126 @@ fn handle_credentials_required(
     });
 }
 
+/// Outcome of validating the server-supplied browser-authentication URI.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum AuthUriVerdict {
+    /// No URI supplied — show the generic "finish in your browser" prompt.
+    Empty,
+    /// An `http`/`https` URI, safe to hand to the default handler.
+    Launchable,
+    /// Anything else — render as inert text, never launch.
+    Blocked,
+}
+
+/// Classify the server-controlled "URL" `StatusChange` message.
+///
+/// The VPN server controls this string, so launching it unconditionally would
+/// let a malicious server make the client's `xdg-open` execute `file://`,
+/// `javascript:`, or a custom-handler URI. Only `http`/`https` reach the
+/// default handler; everything else (including a scheme-less string) is
+/// treated as untrusted text.
+pub(super) fn classify_auth_uri(message: &str) -> AuthUriVerdict {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return AuthUriVerdict::Empty;
+    }
+    match glib::Uri::peek_scheme(trimmed) {
+        Some(scheme) if matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") => {
+            AuthUriVerdict::Launchable
+        }
+        _ => AuthUriVerdict::Blocked,
+    }
+}
+
 fn handle_url_auth_required(tray: &ksni::blocking::Handle<VpnTray>, path: &str, message: &str) {
     info!("Session requires browser authentication");
-    let url = message.to_string();
+    let url = message.trim().to_string();
     let (config_name, _config_path) = crate::tray::session_config_identity(tray, path);
-    let notif_body = if url.is_empty() {
-        "Please complete authentication in your browser.".to_string()
-    } else {
-        format!("Opening browser for authentication:\n{}", url)
+    let verdict = classify_auth_uri(&url);
+    let notif_body = match verdict {
+        AuthUriVerdict::Empty => "Please complete authentication in your browser.".to_string(),
+        AuthUriVerdict::Launchable => format!("Opening browser for authentication:\n{}", url),
+        // Show the address so the user can act on it, but as inert text only.
+        AuthUriVerdict::Blocked => format!(
+            "The VPN server sent an authentication address that is not a web link, so it was not opened:\n{}",
+            url
+        ),
     };
     crate::dialogs::show_info_notification(
         &format!("{}: Browser Authentication Required", config_name),
         &notif_body,
     );
-    if !url.is_empty()
-        && let Err(e) = gio::AppInfo::launch_default_for_uri(&url, None::<&gio::AppLaunchContext>)
-    {
-        warn!("Failed to open auth URL in browser: {}", e);
+    match verdict {
+        AuthUriVerdict::Launchable => {
+            if let Err(e) =
+                gio::AppInfo::launch_default_for_uri(&url, None::<&gio::AppLaunchContext>)
+            {
+                warn!("Failed to open auth URL in browser: {}", e);
+            }
+        }
+        // `escape_debug` keeps a newline-bearing server string from forging log lines.
+        AuthUriVerdict::Blocked => warn!(
+            "Refusing to launch non-http(s) auth URI for {}: {}",
+            path,
+            url.escape_debug()
+        ),
+        AuthUriVerdict::Empty => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthUriVerdict, classify_auth_uri};
+
+    #[test]
+    fn auth_uri_allows_http_and_https() {
+        assert_eq!(
+            classify_auth_uri("https://vpn.example.com/auth?token=abc"),
+            AuthUriVerdict::Launchable
+        );
+        assert_eq!(
+            classify_auth_uri("http://vpn.example.com/auth"),
+            AuthUriVerdict::Launchable
+        );
+        // Scheme comparison is case-insensitive per RFC 3986.
+        assert_eq!(
+            classify_auth_uri("HTTPS://vpn.example.com/auth"),
+            AuthUriVerdict::Launchable
+        );
+        // Surrounding whitespace from the D-Bus message must not defeat the check.
+        assert_eq!(
+            classify_auth_uri("  https://vpn.example.com/auth\n"),
+            AuthUriVerdict::Launchable
+        );
+    }
+
+    #[test]
+    fn auth_uri_blocks_dangerous_schemes() {
+        for hostile in [
+            "file:///etc/passwd",
+            "file://~/.ssh/id_rsa",
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "smb://attacker/share",
+            "ms-msdt:/id",
+            "vnc://attacker:5900",
+            "ssh://attacker",
+            // Scheme-less strings would be resolved as a relative path.
+            "vpn.example.com/auth",
+            "/etc/passwd",
+        ] {
+            assert_eq!(
+                classify_auth_uri(hostile),
+                AuthUriVerdict::Blocked,
+                "{hostile} must not be launched"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_uri_empty_message_is_generic_prompt() {
+        assert_eq!(classify_auth_uri(""), AuthUriVerdict::Empty);
+        assert_eq!(classify_auth_uri("   \n"), AuthUriVerdict::Empty);
     }
 }

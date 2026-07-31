@@ -86,48 +86,111 @@ pub(crate) async fn setup_signal_handlers(
         .await?;
 
     // --- SessionManagerEvent (session created / destroyed) ---
-    let mut session_events = session_manager.receive_SessionManagerEvent().await?;
+    // Subscribe once up front so a dead sessionmgr surfaces as a startup error
+    // rather than a silently missing watcher; the spawned loop re-subscribes on
+    // its own after that.
+    let session_events = session_manager.receive_SessionManagerEvent().await?;
     let tray_for_session = tray.clone();
     let action_tx_for_session = action_tx.clone();
     let dbus_for_session = dbus.clone();
     glib::spawn_future_local(async move {
-        while let Some(signal) = session_events.next().await {
-            match signal.args() {
-                Ok(args) => {
-                    let event_type = args.event_type;
-                    let session_path = args.session_path.as_str().to_string();
-                    info!(
-                        "SessionManagerEvent: type={}, path={}",
-                        event_type, session_path
-                    );
-
-                    if event_type == SessionManagerEventType::SessCreated as u16 {
-                        let dbus = dbus_for_session.clone();
-                        let tray = tray_for_session.clone();
-                        glib::spawn_future_local(async move {
-                            if let Err(e) =
-                                handle_session_created(&dbus, &tray, &session_path).await
-                            {
-                                warn!("SessCreated handler error for {}: {}", session_path, e);
-                            }
-                        });
-                    } else if event_type == SessionManagerEventType::SessDestroyed as u16 {
-                        handle_session_destroyed(
-                            &dbus_for_session,
-                            &tray_for_session,
-                            &action_tx_for_session,
-                            session_path,
-                        );
-                    }
-                }
-                Err(e) => warn!("Failed to parse SessionManagerEvent: {}", e),
-            }
-        }
+        watch_session_manager_events(
+            session_manager,
+            session_events,
+            dbus_for_session,
+            tray_for_session,
+            action_tx_for_session,
+        )
+        .await;
     });
 
     super::status_handler::setup_status_handler(dbus, &tray).await?;
 
     Ok(())
+}
+
+/// Drain `SessionManagerEvent` forever, re-subscribing whenever the stream ends.
+///
+/// The stream terminates when sessionmgr exits or the bus drops the match rule.
+/// Draining it once and returning left the app blind to every later
+/// SessCreated/SessDestroyed for the rest of the process lifetime: destroyed
+/// sessions stayed in the tray and their kill-switch rules were never released.
+/// Re-arm instead, with exponential backoff (capped at 30s) so a permanently
+/// absent service doesn't spin.
+///
+/// `initial` is the subscription taken by the caller, so a dead sessionmgr fails
+/// startup loudly instead of only appearing in this loop's logs.
+/// Impure (D-Bus + spawned futures); no unit-test surface.
+async fn watch_session_manager_events(
+    session_manager: SessionManagerProxy<'static>,
+    initial: crate::dbus::session::SessionManagerEventStream,
+    dbus: zbus::Connection,
+    tray: ksni::blocking::Handle<VpnTray>,
+    action_tx: crate::tray::ActionSender,
+) {
+    let mut pending = Some(initial);
+    let mut backoff_secs = 1u32;
+    loop {
+        let mut stream = match pending.take() {
+            Some(s) => s,
+            None => match session_manager.receive_SessionManagerEvent().await {
+                Ok(s) => {
+                    info!("Re-subscribed to SessionManagerEvent");
+                    backoff_secs = 1;
+                    s
+                }
+                Err(e) => {
+                    warn!(
+                        "Re-subscribe to SessionManagerEvent failed: {}; retrying in {}s",
+                        e, backoff_secs
+                    );
+                    glib::timeout_future_seconds(backoff_secs).await;
+                    backoff_secs = (backoff_secs * 2).min(30);
+                    continue;
+                }
+            },
+        };
+        while let Some(signal) = stream.next().await {
+            match signal.args() {
+                Ok(args) => dispatch_session_manager_event(
+                    &dbus,
+                    &tray,
+                    &action_tx,
+                    args.event_type,
+                    args.session_path.as_str().to_string(),
+                ),
+                Err(e) => warn!("Failed to parse SessionManagerEvent: {}", e),
+            }
+        }
+        warn!("SessionManagerEvent stream ended; re-subscribing");
+        glib::timeout_future_seconds(backoff_secs).await;
+    }
+}
+
+/// Route one decoded `SessionManagerEvent` to its lifecycle handler.
+/// Impure (spawned futures, tray mutation); no unit-test surface.
+fn dispatch_session_manager_event(
+    dbus: &zbus::Connection,
+    tray: &ksni::blocking::Handle<VpnTray>,
+    action_tx: &crate::tray::ActionSender,
+    event_type: u16,
+    session_path: String,
+) {
+    info!(
+        "SessionManagerEvent: type={}, path={}",
+        event_type, session_path
+    );
+    if event_type == SessionManagerEventType::SessCreated as u16 {
+        let dbus = dbus.clone();
+        let tray = tray.clone();
+        glib::spawn_future_local(async move {
+            if let Err(e) = handle_session_created(&dbus, &tray, &session_path).await {
+                warn!("SessCreated handler error for {}: {}", session_path, e);
+            }
+        });
+    } else if event_type == SessionManagerEventType::SessDestroyed as u16 {
+        handle_session_destroyed(dbus, tray, action_tx, session_path);
+    }
 }
 
 /// What the kill-switch teardown path should do when a protected session is
@@ -204,24 +267,46 @@ fn handle_session_destroyed(
     action_tx: &crate::tray::ActionSender,
     session_path: String,
 ) {
-    // Capture config info before removing from tray. Fall back to
-    // RECENT_DESTROYED_SESSIONS — status_handler removes the entry from
-    // tray.sessions 3s after Disconnected, but SessDestroyed can arrive
-    // several seconds later (~9s in the resume-after-long-pause path), so
-    // without this cache the reconnect notification silently fails to fire.
-    let session_info = tray
+    // The session is gone — its connection-timeout watcher (if any) can no
+    // longer be current, so drop the generation entry rather than let
+    // TIMEOUT_GEN leak one slot per dead session (#2, T4).
+    super::timeout_watcher::remove_timeout_gen(&session_path);
+
+    // Capture config info + the survivor snapshot BEFORE removing from tray or
+    // spawning async teardown (#6). Fall back to RECENT_DESTROYED_SESSIONS —
+    // status_handler removes the entry from tray.sessions 3s after Disconnected,
+    // but SessDestroyed can arrive several seconds later (~9s in the
+    // resume-after-long-pause path), so without this cache the reconnect
+    // notification silently fails to fire.
+    //
+    // The survivor snapshot is taken here (synchronously, at destroy time) — not
+    // inside the spawned teardown future — so the kill-switch decision reflects
+    // the exact state when the session died, immune to the 5s delayed removal
+    // racing the teardown (a survivor could be torn down or change state in the
+    // gap between scheduling the teardown and the future's first poll).
+    let (session_info, survivors_at_destroy) = tray
         .update(|t| {
-            t.sessions
+            let info = t
+                .sessions
                 .get(&session_path)
-                .map(|s| (s.config_path.clone(), s.config_name.clone()))
+                .map(|s| (s.config_path.clone(), s.config_name.clone()));
+            let survivors = t
+                .sessions
+                .iter()
+                .map(|(p, s)| (p.clone(), s.status.is_connected(), s.kill_switch_active))
+                .collect::<Vec<_>>();
+            (info, survivors)
         })
-        .flatten()
-        .or_else(|| {
-            super::session_ops::RECENT_DESTROYED_SESSIONS
-                .lock()
-                .ok()
-                .and_then(|mut m| m.remove(&session_path))
-        });
+        .map(|(info, survivors)| {
+            let info = info.or_else(|| {
+                super::session_ops::RECENT_DESTROYED_SESSIONS
+                    .lock()
+                    .ok()
+                    .and_then(|mut m| m.remove(&session_path))
+            });
+            (info, survivors)
+        })
+        .unwrap_or((None, Vec::new()));
 
     // Delay removal so status notifications complete with the correct profile
     // name. The status_handler also schedules a 3s delayed removal on
@@ -262,14 +347,9 @@ fn handle_session_destroyed(
         let dbus_rebind = dbus.clone();
         let destroyed = session_path.clone();
         glib::spawn_future_local(async move {
-            let survivors = tray_clear
-                .update(|t| {
-                    t.sessions
-                        .iter()
-                        .map(|(p, s)| (p.clone(), s.status.is_connected(), s.kill_switch_active))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            // #6: use the survivor snapshot captured at destroy time, not a
+            // freshly re-read live one — see the comment at capture site above.
+            let survivors = survivors_at_destroy;
             match decide_kill_switch_teardown(&destroyed, auth_retry, survivors) {
                 KillSwitchTeardown::Full => {
                     full_killswitch_teardown(&tray_clear).await;

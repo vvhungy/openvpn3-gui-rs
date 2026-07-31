@@ -4,6 +4,8 @@
 //! construction. Self-contained: depends only on the pure `format_export`
 //! formatter in `format` and `crate::app::log_buffer::LogEntry`.
 
+use std::os::unix::fs::OpenOptionsExt;
+
 use gtk4::prelude::*;
 use gtk4::{FileChooserAction, FileChooserDialog, ResponseType};
 
@@ -43,7 +45,17 @@ pub(super) fn show_export_dialog(
             && let Some(path) = file.path()
         {
             let text = format_export(&entries, &config_name, chrono::Local::now());
-            match std::fs::write(&path, text) {
+            // #10: write 0600, not umask (~0644). Exported logs carry VPN
+            // metadata (server names, timestamps, connection errors); on a
+            // shared host a world-readable file leaks that to other users.
+            let write_result = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+            match write_result {
                 Ok(()) => tracing::info!("Exported logs to {:?}", path),
                 Err(e) => {
                     tracing::warn!("Log export to {:?} failed: {}", path, e);

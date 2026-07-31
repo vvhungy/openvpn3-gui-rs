@@ -259,11 +259,14 @@ pub(super) async fn setup_status_handler(
                         killswitch_glue::on_connected(&conn, &path, &tray_for_status);
                     }
 
-                    // Kill-switch: remove rules on Pause unless user chose
-                    // block-during-pause.  Resume needs no explicit code —
-                    // the ConnConnected transition re-fires apply_kill_switch.
+                    // Kill-switch: release rules on Pause unless the user chose
+                    // block-during-pause — and only as far as the *other*
+                    // sessions allow (a connected+protected survivor keeps the
+                    // firewall up, rebound to it). Resume needs no explicit
+                    // code — the ConnConnected transition re-fires
+                    // apply_kill_switch.
                     if status.is_paused() {
-                        killswitch_glue::on_paused(&tray_for_status);
+                        killswitch_glue::on_paused(&conn, &path, &tray_for_status);
                     }
 
                     // Update tray session state (connected_at, new sessions).

@@ -75,16 +75,50 @@ fn pixbuf_to_icon(pb: &Pixbuf) -> ksni::Icon {
     let src = pb.read_pixel_bytes();
     let src: &[u8] = src.as_ref();
 
+    // Guard the pixel loop against a malformed pixbuf (#5, defense-in-depth):
+    // the SVGs are baked at build time so this is not expected in practice, but
+    // the indexing trusted `n_ch`/stride verbatim — a non-RGB(A) or truncated
+    // buffer would index out of bounds and panic the tray builder. Require an
+    // RGB or RGBA layout and skip a pixel whose bytes are not all present rather
+    // than crashing.
+    let bytes_per_px = n_ch;
+    let need_alpha_bytes = if has_alpha { 4 } else { 3 };
+    if !(bytes_per_px == 3 || bytes_per_px == 4) {
+        warn!(
+            "pixbuf_to_icon: unsupported {}-channel pixbuf for tray icon, expected 3 or 4",
+            n_ch
+        );
+        return ksni::Icon {
+            width: 0,
+            height: 0,
+            data: Vec::new(),
+        };
+    }
+
     // SNI ARGB32 network byte order: memory layout is [A, R, G, B] per pixel.
     let mut data = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h as usize {
         let row_start = y * stride;
         for x in 0..w as usize {
-            let px = &src[row_start + x * n_ch..];
+            let px_start = row_start + x * bytes_per_px;
+            // Bounds-check this pixel's channel bytes before indexing.
+            let px = match src.get(px_start..px_start + need_alpha_bytes.min(bytes_per_px)) {
+                Some(slice) => slice,
+                None => {
+                    warn!(
+                        "pixbuf_to_icon: truncated pixel buffer at ({x},{y}); skipping rest of icon"
+                    );
+                    break;
+                }
+            };
             let r = px[0];
             let g = px[1];
             let b = px[2];
-            let a = if has_alpha { px[3] } else { 0xFF };
+            let a = if has_alpha && px.len() >= 4 {
+                px[3]
+            } else {
+                0xFF
+            };
             data.push(a);
             data.push(r);
             data.push(g);

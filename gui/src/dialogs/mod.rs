@@ -17,6 +17,9 @@ pub use configuration::{
 };
 pub use credentials::{CredentialField, show_credentials_dialog};
 pub use logs::show_log_viewer;
+/// Re-exported at crate visibility only (clears internal dedup state, not a
+/// public dialog surface). Called from the session lifecycle.
+pub(crate) use notification::clear_notification_dedup;
 pub use notification::{
     show_bypass_active_notification, show_bypass_drift_notification,
     show_bypass_failed_notification, show_bypass_partial_notification,

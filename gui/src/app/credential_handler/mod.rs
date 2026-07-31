@@ -11,7 +11,8 @@ mod retry;
 mod slots;
 
 pub(crate) use retry::{
-    CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, next_attempt, should_retry_auth,
+    CREDENTIAL_ATTEMPTS, MAX_CREDENTIAL_ATTEMPTS, active_attempt_total, next_attempt,
+    should_retry_auth, should_retry_auth_globally,
 };
 
 use std::collections::HashMap;
@@ -104,6 +105,7 @@ pub(crate) async fn request_credentials(
     // *absent* and silently blanked fields.
     resolve_keyring_values(
         &labels_to_try,
+        &slots,
         keyring.as_ref(),
         &cred_store,
         &cred_key,
@@ -239,8 +241,15 @@ fn keyring_unlock_hint(locked: bool) -> &'static str {
 /// labels (e.g. OTP) are skipped. Outcome is classified so a *locked/error*
 /// read never reads as *absent*. Extracted from `request_credentials`'s read
 /// loop. Impure async glue — no unit surface.
+///
+/// `slots` is the live D-Bus queue so the read path applies the **same**
+/// storability policy as the write path: previously it passed a hardcoded
+/// `mask=true`, which made the read side try to prefill any field the server
+/// marked masked — including one-time codes the write side correctly refuses
+/// to store (#14). Now both sides agree through [`slot_mask`].
 async fn resolve_keyring_values(
     labels: &[String],
+    slots: &[(u32, u32, u32, String, bool)],
     keyring: Option<&oo7::Keyring>,
     cred_store: &crate::credentials::CredentialStore,
     cred_key: &str,
@@ -254,7 +263,7 @@ async fn resolve_keyring_values(
         if resolved.contains_key(label) {
             continue;
         }
-        if !is_storable_field(label, true) {
+        if !is_storable_field(label, slot_mask(label, slots)) {
             continue;
         }
         match cred_store
@@ -556,6 +565,17 @@ async fn handle_submit_outcome(
     }
 }
 
+/// Replace control characters in a peer-controlled string before logging it
+/// (#10 / T7, defense-in-depth). Slot labels and error messages come from the
+/// D-Bus queue / daemon reply; a `\n`-bearing label would otherwise forge a
+/// fresh log line. C0 controls → `?`; tabs/spaces kept verbatim so the value
+/// stays readable.
+fn sanitize_for_log(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() && c != ' ' { '?' } else { c })
+        .collect()
+}
+
 /// Submit credentials to all input slots by matching labels, then call Ready() + Connect().
 /// Returns `Ok(true)` if all slots were provided and connection started.
 /// Returns `Ok(false)` if some slots were skipped (empty values) — caller should re-show dialog.
@@ -599,19 +619,34 @@ async fn submit_credentials(
             Ok(()) => {
                 info!(
                     "Provided input for slot '{}' on session {}",
-                    label, session_path
+                    sanitize_for_log(label),
+                    session_path
                 );
             }
             Err(e) => {
-                let err_str = format!("{}", e);
-                if err_str.contains("already-provided") {
-                    info!("Slot '{}' already provided, skipping", label);
-                } else if err_str.contains("User input not required") {
-                    info!("Slot '{}' — session queue reset, aborting", label);
-                    anyhow::bail!("User input not required");
-                } else {
-                    return Err(e.into());
+                // Match on the structured D-Bus error, not a re-formatted Display
+                // (#10 / T7): formatting the whole error and substring-matching it
+                // could swallow an unrelated error whose Display happens to contain
+                // the phrase. Only genuine `MethodError`s from the daemon are
+                // inspected, and we read the structured `detail` arg. Anything else
+                // is a real failure → propagate.
+                if let zbus::Error::MethodError(_name, detail, _reply) = &e {
+                    let d = detail.as_deref().unwrap_or("");
+                    if d.contains("already-provided") {
+                        info!(
+                            "Slot '{}' already provided, skipping",
+                            sanitize_for_log(label)
+                        );
+                        continue;
+                    } else if d.contains("User input not required") {
+                        info!(
+                            "Slot '{}' — session queue reset, aborting",
+                            sanitize_for_log(label)
+                        );
+                        anyhow::bail!("User input not required");
+                    }
                 }
+                return Err(e.into());
             }
         }
     }
@@ -641,7 +676,20 @@ async fn submit_credentials(
 
 #[cfg(test)]
 mod tests {
-    use super::{keyring_unlock_hint, save_failure_hint};
+    use super::{keyring_unlock_hint, sanitize_for_log, save_failure_hint};
+
+    #[test]
+    fn sanitize_for_log_strips_newlines_and_controls() {
+        // A peer-controlled label bearing a newline must not forge a log line.
+        assert_eq!(
+            sanitize_for_log("username\r\n[ERROR] forged"),
+            "username??[ERROR] forged"
+        );
+        assert_eq!(sanitize_for_log("a\tb"), "a?b");
+        assert_eq!(sanitize_for_log("normal label"), "normal label");
+        // Non-control, non-ASCII stays readable.
+        assert_eq!(sanitize_for_log("café"), "café");
+    }
 
     #[test]
     fn save_failure_hint_distinguishes_locked() {

@@ -33,6 +33,13 @@ use export::show_export_dialog;
 use filter::{LoweredQuery, any_passes_filter, level_index_to_min, passes_filter};
 use format::format_log_line;
 
+/// Per-tab entry cap (#2, T4). The global `LOG_BUFFER` is bounded, but each
+/// open tab mirrors its slice into its own `entries` vec and live-tails new
+/// Log signals — without a cap a verbose session made RSS climb for as long
+/// as the viewer stayed open. Matches the global bound; eviction mirrors the
+/// global buffer's drain-10% style so we don't rebuild on every line.
+const MAX_TAB_ENTRIES: usize = 5000;
+
 /// Per-tab state. Holds the full unfiltered entry vec so search/level
 /// changes can rebuild the visible buffer without re-fetching from the
 /// global log buffer. `level_min` is 0 (all), 5 (warn+), or 6 (error).
@@ -327,12 +334,38 @@ fn build_log_viewer(
                                 category,
                                 message: message.to_string(),
                             };
-                            tab.entries.borrow_mut().push(entry.clone());
-                            let query = LoweredQuery::new(&tab.search_text.borrow());
+                            // Cap the per-tab mirror (#2, T4): once full, drain
+                            // the oldest 10% (mirrors the global buffer) so a
+                            // verbose session can't grow RSS while the viewer is
+                            // open. Scoped borrow so the rebuild below can take
+                            // a fresh immutable borrow.
+                            let evicted = {
+                                let mut entries = tab.entries.borrow_mut();
+                                entries.push(entry.clone());
+                                if entries.len() > MAX_TAB_ENTRIES {
+                                    let drain_count = (MAX_TAB_ENTRIES / 10).min(entries.len());
+                                    entries.drain(..drain_count);
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            let search = tab.search_text.borrow();
+                            let query = LoweredQuery::new(&search);
                             let level_min = *tab.level_min.borrow();
-                            if passes_filter(&entry, &query, level_min) {
-                                let mut end_iter = tab.buffer.end_iter();
-                                tab.buffer.insert(&mut end_iter, &line);
+                            let visible = passes_filter(&entry, &query, level_min);
+                            if evicted {
+                                // The TextBuffer still holds the evicted lines;
+                                // re-render from the capped model so the view
+                                // and the vec agree.
+                                let entries_ref = tab.entries.borrow();
+                                rebuild_buffer(&tab.buffer, &entries_ref, &search, level_min);
+                            }
+                            if visible {
+                                if !evicted {
+                                    let mut end_iter = tab.buffer.end_iter();
+                                    tab.buffer.insert(&mut end_iter, &line);
+                                }
                                 tab.text_view.scroll_mark_onscreen(&tab.end_mark);
                                 tab.export_btn.set_sensitive(true);
                             }

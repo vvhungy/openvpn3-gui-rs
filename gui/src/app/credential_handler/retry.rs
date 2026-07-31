@@ -11,6 +11,14 @@ use std::collections::HashMap;
 
 pub(crate) const MAX_CREDENTIAL_ATTEMPTS: u32 = 3;
 
+/// Global cap on auth-retry attempts across **all** configs within the window
+/// (#3, defense-in-depth). The per-config budget is keyed on the peer-assigned
+/// D-Bus object path, which a buggy/malicious daemon could rotate to reset the
+/// budget indefinitely. The daemon is trusted, so this is a backstop — it lets
+/// a few distinct configs fail legitimately (3× the per-config cap) while
+/// bounding a path-rotation storm.
+pub(crate) const MAX_GLOBAL_AUTH_ATTEMPTS: u32 = 9;
+
 /// Auth failures older than this are considered stale and the counter resets.
 pub(crate) const AUTH_RETRY_WINDOW_SECS: u64 = 300; // 5 minutes
 
@@ -80,11 +88,34 @@ pub(crate) fn should_retry_auth(attempt: u32, config_path: &str) -> bool {
     attempt < MAX_CREDENTIAL_ATTEMPTS && !config_path.is_empty()
 }
 
+/// Sum every config's non-stale attempt count (last failure within the window).
+/// Pure over the injected map so the global cap is unit-testable. The per-config
+/// counter is [`next_attempt`]; this is the cross-config aggregate that bounds a
+/// path-rotation attack against [`MAX_GLOBAL_AUTH_ATTEMPTS`] (#3).
+pub(crate) fn active_attempt_total(
+    state: &HashMap<String, AuthAttempt>,
+    now: std::time::Instant,
+) -> u32 {
+    state
+        .values()
+        .filter(|a| {
+            now.saturating_duration_since(a.last_failure).as_secs() <= AUTH_RETRY_WINDOW_SECS
+        })
+        .map(|a| a.count)
+        .sum()
+}
+
+/// Global retry gate (#3): even if a single config is under its per-config
+/// budget, stop auto-retrying once the window-wide total exceeds the global cap.
+pub(crate) fn should_retry_auth_globally(total: u32) -> bool {
+    total < MAX_GLOBAL_AUTH_ATTEMPTS
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_RETRY_WINDOW_SECS, AuthAttempt, MAX_CREDENTIAL_ATTEMPTS, next_attempt,
-        should_retry_auth,
+        AUTH_RETRY_WINDOW_SECS, AuthAttempt, MAX_CREDENTIAL_ATTEMPTS, MAX_GLOBAL_AUTH_ATTEMPTS,
+        next_attempt, should_retry_auth,
     };
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -248,6 +279,50 @@ mod tests {
         // tray, so connect_to_config has no target.
         assert!(!should_retry_auth(1, ""));
         assert!(!should_retry_auth(0, ""));
+    }
+
+    // --- global cap (#3) ---
+
+    #[test]
+    fn active_attempt_total_sums_within_window() {
+        use super::active_attempt_total;
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t0 = Instant::now();
+        next_attempt(&mut state, t0, "a");
+        next_attempt(&mut state, t0, "a");
+        next_attempt(&mut state, t0, "b"); // a=2, b=1 → total 3
+        assert_eq!(active_attempt_total(&state, t0), 3);
+    }
+
+    #[test]
+    fn active_attempt_total_excludes_stale_entries() {
+        use super::active_attempt_total;
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t0 = Instant::now();
+        next_attempt(&mut state, t0, "a");
+        // `a`'s failure is now older than the window → excluded from the total.
+        let stale = t0 + Duration::from_secs(AUTH_RETRY_WINDOW_SECS + 1);
+        next_attempt(&mut state, stale, "b");
+        assert_eq!(active_attempt_total(&state, stale), 1);
+    }
+
+    #[test]
+    fn global_gate_caps_path_rotation() {
+        use super::{active_attempt_total, should_retry_auth_globally};
+        let mut state: HashMap<String, AuthAttempt> = HashMap::new();
+        let t = Instant::now();
+        // Rotate a fresh path each time → each per-config count is 1, but the
+        // window-wide total climbs. Once it reaches the global cap the gate
+        // trips even though every individual config is under its budget.
+        for i in 0..MAX_GLOBAL_AUTH_ATTEMPTS {
+            next_attempt(&mut state, t, &format!("/cfg/{i}"));
+        }
+        assert_eq!(active_attempt_total(&state, t), MAX_GLOBAL_AUTH_ATTEMPTS);
+        assert!(
+            !should_retry_auth_globally(active_attempt_total(&state, t)),
+            "global budget spent → must stop retrying"
+        );
+        assert!(should_retry_auth_globally(MAX_GLOBAL_AUTH_ATTEMPTS - 1));
     }
 
     #[test]
