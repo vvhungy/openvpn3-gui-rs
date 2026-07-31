@@ -77,8 +77,41 @@ jobs:
       - name: Build RPM (helper)
         working-directory: helper
         run: |
+          # Create the output dir ourselves — do not rely on the GUI step having
+          # run first. Without this, `cargo generate-rpm -o <missing-dir>` can
+          # write a single extensionless file instead of erroring, and the glob
+          # below would silently match nothing under a re-ordered/parallel job.
+          mkdir -p ../target/generate-rpm
           cargo generate-rpm -o ../target/generate-rpm
           ls -la ../target/generate-rpm/openvpn3-killswitch-helper-*.rpm
+
+      - name: Verify expected artifacts (fail-closed)
+        run: |
+          # Assert every artifact in the release manifest exists and is
+          # non-empty BEFORE upload. A silent produce-failure (missing dir,
+          # zero-byte file, wrong extension) must surface here — not at the
+          # Release page. Gate F step 8 checks the published Release against
+          # this same list (tasks.md T5 manifest).
+          set -e
+          for pat in \
+            'target/debian/openvpn3-gui-rs_*.deb' \
+            'target/debian/openvpn3-killswitch-helper_*.deb' \
+            'target/generate-rpm/openvpn3-gui-rs-*.rpm' \
+            'target/generate-rpm/openvpn3-killswitch-helper-*.rpm'
+          do
+            matches=$(ls $pat 2>/dev/null || true)
+            if [ -z "$matches" ]; then
+              echo "::error::missing artifact matching: $pat"
+              exit 1
+            fi
+            for m in $matches; do
+              if [ ! -s "$m" ]; then
+                echo "::error::empty (zero-byte) artifact: $m"
+                exit 1
+              fi
+              echo "ok: $m ($(stat -c%s "$m") bytes)"
+            done
+          done
 
       - name: Upload packages
         uses: actions/upload-artifact@v4
