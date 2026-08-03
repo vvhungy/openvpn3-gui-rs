@@ -15,6 +15,14 @@ const IFNAMSIZ_MAX: usize = 15; // Linux IFNAMSIZ - 1 (NUL terminator)
 /// `ip rule` O(n)-per-packet cost knee.
 pub const MAX_BYPASS_CIDRS: usize = 128;
 
+/// Helper-enforced ceiling on the `vpn_server_ips` list accepted by
+/// `AddRules`. Every element is inlined into the nft `ip daddr { … }` accept
+/// set, so an unbounded list means an unbounded generated ruleset from a
+/// single call. Mirrors [`MAX_BYPASS_CIDRS`] — the sibling list argument on
+/// the trust boundary was already capped, this one was not. A real VPN has a
+/// handful of server IPs; 128 is far above any legitimate use.
+pub const MAX_SERVER_IPS: usize = 128;
+
 pub(crate) fn validate_interface(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("interface name empty");
@@ -32,6 +40,13 @@ pub(crate) fn validate_interface(name: &str) -> Result<()> {
 }
 
 pub(crate) fn split_ips(ips: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+    if ips.len() > MAX_SERVER_IPS {
+        bail!(
+            "VPN server IP list too long: {} entries (max {})",
+            ips.len(),
+            MAX_SERVER_IPS
+        );
+    }
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
     for ip in ips {
@@ -192,6 +207,28 @@ mod tests {
         .unwrap();
         assert_eq!(v4, vec!["1.2.3.4", "5.6.7.8"]);
         assert_eq!(v6, vec!["2001:db8::1", "2001:db8::2"]);
+    }
+
+    #[test]
+    fn split_ips_accepts_list_at_the_cap() {
+        // Boundary: exactly MAX_SERVER_IPS is allowed — the guard is `>`, not
+        // `>=`. A false rejection here would break a legitimate multi-server
+        // profile.
+        let at_cap: Vec<String> = (0..MAX_SERVER_IPS)
+            .map(|i| format!("10.{}.{}.1", i / 256, i % 256))
+            .collect();
+        assert!(split_ips(&at_cap).is_ok());
+    }
+
+    #[test]
+    fn split_ips_rejects_list_over_the_cap() {
+        // Every element is inlined into the nft `ip daddr { … }` set, so an
+        // unbounded list is an unbounded ruleset from one D-Bus call. Mirrors
+        // the MAX_BYPASS_CIDRS guard on the sibling list argument.
+        let over_cap: Vec<String> = (0..(MAX_SERVER_IPS + 1))
+            .map(|i| format!("10.{}.{}.1", i / 256, i % 256))
+            .collect();
+        assert!(split_ips(&over_cap).is_err());
     }
 
     #[test]
