@@ -5,10 +5,11 @@
 //! Logs are populated from the global `LogBuffer` (history) and then live-
 //! tailed via a D-Bus `Log` signal subscription.
 //!
-//! No testable pure surface here — pure formatting (`format_log_line`) lives
-//! in the `format` submodule with its own unit tests, and the search/level
-//! filter rules live in the `filter` submodule with its own unit tests. This
-//! file is GTK widget builder + async D-Bus stream wiring.
+//! Pure decision logic — tab-name merge, session-path routing, per-tab
+//! eviction, and the filtered buffer-text build — is extracted into free
+//! functions with their own unit tests (see `mod tests` below). The `format`
+//! and `filter` submodules own their own pure surface + tests. The rest of
+//! this file is GTK widget builder + async D-Bus stream wiring.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -54,14 +55,10 @@ struct TabState {
     export_btn: gtk4::Button,
 }
 
-/// Rebuild the visible TextBuffer from the unfiltered entries vec by
-/// re-applying the current filter. Called on search/level change.
-fn rebuild_buffer(
-    buffer: &gtk4::TextBuffer,
-    entries: &[log_buffer::LogEntry],
-    search: &str,
-    level_min: u32,
-) {
+/// Pure core of [`rebuild_buffer`]: the filtered, formatted text for a buffer
+/// view. Extracted so the filter+format decision (which lines survive the
+/// search/level gates and how they render) is unit-testable without GTK.
+fn filtered_text(entries: &[log_buffer::LogEntry], search: &str, level_min: u32) -> String {
     let mut text = String::new();
     // Lower the search once per rebuild, not once per entry (passes_filter runs
     // inside the loop). The level gate is unaffected by casing.
@@ -71,7 +68,56 @@ fn rebuild_buffer(
             text.push_str(&format_log_line(&e.timestamp, e.category, &e.message));
         }
     }
-    buffer.set_text(&text);
+    text
+}
+
+/// Merge the config-name lists from active tray sessions and the global log
+/// buffer into one sorted, de-duplicated list — the set of tabs to show.
+/// Pure so the merge/dedup (and the empty → no-tabs case) is unit-testable.
+fn merge_config_names(active: &[String], buffered: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = active.to_vec();
+    all.extend_from_slice(buffered);
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// Build the session_path → config_name reverse-lookup used to route live Log
+/// signals to the right tab. Both sources are collected from side effects
+/// (tray + global buffer); the *merge* is pure. Tray pairs are inserted first,
+/// then buffered overwrite on key collision — matching the pre-extraction
+/// order, where an active session's name was the first write but a buffered
+/// entry could replace it.
+fn build_path_map(
+    tray_pairs: &[(String, String)],
+    buffered_pairs: &[(String, String)],
+) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = tray_pairs.iter().cloned().collect();
+    map.extend(buffered_pairs.iter().cloned());
+    map
+}
+
+/// Per-tab mirror eviction decision. Once a tab exceeds `max` entries, return
+/// the count of oldest entries to drop (10% of `max`, capped at the live
+/// length); otherwise `None`. Extracted from the live-tail handler so the
+/// boundary arithmetic is unit-testable at `MAX_TAB_ENTRIES`.
+fn drain_count_for(len: usize, max: usize) -> Option<usize> {
+    if len > max {
+        Some((max / 10).min(len))
+    } else {
+        None
+    }
+}
+
+/// Rebuild the visible TextBuffer from the unfiltered entries vec by
+/// re-applying the current filter. Called on search/level change.
+fn rebuild_buffer(
+    buffer: &gtk4::TextBuffer,
+    entries: &[log_buffer::LogEntry],
+    search: &str,
+    level_min: u32,
+) {
+    buffer.set_text(&filtered_text(entries, search, level_min));
 }
 
 /// Show the tabbed log viewer window.
@@ -130,16 +176,11 @@ fn build_log_viewer(
     };
 
     // Merge and deduplicate
-    let mut all_names: Vec<String> = active_names;
-    all_names.extend(buffered_names);
-    all_names.sort();
-    all_names.dedup();
+    let all_names = merge_config_names(&active_names, &buffered_names);
 
-    // session_path → config_name reverse lookup for live-tail routing
-    let path_to_name: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
-
-    // Populate reverse lookup from tray and buffer
-    let tray_names = tray
+    // session_path → config_name reverse lookup for live-tail routing.
+    // Built from tray + buffer pairs by the pure `build_path_map`.
+    let tray_pairs: Vec<(String, String)> = tray
         .update(|t| {
             t.sessions
                 .values()
@@ -147,12 +188,10 @@ fn build_log_viewer(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    for (sp, cn) in &tray_names {
-        path_to_name.borrow_mut().insert(sp.clone(), cn.clone());
-    }
-    for (sp, cn) in &log_buffer::sessions_with_logs() {
-        path_to_name.borrow_mut().insert(sp.clone(), cn.clone());
-    }
+    let path_to_name: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(build_path_map(
+        &tray_pairs,
+        &log_buffer::sessions_with_logs(),
+    )));
 
     // Tabs keyed by config_name
     let tabs: Rc<RefCell<HashMap<String, TabState>>> = Rc::new(RefCell::new(HashMap::new()));
@@ -342,12 +381,12 @@ fn build_log_viewer(
                             let evicted = {
                                 let mut entries = tab.entries.borrow_mut();
                                 entries.push(entry.clone());
-                                if entries.len() > MAX_TAB_ENTRIES {
-                                    let drain_count = (MAX_TAB_ENTRIES / 10).min(entries.len());
-                                    entries.drain(..drain_count);
-                                    true
-                                } else {
-                                    false
+                                match drain_count_for(entries.len(), MAX_TAB_ENTRIES) {
+                                    Some(count) => {
+                                        entries.drain(..count);
+                                        true
+                                    }
+                                    None => false,
                                 }
                             };
                             let search = tab.search_text.borrow();
@@ -571,5 +610,140 @@ fn create_tab_for_config(config_name: &str) -> TabState {
         search_text,
         level_min,
         export_btn,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_path_map, drain_count_for, filtered_text, merge_config_names};
+    use crate::app::log_buffer;
+
+    fn entry(category: u32, message: &str) -> log_buffer::LogEntry {
+        log_buffer::LogEntry {
+            timestamp: chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            session_path: String::new(),
+            config_name: String::new(),
+            category,
+            message: message.to_string(),
+        }
+    }
+
+    // ---- filtered_text (pure core of rebuild_buffer) ----
+
+    #[test]
+    fn filtered_text_empty_entries_is_empty() {
+        // Empty/default state (I5): no history → no visible text.
+        assert_eq!(filtered_text(&[], "", 0), "");
+    }
+
+    #[test]
+    fn filtered_text_level_gate_drops_below_threshold() {
+        let entries = [entry(6, "boom"), entry(3, "just-info")];
+        // level_min 5 = warn+ → only the category-6 line survives.
+        let out = filtered_text(&entries, "", 5);
+        assert!(out.contains("boom"), "error line kept");
+        assert!(!out.contains("just-info"), "below-threshold line dropped");
+    }
+
+    #[test]
+    fn filtered_text_level_zero_keeps_all() {
+        let entries = [entry(6, "boom"), entry(3, "just-info")];
+        let out = filtered_text(&entries, "", 0);
+        assert!(out.contains("boom") && out.contains("just-info"));
+    }
+
+    #[test]
+    fn filtered_text_search_gate_is_substring_case_insensitive() {
+        let entries = [entry(6, "Connection reset"), entry(3, "all good")];
+        let out = filtered_text(&entries, "CONNECTION", 0);
+        assert!(out.contains("Connection reset"));
+        assert!(!out.contains("all good"));
+    }
+
+    // ---- merge_config_names (tab set) ----
+
+    #[test]
+    fn merge_config_names_both_empty_is_empty() {
+        // Empty/default state (I5): no sessions + no buffered logs → no tabs,
+        // which drives the "No Sessions" placeholder.
+        assert!(merge_config_names(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn merge_config_names_dedups_overlap() {
+        let active = vec!["work".to_string(), "home".to_string()];
+        let buffered = vec!["home".to_string(), "guest".to_string()];
+        assert_eq!(
+            merge_config_names(&active, &buffered),
+            vec!["guest".to_string(), "home".to_string(), "work".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_config_names_one_side_empty() {
+        let active = vec!["only".to_string()];
+        assert_eq!(merge_config_names(&active, &[]), vec!["only".to_string()]);
+        assert_eq!(merge_config_names(&[], &active), vec!["only".to_string()]);
+    }
+
+    // ---- build_path_map (session_path → config_name routing) ----
+
+    #[test]
+    fn build_path_map_merges_both_sources() {
+        let tray = vec![("/p1".to_string(), "A".to_string())];
+        let buffered = vec![("/p2".to_string(), "B".to_string())];
+        let map = build_path_map(&tray, &buffered);
+        assert_eq!(map.get("/p1"), Some(&"A".to_string()));
+        assert_eq!(map.get("/p2"), Some(&"B".to_string()));
+    }
+
+    #[test]
+    fn build_path_map_buffered_overwrites_tray_on_collision() {
+        // Preserves pre-extraction order: tray inserted first, buffered second,
+        // so a buffered entry wins on a shared path key.
+        let tray = vec![("/shared".to_string(), "tray-name".to_string())];
+        let buffered = vec![("/shared".to_string(), "buffered-name".to_string())];
+        let map = build_path_map(&tray, &buffered);
+        assert_eq!(map.get("/shared"), Some(&"buffered-name".to_string()));
+    }
+
+    #[test]
+    fn build_path_map_empty_is_empty() {
+        assert!(build_path_map(&[], &[]).is_empty());
+    }
+
+    // ---- drain_count_for (per-tab eviction at MAX_TAB_ENTRIES) ----
+
+    #[test]
+    fn drain_count_none_at_or_below_cap() {
+        assert_eq!(drain_count_for(5000, 5000), None);
+        assert_eq!(drain_count_for(0, 5000), None);
+        assert_eq!(drain_count_for(4999, 5000), None);
+    }
+
+    #[test]
+    fn drain_count_some_just_over_cap_drops_ten_percent() {
+        // 5001 > 5000 → drain 10% of cap = 500.
+        assert_eq!(drain_count_for(5001, 5000), Some(500));
+    }
+
+    #[test]
+    fn drain_count_ten_percent_of_cap() {
+        // cap 10, one over → drop 1 (10/10).
+        assert_eq!(drain_count_for(11, 10), Some(1));
+    }
+
+    #[test]
+    fn drain_count_degenerate_zero_cap_with_one_over() {
+        // cap 1, len 2: 1/10 = 0 (integer division), min(0, 2) = 0. The guard
+        // trips but drains nothing — degenerate, only reachable with a sub-10
+        // cap which the real MAX_TAB_ENTRIES never is. Documents the floor.
+        assert_eq!(drain_count_for(2, 1), Some(0));
+    }
+
+    #[test]
+    fn drain_count_zero_max_is_degenerate_none() {
+        // A zero cap with zero entries never trips `len > max`, so no eviction.
+        assert_eq!(drain_count_for(0, 0), None);
     }
 }
