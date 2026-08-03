@@ -57,6 +57,17 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.4.6" date="2026-08-03">
+      <description>
+        <p>Internal reliability, testability, and packaging hardening. No user-facing behavior change.</p>
+        <ul>
+          <li>Code structure: split the credential module (717 → 328 lines) into focused keyring and submit submodules, and decomposed the most complex credential-submit path into tested pure helpers — closing its zero-test gap.</li>
+          <li>Testing: the log viewer window's pure logic (tab merging, per-tab eviction at the 5000-entry cap, live-tail routing) is now extracted and unit-tested, including the empty/no-session state; helper address-family classification gained coverage for malformed inputs and the no-partial-install security property. Tests grew from 412 to 441.</li>
+          <li>Security: a dedicated review of the privileged kill-switch helper (runs as root) found and fixed one input-cap asymmetry — the server-IP list is now length-capped like its sibling bypass-CIDR list. Every other surface (no shell, canonicalized nft input, default-deny D-Bus policy) was verified clean.</li>
+          <li>Packaging: the release pipeline now creates its output directory before each RPM build (an ordering bug that silently produced a bad file) and asserts all four expected artifacts exist and are non-empty before publishing.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.5" date="2026-07-31">
       <description>
         <p>Patch release of hardening from a whole-source review: a client-side trust-boundary fix, kill-switch lifecycle resilience, credential + keyring hygiene, memory bounds, and main-loop responsiveness. No behaviour-visible API change.</p>
